@@ -1,0 +1,604 @@
+package main
+
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import "core:thread"
+import "base:runtime"
+
+Id  :: rawptr
+Sel :: rawptr
+
+foreign import objc "system:objc"
+foreign objc {
+	objc_getClass           :: proc "c" (name: cstring) -> Id ---
+	sel_registerName        :: proc "c" (name: cstring) -> Sel ---
+	objc_allocateClassPair  :: proc "c" (superclass: Id, name: cstring, extra: uint) -> Id ---
+	objc_registerClassPair  :: proc "c" (cls: Id) ---
+	class_addMethod         :: proc "c" (cls: Id, name: Sel, imp: rawptr, types: cstring) -> bool ---
+}
+
+foreign import libc "system:System.framework"
+foreign libc {
+	getenv :: proc "c" (name: cstring) -> cstring ---
+}
+
+Point :: struct { x, y: f64 }
+Size  :: struct { width, height: f64 }
+Rect  :: struct { origin: Point, size: Size }
+CMTime :: struct { value: i64, timescale: i32, flags: u32, epoch: i64 }
+
+Source_Video :: struct {
+	id: string,
+	video_id: string,
+	title: string,
+	url: string,
+	media_path: string,
+	duration: f64,
+}
+
+Transcript_Segment :: struct {
+	id: string,
+	source_id: string,
+	start_seconds: f64,
+	duration_seconds: f64,
+	text: string,
+}
+
+Import_Hint :: struct {
+	source_id: string,
+	seconds: f64,
+}
+
+Exercise :: struct {
+	id: string,
+	source_id: string,
+	name: string,
+	start_seconds: f64,
+	end_seconds: f64,
+	clip_path: string,
+}
+
+App_State :: struct {
+	window: Id,
+	url_input: Id,
+	status: Id,
+	player: Id,
+	exercise_name_input: Id,
+	source_search_input: Id,
+	exercise_search_input: Id,
+	delegate_target: Id,
+	active_source: int,
+	range_start: f64,
+	range_end: f64,
+	has_start: bool,
+	has_end: bool,
+	pending_hint: f64,
+	has_pending_hint: bool,
+	sources: [dynamic]Source_Video,
+	segments: [dynamic]Transcript_Segment,
+	hints: [dynamic]Import_Hint,
+	exercises: [dynamic]Exercise,
+}
+
+state: App_State
+send_address: rawptr
+system_address: rawptr
+last_imported_source: int = -1
+import_job_text: string
+import_job_accepted: int
+import_job_failed: int
+import_job_running: bool
+export_job: Exercise
+export_job_running: bool
+export_job_preview: bool
+export_job_success: bool
+
+msg_id :: proc(receiver: Id, selector: Sel) -> Id {
+	p := transmute(proc "c" (Id, Sel) -> Id)send_address
+	return p(receiver, selector)
+}
+msg_void :: proc(receiver: Id, selector: Sel) {
+	p := transmute(proc "c" (Id, Sel))send_address
+	p(receiver, selector)
+}
+msg_id_id :: proc(receiver: Id, selector: Sel, a: Id) -> Id {
+	p := transmute(proc "c" (Id, Sel, Id) -> Id)send_address
+	return p(receiver, selector, a)
+}
+msg_void_id :: proc(receiver: Id, selector: Sel, a: Id) {
+	p := transmute(proc "c" (Id, Sel, Id))send_address
+	p(receiver, selector, a)
+}
+msg_void_i :: proc(receiver: Id, selector: Sel, a: int) {
+	p := transmute(proc "c" (Id, Sel, int))send_address
+	p(receiver, selector, a)
+}
+msg_uint :: proc(receiver: Id, selector: Sel) -> uint {
+	p := transmute(proc "c" (Id, Sel) -> uint)send_address
+	return p(receiver, selector)
+}
+msg_id_uint :: proc(receiver: Id, selector: Sel, a: uint) -> Id {
+	p := transmute(proc "c" (Id, Sel, uint) -> Id)send_address
+	return p(receiver, selector, a)
+}
+msg_id_id_id :: proc(receiver: Id, selector: Sel, a, b: Id) -> Id {
+	p := transmute(proc "c" (Id, Sel, Id, Id) -> Id)send_address
+	return p(receiver, selector, a, b)
+}
+msg_f64 :: proc(receiver: Id, selector: Sel) -> f64 {
+	p := transmute(proc "c" (Id, Sel) -> f64)send_address
+	return p(receiver, selector)
+}
+msg_f32 :: proc(receiver: Id, selector: Sel) -> f32 {
+	p := transmute(proc "c" (Id, Sel) -> f32)send_address
+	return p(receiver, selector)
+}
+msg_id_rect :: proc(receiver: Id, selector: Sel, rect: Rect) -> Id {
+	p := transmute(proc "c" (Id, Sel, Rect) -> Id)send_address
+	return p(receiver, selector, rect)
+}
+msg_void_rect :: proc(receiver: Id, selector: Sel, rect: Rect) {
+	p := transmute(proc "c" (Id, Sel, Rect))send_address
+	p(receiver, selector, rect)
+}
+msg_rect :: proc(receiver: Id, selector: Sel) -> Rect {
+	p := transmute(proc "c" (Id, Sel) -> Rect)send_address
+	return p(receiver, selector)
+}
+msg_void_rect_b :: proc(receiver: Id, selector: Sel, rect: Rect, value: bool) {
+	p := transmute(proc "c" (Id, Sel, Rect, bool))send_address
+	p(receiver, selector, rect, value)
+}
+msg_id_rect_u_u_b :: proc(receiver: Id, selector: Sel, rect: Rect, style, backing: uint, defer_window: bool) -> Id {
+	p := transmute(proc "c" (Id, Sel, Rect, uint, uint, bool) -> Id)send_address
+	return p(receiver, selector, rect, style, backing, defer_window)
+}
+msg_time :: proc(receiver: Id, selector: Sel) -> CMTime {
+	p := transmute(proc "c" (Id, Sel) -> CMTime)send_address
+	return p(receiver, selector)
+}
+msg_void_time :: proc(receiver: Id, selector: Sel, value: CMTime) {
+	p := transmute(proc "c" (Id, Sel, CMTime))send_address
+	p(receiver, selector, value)
+}
+msg_void_sel_id_b :: proc(receiver: Id, selector: Sel, action: Sel, object: Id, wait: bool) {
+	p := transmute(proc "c" (Id, Sel, Sel, Id, bool))send_address
+	p(receiver, selector, action, object, wait)
+}
+
+nsstring :: proc(s: string) -> Id {
+	cls := objc_getClass("NSString")
+	c_text := strings.clone_to_cstring(s)
+	defer delete(c_text)
+	return msg_id_id(cls, sel_registerName("stringWithUTF8String:"), rawptr(c_text))
+}
+
+set_text :: proc(control: Id, text: string) {
+	if control == state.status {
+		ui_set_string(&ui.status, text)
+		ui.needs_redraw = true
+		return
+	}
+	if control == state.exercise_name_input {
+		ui_set_string(&ui.exercise_name, text)
+		ui.needs_redraw = true
+		return
+	}
+	msg_void_id(control, sel_registerName("setStringValue:"), nsstring(text))
+}
+
+field_text :: proc(control: Id) -> string {
+	if control == nil { return "" }
+	if control == state.url_input { return ui.url_input }
+	if control == state.source_search_input { return ui.source_search }
+	if control == state.exercise_search_input { return ui.exercise_search }
+	if control == state.exercise_name_input { return ui.exercise_name }
+	value := msg_id(control, sel_registerName("stringValue"))
+	utf8 := msg_id(value, sel_registerName("UTF8String"))
+	if utf8 == nil { return "" }
+	return string(cstring(utf8))
+}
+
+timestamp_seconds :: proc(value: string) -> (f64, bool) {
+	if len(value) == 0 { return 0, false }
+	total: f64
+	number: f64
+	found := false
+	for c in value {
+		if c >= '0' && c <= '9' {
+			number = number*10 + f64(c-'0')
+			found = true
+		} else if c == 'h' {
+			total += number*3600; number = 0
+		} else if c == 'm' {
+			total += number*60; number = 0
+		} else if c == 's' {
+			total += number; number = 0
+		} else { break }
+	}
+	return total+number, found
+}
+
+parse_video_id :: proc(url: string) -> (string, bool) {
+	if i := strings.index(url, "youtu.be/"); i >= 0 {
+		v := url[i+len("youtu.be/"):]
+		if e := strings.index_any(v, "?&#"); e >= 0 { v = v[:e] }
+		return v, len(v) > 0
+	}
+	if i := strings.index(url, "v="); i >= 0 {
+		v := url[i+2:]
+		if e := strings.index_any(v, "&#"); e >= 0 { v = v[:e] }
+		return v, len(v) > 0
+	}
+	return "", false
+}
+
+parse_timestamp :: proc(url: string) -> (f64, bool) {
+	keys := [2]string{"t=", "start="}
+	for key in keys {
+		if i := strings.index(url, key); i >= 0 {
+			v := url[i+len(key):]
+			if e := strings.index_any(v, "&#"); e >= 0 { v = v[:e] }
+			return timestamp_seconds(v)
+		}
+	}
+	return 0, false
+}
+
+shell_quote :: proc(s: string) -> string {
+	escaped, _ := strings.replace_all(s, "'", "'\\''")
+	return fmt.tprintf("'%s'", escaped)
+}
+
+app_support_dir :: proc() -> string {
+	home := getenv("HOME")
+	return fmt.tprintf("%s/Library/Application Support/VocalTraining", string(home))
+}
+
+diagnostic_log_path :: proc(name: string) -> string {
+	return fmt.tprintf("%s/%s.log", app_support_dir(), name)
+}
+
+youtube_download_command :: proc(url, output, log_path: string) -> string {
+	return fmt.tprintf("yt-dlp --no-playlist --write-info-json --write-subs --write-auto-subs --sub-langs 'en,.*-orig' --sub-format json3 -S ext:mp4:m4a --recode-video mp4 -o %s %s >> %s 2>&1", shell_quote(output), shell_quote(url), shell_quote(log_path))
+}
+
+clip_export_command :: proc(source_path, clip_path: string, start_seconds, end_seconds: f64) -> string {
+	return fmt.tprintf("ffmpeg -y -loglevel error -ss %.3f -i %s -t %.3f -c:v libx264 -c:a aac -movflags +faststart %s >> %s 2>&1", start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(diagnostic_log_path("ffmpeg")))
+}
+
+import_url :: proc(url: string) -> bool {
+	video_id, ok := parse_video_id(url)
+	if !ok { return false }
+	for source, index in state.sources {
+		if source.video_id == video_id {
+			last_imported_source = index
+			if seconds, has_time := parse_timestamp(url); has_time {
+				duplicate := false
+				for hint in state.hints { if hint.source_id == source.id && hint.seconds == seconds { duplicate = true; break } }
+				if !duplicate { append(&state.hints, Import_Hint{source_id=strings.clone(source.id), seconds=seconds}) }
+				state.pending_hint, state.has_pending_hint = seconds, true
+			}
+			return true
+		}
+	}
+	dir := app_support_dir()
+	os.make_directory(dir)
+	os.make_directory(fmt.tprintf("%s/sources", dir))
+	output := fmt.tprintf("%s/sources/%s.%%(ext)s", dir, video_id)
+	command := youtube_download_command(url, output, diagnostic_log_path("yt-dlp"))
+	c_command := strings.clone_to_cstring(command)
+	defer delete(c_command)
+	run := transmute(proc "c" (cstring) -> int)system_address
+	result := run(c_command)
+	if result != 0 { return false }
+	id_copy := strings.clone(video_id)
+	url_copy := strings.clone(url)
+	append(&state.sources, Source_Video{id=id_copy, video_id=strings.clone(video_id), title=strings.clone(video_id), url=url_copy, media_path=fmt.tprintf("%s/sources/%s.mp4", dir, video_id)})
+	last_imported_source = len(state.sources)-1
+	if metadata, loaded := load_download_metadata(video_id); loaded {
+		state.sources[len(state.sources)-1].title = strings.clone(metadata.title)
+		state.sources[len(state.sources)-1].duration = metadata.duration
+		delete(metadata.title)
+	}
+	if seconds, has_time := parse_timestamp(url); has_time {
+		append(&state.hints, Import_Hint{source_id=strings.clone(video_id), seconds=seconds})
+		state.pending_hint, state.has_pending_hint = seconds, true
+	}
+	load_youtube_transcript(&state.sources[len(state.sources)-1])
+	return true
+}
+
+helper_available :: proc(name: string) -> bool {
+	command := fmt.tprintf("command -v %s >/dev/null 2>&1", name)
+	c_command := strings.clone_to_cstring(command)
+	defer delete(c_command)
+	run := transmute(proc "c" (cstring) -> int)system_address
+	return run(c_command) == 0
+}
+
+configure_helper_path :: proc() {
+	current := getenv("PATH")
+	updated := fmt.tprintf("/opt/homebrew/bin:/usr/local/bin:%s", string(current))
+	os.set_env("PATH", updated)
+}
+
+current_seconds :: proc() -> (f64, bool) {
+	if state.player == nil { return 0, false }
+	t := msg_time(state.player, sel_registerName("currentTime"))
+	if t.timescale == 0 { return 0, false }
+	return f64(t.value)/f64(t.timescale), true
+}
+
+valid_exercise_range :: proc(start, end, source_duration: f64) -> bool {
+	return start >= 0 && end > start && (source_duration <= 0 || end <= source_duration)
+}
+
+seek_seconds :: proc(seconds: f64) {
+	if state.player == nil { return }
+	t := CMTime{value=i64(seconds*600), timescale=600, flags=1}
+	msg_void_time(state.player, sel_registerName("seekToTime:"), t)
+}
+
+load_source_player :: proc(index: int) {
+	if index < 0 || index >= len(state.sources) { return }
+	state.active_source = index
+	path := state.sources[index].media_path
+	metal_player_load(path)
+	state.has_start, state.has_end = false, false
+	set_text(state.exercise_name_input, "")
+	if state.has_pending_hint {
+		seek_seconds(state.pending_hint)
+		state.has_pending_hint = false
+	} else {
+		for i := len(state.hints)-1; i >= 0; i -= 1 {
+			if state.hints[i].source_id == state.sources[index].id { seek_seconds(state.hints[i].seconds); break }
+		}
+	}
+	refresh_transcript()
+}
+
+refresh_transcript :: proc() {
+	ui.transcript_scroll = 0
+	ui.needs_redraw = true
+}
+
+refresh_sources :: proc() {
+	ui.needs_redraw = true
+}
+
+refresh_exercises :: proc() {
+	ui.needs_redraw = true
+}
+
+on_transcribe :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	if state.active_source < 0 { set_text(state.status, "Import or select a source first"); return }
+	source := &state.sources[state.active_source]
+	count := load_youtube_transcript(source)
+	refresh_transcript()
+	if count > 0 { set_text(state.status, fmt.tprintf("Loaded %d YouTube caption segment(s)", count)) }
+	else { set_text(state.status, "No YouTube caption track was downloaded for this video") }
+}
+
+on_seek_transcript :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	tag := msg_uint(sender, sel_registerName("tag"))
+	seek_seconds(f64(tag)/1000)
+}
+
+export_exercise :: proc(exercise: ^Exercise) -> bool {
+	source: ^Source_Video
+	for &candidate in state.sources { if candidate.id == exercise.source_id { source = &candidate; break } }
+	if source == nil { return false }
+	dir := app_support_dir()
+	os.make_directory(fmt.tprintf("%s/clips", dir))
+	exercise.clip_path = fmt.tprintf("%s/clips/%s.mp4", dir, exercise.id)
+	command := clip_export_command(source.media_path, exercise.clip_path, exercise.start_seconds, exercise.end_seconds)
+	c_command := strings.clone_to_cstring(command)
+	defer delete(c_command)
+	run := transmute(proc "c" (cstring) -> int)system_address
+	return run(c_command) == 0
+}
+
+import_worker :: proc() {
+	context = runtime.default_context()
+	import_job_accepted, import_job_failed = 0, 0
+	for raw in strings.split_lines(import_job_text) {
+		url := strings.trim_space(raw)
+		if len(url) == 0 { continue }
+		if import_url(url) { import_job_accepted += 1 } else { import_job_failed += 1 }
+	}
+	msg_void_sel_id_b(state.delegate_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("importFinished:"), nil, false)
+}
+
+on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	if import_job_accepted > 0 {
+		load_source_player(last_imported_source)
+		save_library()
+		refresh_sources()
+	}
+	if import_job_failed > 0 {
+		set_text(state.status, fmt.tprintf("Imported %d; %d failed. Log: %s", import_job_accepted, import_job_failed, diagnostic_log_path("yt-dlp")))
+	} else {
+		set_text(state.status, fmt.tprintf("Imported %d source(s)", import_job_accepted))
+	}
+	delete(import_job_text)
+	import_job_text = ""
+	import_job_running = false
+}
+
+on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	if import_job_running { set_text(state.status, "An import is already running"); return }
+	if !helper_available("yt-dlp") { set_text(state.status, "yt-dlp is missing; install it with: brew install yt-dlp"); return }
+	input := strings.trim_space(field_text(state.url_input))
+	if len(input) == 0 { set_text(state.status, "Paste at least one YouTube URL"); return }
+	import_job_text = strings.clone(input)
+	import_job_running = true
+	os.make_directory(app_support_dir())
+	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
+	set_text(state.status, "Downloading video and YouTube captions...")
+	thread.run(import_worker)
+}
+
+on_set_start :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	if seconds, ok := current_seconds(); ok {
+		state.range_start, state.has_start = seconds, true
+		set_text(state.status, fmt.tprintf("Start: %.2f seconds", seconds))
+	} else { set_text(state.status, "No active source player") }
+}
+
+on_set_end :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	if seconds, ok := current_seconds(); ok {
+		state.range_end, state.has_end = seconds, true
+		set_text(state.status, fmt.tprintf("Range: %.2f - %.2f seconds", state.range_start, seconds))
+	} else { set_text(state.status, "No active source player") }
+}
+
+on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	if export_job_running { set_text(state.status, "A clip export is already running"); return }
+	if !helper_available("ffmpeg") { set_text(state.status, "ffmpeg is missing; install it with: brew install ffmpeg"); return }
+	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_exercise_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
+		set_text(state.status, "Select a source and mark a valid start/end range")
+		return
+	}
+	source := &state.sources[state.active_source]
+	number := 1
+	for exercise in state.exercises { if exercise.source_id == source.id { number += 1 } }
+	id := fmt.tprintf("%s-%d", source.video_id, number)
+	name := fmt.tprintf("%s Exercise %d", source.title, number)
+	entered := strings.trim_space(field_text(state.exercise_name_input))
+	if len(entered) > 0 { name = strings.clone(entered) }
+	export_job = Exercise{id=id, source_id=strings.clone(source.id), name=name, start_seconds=state.range_start, end_seconds=state.range_end}
+	export_job_preview = false
+	export_job_running = true
+	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
+	set_text(state.status, "Exporting exercise clip...")
+	thread.run(export_worker)
+}
+
+on_play :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	if state.player != nil { msg_void(state.player, sel_registerName("play")) }
+}
+
+on_pause :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	if state.player != nil { msg_void(state.player, sel_registerName("pause")) }
+}
+
+on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
+	context = runtime.default_context()
+	if state.player == nil { return }
+	if msg_f32(state.player, sel_registerName("rate")) > 0 {
+		msg_void(state.player, sel_registerName("pause"))
+	} else {
+		msg_void(state.player, sel_registerName("play"))
+	}
+}
+
+on_preview :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	if export_job_running { set_text(state.status, "A clip export is already running"); return }
+	if !helper_available("ffmpeg") { set_text(state.status, "ffmpeg is missing; install it with: brew install ffmpeg"); return }
+	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_exercise_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
+		set_text(state.status, "Mark a valid start and end before previewing")
+		return
+	}
+	source := &state.sources[state.active_source]
+	export_job = Exercise{id="preview", source_id=source.id, name="Range Preview", start_seconds=state.range_start, end_seconds=state.range_end}
+	export_job_preview = true
+	export_job_running = true
+	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
+	set_text(state.status, "Preparing range preview...")
+	thread.run(export_worker)
+}
+
+export_worker :: proc() {
+	context = runtime.default_context()
+	export_job_success = export_exercise(&export_job)
+	msg_void_sel_id_b(state.delegate_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("exportFinished:"), nil, false)
+}
+
+on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	export_job_running = false
+	if !export_job_success { set_text(state.status, fmt.tprintf("ffmpeg failed; details: %s", diagnostic_log_path("ffmpeg"))); return }
+	if export_job_preview {
+		metal_player_load(export_job.clip_path)
+		msg_void(state.player, sel_registerName("play"))
+		set_text(state.status, fmt.tprintf("Previewing %.2f seconds", export_job.end_seconds-export_job.start_seconds))
+		return
+	}
+	append(&state.exercises, export_job)
+	save_library()
+	refresh_exercises()
+	set_text(state.status, fmt.tprintf("Saved %s (%.2f seconds)", export_job.name, export_job.end_seconds-export_job.start_seconds))
+}
+
+on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	index := ui_event_tag
+	if sender != nil { index = int(msg_uint(sender, sel_registerName("tag"))) }
+	load_source_player(index)
+	set_text(state.status, fmt.tprintf("Loaded %s", state.sources[index].title))
+}
+
+on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	index := ui_event_tag
+	if sender != nil { index = int(msg_uint(sender, sel_registerName("tag"))) }
+	if index < 0 || index >= len(state.exercises) { return }
+	exercise := &state.exercises[index]
+	if !os.exists(exercise.clip_path) { set_text(state.status, "The exported clip file is missing"); return }
+	metal_player_load(exercise.clip_path)
+	msg_void(state.player, sel_registerName("play"))
+	set_text(state.status, fmt.tprintf("Playing %s", exercise.name))
+}
+
+on_filter_lists :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	refresh_sources()
+	refresh_exercises()
+}
+
+should_terminate_after_window_close :: proc "c" (self: Id, command: Sel, sender: Id) -> bool {
+	return true
+}
+
+on_open_data_folder :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	os.make_directory(app_support_dir())
+	url := msg_id_id(objc_getClass("NSURL"), sel_registerName("fileURLWithPath:"), nsstring(app_support_dir()))
+	workspace := msg_id(objc_getClass("NSWorkspace"), sel_registerName("sharedWorkspace"))
+	msg_void_id(workspace, sel_registerName("openURL:"), url)
+}
+
+main :: proc() {
+	configure_helper_path()
+	objc_handle := os.dlopen("/usr/lib/libobjc.A.dylib", os.RTLD_NOW)
+	send_address = os.dlsym(objc_handle, "objc_msgSend")
+	if send_address == nil { fmt.eprintln("Unable to resolve objc_msgSend"); return }
+	libsystem_handle := os.dlopen("/usr/lib/libSystem.B.dylib", os.RTLD_NOW)
+	system_address = os.dlsym(libsystem_handle, "system")
+	if system_address == nil { fmt.eprintln("Unable to resolve system"); return }
+	state.active_source = -1
+	load_library()
+	if len(os.args) == 3 && os.args[1] == "--import" {
+		if import_url(os.args[2]) && save_library() {
+			fmt.println("Imported source, YouTube captions, and timestamp hint")
+			return
+		}
+		fmt.eprintln("Import failed; inspect", diagnostic_log_path("yt-dlp"))
+		return
+	}
+	pool := msg_id(objc_getClass("NSAutoreleasePool"), sel_registerName("new"))
+	build_metal_window()
+	msg_void(pool, sel_registerName("drain"))
+}
