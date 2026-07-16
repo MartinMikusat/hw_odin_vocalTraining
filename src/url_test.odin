@@ -178,3 +178,18 @@ metal_ui_content_regions_exclude_headers_and_fields_test :: proc(t: ^testing.T) 
 metal_ui_typography_uses_two_to_one_scale_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, TITLE_FONT_SIZE, SMALL_FONT_SIZE*2)
 }
+
+@(test)
+metal_ui_text_origin_uses_run_metrics_and_container_rect_test :: proc(t: ^testing.T) {
+	old_scale := ui.scale
+	defer { ui.scale = old_scale }
+	ui.scale = 1
+	run := Text_Run{advance=40,ascent=8,descent=2}
+	rect := UI_Rect{10,20,100,30}
+	center := text_origin(rect, run, .Center, .Center)
+	testing.expect_value(t, center.x, 40)
+	testing.expect_value(t, center.y, 32)
+	end := text_origin(rect, run, .End, .End, 5)
+	testing.expect_value(t, end.x, 65)
+	testing.expect_value(t, end.y, 37)
+}

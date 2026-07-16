@@ -22,7 +22,10 @@ declared width. Keep the heading text origin, declared width, and border gap
 paired when applying this treatment to another field.
 
 Typography uses two sizes: 10.5 points throughout the interface and 21 points
-for the `VOCAL TRAINING / SIGNAL WORKBENCH` title only.
+for the `VOCAL TRAINING / SIGNAL WORKBENCH` title and `EXECUTE` action.
+Container text is positioned from measured glyph-run advances and font
+ascent/descent metrics, using start, center, or end alignment relative to each
+destination rectangle.
 
 When no text field has focus, press **Space** to toggle playback or **1–8** to
 activate the matching numbered transport control.
