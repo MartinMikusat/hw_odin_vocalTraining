@@ -1,40 +1,65 @@
 # Vocal Training
 
-An Apple Silicon macOS application written in Odin. A thin AppKit shell creates
-the application window and forwards input, while Odin lays out every visible
-control and Metal renders the complete interface through one `CAMetalLayer`.
-CoreText rasterizes the text overlay, and AVFoundation supplies decoded video
-frames that Core Video maps into Metal textures. `yt-dlp` downloads YouTube
-video metadata and timed captions and `ffmpeg` exports clips.
-Import prefers an English caption track when available and otherwise accepts
-YouTube's original-language automatic caption track.
+An Apple Silicon macOS application for turning sections of YouTube vocal
+lessons into reusable practice exercises.
 
-## Interface
+## AI-assisted development disclosure
 
-The interface uses the installed Berkeley Mono variable font and treats the
-window as one technical instrument rather than a collection of native widgets.
-The source register, video monitor, timed transcript, exercise bank, command
-line, and transport rail share a measured grid.
+**This application was built using GPT-5.6-Sol.**
 
-The command field uses a reusable segmented-border heading: the box's top
-border stops eight points before the heading and resumes eight points after its
-declared width. Keep the heading text origin, declared width, and border gap
-paired when applying this treatment to another field.
+## User guide
 
-Typography uses two sizes: 10.5 points throughout the interface and 21 points
-for the `VOCAL TRAINING / SIGNAL WORKBENCH` title and `EXECUTE` action.
-Container text is positioned from measured glyph-run advances and font
-ascent/descent metrics, using start, center, or end alignment relative to each
-destination rectangle.
+### Requirements
 
-When no text field has focus, press **Space** to toggle playback or **1–8** to
-activate the matching numbered transport control.
-
-## Prerequisites
+Install the media tools:
 
 ```sh
 brew install yt-dlp ffmpeg
 ```
+
+The application stores its library in
+`~/Library/Application Support/VocalTraining`. Only download media you are
+authorized to download.
+
+### Workflow
+
+Paste one or more YouTube URLs into the command field and press **Execute**.
+URLs are normalized by video ID, while timestamps supplied through `t`,
+`start`, or `youtu.be` URL forms become initial playhead hints. Import prefers
+an English caption track and otherwise accepts YouTube's original-language
+automatic captions.
+
+Select a source, load its captions, and click a timed transcript row to seek.
+Mark the start and end of a useful section, then commit the range as an
+exercise. Saved exercises appear in the exercise bank and play as standalone
+clips when selected.
+
+When no text field has focus, press **Space** to toggle playback or **1–8** to
+activate the matching numbered transport control.
+
+Download and export diagnostics are stored as `yt-dlp.log` and `ffmpeg.log` in
+the application-support directory. Use the **Data** control to open that
+directory in Finder.
+
+## Development guide
+
+### Architecture
+
+A thin AppKit shell creates the window and forwards input. Odin calculates
+every visible control, while Metal renders the interface through one
+`CAMetalLayer`. CoreText rasterizes the text overlay, AVFoundation decodes
+video, and Core Video maps decoded frames into Metal textures.
+
+The interface uses Berkeley Mono and a measured immediate-mode layout.
+Typography uses 10.5 points throughout the interface and 21 points for the
+`VOCAL TRAINING / SIGNAL WORKBENCH` title and `EXECUTE` action. Container text
+is positioned from measured glyph-run advances and font ascent/descent metrics.
+
+The command field uses a segmented-border heading. Its top border stops eight
+points before the heading and resumes eight points after the declared heading
+width; the text origin, width, and border gap remain paired.
+
+### Build
 
 Install Odin and ensure `odin` is on `PATH`, then build with:
 
@@ -49,7 +74,7 @@ The same binary supports scripted imports for diagnostics:
 build/VocalTraining.app/Contents/MacOS/VocalTraining --import 'https://youtu.be/VIDEO_ID?t=SECONDS'
 ```
 
-## Development reload loop
+### Reload loop
 
 Run the dependency-free watcher during development:
 
@@ -61,22 +86,3 @@ It fingerprints `src/*.odin`, `build.sh`, and `Info.plist` every half-second.
 A successful change rebuilds and relaunches the app; a failed build leaves the
 currently running app untouched. Press `Ctrl-C` to stop the watcher and app.
 Library data remains in Application Support across relaunches.
-
-The application stores its working data in
-`~/Library/Application Support/VocalTraining`. Only download media you are
-authorized to download.
-
-## Current workflow
-
-Paste one or more YouTube URLs into the import field and press **Import**. URLs
-are normalized by video ID, and `t`, `start`, or `youtu.be` timestamp forms are
-retained as initial playhead hints. Imported media and metadata are written to
-the application-support directory. The app exposes source, transcript, range,
-and exercise-library panes. Select a source, press **Load Captions**, click timed
-transcript rows to seek, capture start and end positions, then save the range.
-The generated exercise appears in the right sidebar and plays as a standalone
-clip when selected.
-
-Download and export diagnostics are stored as `yt-dlp.log` and `ffmpeg.log` in
-the application-support directory. Use **Data Folder** in the app to open that
-directory in Finder.
