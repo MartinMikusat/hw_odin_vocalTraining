@@ -129,7 +129,7 @@ terminal_layout_stays_partitioned_at_minimum_size_test :: proc(t: ^testing.T) {
 
 @(test)
 terminal_control_rail_fills_width_without_overlap_test :: proc(t: ^testing.T) {
-	controls := UI_Rect{18,42,1064,42}
+	controls := UI_Rect{18,42,1064,28}
 	previous := control_rect(controls, 0)
 	for index in 1..<8 {
 		current := control_rect(controls, index)
@@ -137,4 +137,44 @@ terminal_control_rail_fills_width_without_overlap_test :: proc(t: ^testing.T) {
 		previous = current
 	}
 	testing.expect(t, previous.x+previous.w <= controls.x+controls.w)
+}
+
+@(test)
+metal_ui_scroll_moves_toward_later_rows_and_stays_bounded_test :: proc(t: ^testing.T) {
+	offset := bounded_scroll(0, -24, 20, 25, 26, 100)
+	testing.expect_value(t, offset, 24)
+	testing.expect_value(t, bounded_scroll(offset, 100, 20, 25, 26, 100), 0)
+	testing.expect_value(t, bounded_scroll(0, -1000, 5, 25, 26, 100), 29)
+	testing.expect_value(t, bounded_scroll(20, -20, 2, 25, 26, 100), 0)
+}
+
+@(test)
+metal_ui_content_regions_exclude_headers_and_fields_test :: proc(t: ^testing.T) {
+	source_panel := UI_Rect{18, 116, 280, 500}
+	source_search := UI_Rect{26, 544, 264, 28}
+	source_content := source_content_rect(source_search, source_panel)
+	testing.expect(t, source_content.y > source_panel.y)
+	testing.expect(t, source_content.y+source_content.h < source_search.y)
+
+	transcript := UI_Rect{308, 116, 480, 180}
+	transcript_content := transcript_content_rect(transcript)
+	testing.expect(t, transcript_content.y > transcript.y)
+	testing.expect(t, transcript_content.y+transcript_content.h < transcript.y+transcript.h)
+
+	player := UI_Rect{308, 306, 480, 310}
+	player_content := player_content_rect(player)
+	testing.expect(t, player_content.y > player.y)
+	testing.expect(t, player_content.y+player_content.h < player.y+player.h)
+
+	exercise_panel := UI_Rect{798, 116, 284, 500}
+	exercise_search := UI_Rect{806, 544, 268, 28}
+	exercise_name := UI_Rect{806, 124, 268, 30}
+	exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+	testing.expect(t, exercise_content.y > exercise_name.y+exercise_name.h)
+	testing.expect(t, exercise_content.y+exercise_content.h < exercise_search.y)
+}
+
+@(test)
+metal_ui_typography_uses_two_to_one_scale_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, TITLE_FONT_SIZE, SMALL_FONT_SIZE*2)
 }

@@ -17,6 +17,9 @@ foreign core_graphics {
 	CGContextRelease            :: proc "c" (ctx: rawptr) ---
 	CGContextClearRect          :: proc "c" (ctx: rawptr, rect: Rect) ---
 	CGContextSetRGBFillColor    :: proc "c" (ctx: rawptr, red, green, blue, alpha: f64) ---
+	CGContextSaveGState         :: proc "c" (ctx: rawptr) ---
+	CGContextRestoreGState      :: proc "c" (ctx: rawptr) ---
+	CGContextClipToRect         :: proc "c" (ctx: rawptr, rect: Rect) ---
 }
 
 foreign import core_text "system:CoreText.framework"
@@ -57,7 +60,6 @@ UI_State :: struct {
 	queue: Id,
 	solid_pipeline: Id,
 	texture_pipeline: Id,
-	effect_pipeline: Id,
 	text_texture: Id,
 	text_width: uint,
 	text_height: uint,
@@ -82,8 +84,6 @@ UI_State :: struct {
 	exercise_scroll: f64,
 	marked_text: string,
 	has_marked_text: bool,
-	frame_time: f32,
-	last_clock_tick: int,
 	needs_redraw: bool,
 }
 
@@ -95,7 +95,9 @@ MTL_Origin :: struct { x, y, z: uint }
 MTL_Size :: struct { width, height, depth: uint }
 MTL_Region :: struct { origin: MTL_Origin, size: MTL_Size }
 NS_Range :: struct { location, length: uint }
-Effect_Uniforms :: struct { width, height, time, intensity: f32 }
+
+SMALL_FONT_SIZE :: 10.5
+TITLE_FONT_SIZE :: SMALL_FONT_SIZE*2
 
 AX_Kind :: enum {
 	URL,
@@ -301,7 +303,7 @@ layout_rects :: proc() -> (
 	player_h := max(180, body_h*0.55)
 	player = UI_Rect{center_x, body_top-player_h, center_w, player_h}
 	transcript = UI_Rect{center_x, body_y, center_w, max(80, body_h-player_h-gap)}
-	controls = UI_Rect{margin, 42, w-margin*2, 42}
+	controls = UI_Rect{margin, 42, w-margin*2, 28}
 	return
 }
 
@@ -309,6 +311,79 @@ control_rect :: proc(controls: UI_Rect, index: int) -> UI_Rect {
 	gap := 6.0
 	cell_w := (controls.w-gap*7)/8
 	return UI_Rect{controls.x+f64(index)*(cell_w+gap), controls.y, cell_w, controls.h}
+}
+
+source_content_rect :: proc(source_search, source_panel: UI_Rect) -> UI_Rect {
+	top := source_search.y-8
+	return UI_Rect{source_panel.x+6, source_panel.y+8, source_panel.w-12, max(0, top-source_panel.y-8)}
+}
+
+transcript_content_rect :: proc(transcript: UI_Rect) -> UI_Rect {
+	return UI_Rect{transcript.x+6, transcript.y+8, transcript.w-12, max(0, transcript.h-50)}
+}
+
+player_content_rect :: proc(player: UI_Rect) -> UI_Rect {
+	bottom_metadata_height := 30.0
+	header_height := 35.0
+	return UI_Rect{
+		player.x+1,
+		player.y+bottom_metadata_height,
+		max(0, player.w-2),
+		max(0, player.h-bottom_metadata_height-header_height-1),
+	}
+}
+
+exercise_content_rect :: proc(exercise_search, exercise_panel, exercise_name: UI_Rect) -> UI_Rect {
+	bottom := exercise_name.y+exercise_name.h+8
+	top := exercise_search.y-8
+	return UI_Rect{exercise_panel.x+6, bottom, exercise_panel.w-12, max(0, top-bottom)}
+}
+
+bounded_scroll :: proc(current, delta: f64, item_count: int, row_height, row_step, viewport_height: f64) -> f64 {
+	content_height := 0.0
+	if item_count > 0 {
+		content_height = row_height+f64(item_count-1)*row_step
+	}
+	maximum := max(0, content_height-viewport_height)
+	return min(max(current-delta, 0), maximum)
+}
+
+filtered_source_count :: proc() -> int {
+	count := 0
+	for source in state.sources {
+		if len(ui.source_search) > 0 && !strings.contains(source.title, ui.source_search) && !strings.contains(source.video_id, ui.source_search) { continue }
+		count += 1
+	}
+	return count
+}
+
+active_segment_count :: proc() -> int {
+	if state.active_source < 0 { return 0 }
+	count := 0
+	source_id := state.sources[state.active_source].id
+	for segment in state.segments {
+		if segment.source_id == source_id { count += 1 }
+	}
+	return count
+}
+
+filtered_exercise_count :: proc() -> int {
+	count := 0
+	for exercise in state.exercises {
+		if len(ui.exercise_search) > 0 && !strings.contains(exercise.name, ui.exercise_search) { continue }
+		count += 1
+	}
+	return count
+}
+
+normalize_scroll_offsets :: proc() {
+	_, _, source_search, source_panel, _, transcript, exercise_search, exercise_panel, exercise_name, _ := layout_rects()
+	source_content := source_content_rect(source_search, source_panel)
+	transcript_content := transcript_content_rect(transcript)
+	exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+	ui.source_scroll = bounded_scroll(ui.source_scroll, 0, filtered_source_count(), 29, 30, source_content.h)
+	ui.transcript_scroll = bounded_scroll(ui.transcript_scroll, 0, active_segment_count(), 25, 26, transcript_content.h)
+	ui.exercise_scroll = bounded_scroll(ui.exercise_scroll, 0, filtered_exercise_count(), 29, 30, exercise_content.h)
 }
 
 push_rect :: proc(vertices: ^[dynamic]Solid_Vertex, rect: UI_Rect, color: [4]f32) {
@@ -329,6 +404,19 @@ push_border :: proc(vertices: ^[dynamic]Solid_Vertex, rect: UI_Rect, color: [4]f
 	push_rect(vertices, UI_Rect{rect.x, rect.y+rect.h-1, rect.w, 1}, color)
 	push_rect(vertices, UI_Rect{rect.x, rect.y, 1, rect.h}, color)
 	push_rect(vertices, UI_Rect{rect.x+rect.w-1, rect.y, 1, rect.h}, color)
+}
+
+// Draws a box whose heading occupies a gap in the top border. Keep the text
+// origin and the border gap paired through heading_x and heading_width.
+push_border_with_heading_gap :: proc(vertices: ^[dynamic]Solid_Vertex, rect: UI_Rect, heading_x, heading_width: f64, color: [4]f32) {
+	top := rect.y+rect.h-1
+	left_width := max(0, heading_x-rect.x-8)
+	right_x := heading_x+heading_width+8
+	push_rect(vertices, UI_Rect{rect.x, rect.y, rect.w, 1}, color)
+	push_rect(vertices, UI_Rect{rect.x, rect.y, 1, rect.h}, color)
+	push_rect(vertices, UI_Rect{rect.x+rect.w-1, rect.y, 1, rect.h}, color)
+	push_rect(vertices, UI_Rect{rect.x, top, left_width, 1}, color)
+	push_rect(vertices, UI_Rect{right_x, top, max(0, rect.x+rect.w-right_x), 1}, color)
 }
 
 push_texture_rect :: proc(vertices: ^[dynamic]Texture_Vertex, rect: UI_Rect, color: [4]f32) {
@@ -375,14 +463,9 @@ draw_text :: proc(ctx, font: rawptr, text: string, x, y: f64, color: [4]f64) {
 
 draw_clipped_text :: proc(ctx, font: rawptr, text: string, x, y, max_width: f64, color: [4]f64) {
 	if max_width <= 8 { return }
-	// CoreText clips at the full overlay boundary. Limit long list rows by bytes
-	// so their glyph stream never reaches the adjacent panel.
-	max_chars := int(max_width/7.5)
-	if len(text) > max_chars && max_chars > 1 {
-		short := fmt.tprintf("%s…", text[:max_chars-1])
-		draw_text(ctx, font, short, x, y, color)
-		return
-	}
+	CGContextSaveGState(ctx)
+	defer CGContextRestoreGState(ctx)
+	CGContextClipToRect(ctx, Rect{Point{x,0},Size{max_width,ui.height*ui.scale}})
 	draw_text(ctx, font, text, x, y, color)
 }
 
@@ -395,10 +478,8 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	border := [4]f32{0.218,0.225,0.210,1}
 	rule := [4]f32{0.125,0.132,0.123,1}
 	orange := [4]f32{0.91,0.31,0.075,1}
-	cyan := [4]f32{0.16,0.57,0.62,1}
 	push_rect(vertices, UI_Rect{0,0,ui.width,ui.height}, chassis)
 	push_rect(vertices, UI_Rect{0,ui.height-64,ui.width,64}, [4]f32{0.018,0.020,0.019,1})
-	push_rect(vertices, UI_Rect{18,ui.height-64,4,46}, orange)
 	push_rect(vertices, UI_Rect{0,ui.height-65,ui.width,1}, border)
 	panels := [4]UI_Rect{source_panel, player, transcript, exercise_panel}
 	for rect in panels {
@@ -407,28 +488,23 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		push_rect(vertices, UI_Rect{rect.x,rect.y+rect.h-34,rect.w,34}, panel_alt)
 		push_rect(vertices, UI_Rect{rect.x,rect.y+rect.h-35,rect.w,1}, border)
 	}
-	fields := [4]UI_Rect{import_field, source_search, exercise_search, exercise_name}
+	fields := [3]UI_Rect{source_search, exercise_search, exercise_name}
 	for rect in fields {
 		push_rect(vertices, rect, field)
 		push_border(vertices, rect, border)
 	}
+	push_rect(vertices, import_field, field)
+	push_border_with_heading_gap(vertices, import_field, import_field.x+20, 138, border)
 	import_color := orange
 	if contains(import_button, ui.mouse) { import_color = [4]f32{1.0,0.42,0.10,1} }
 	push_rect(vertices, import_button, import_color)
 	push_border(vertices, import_button, [4]f32{1.0,0.45,0.12,1})
 
-	// Fine grid rules make the surface read as one calibrated instrument.
-	for x := 18.0; x < ui.width; x += 24 {
-		push_rect(vertices, UI_Rect{x,90,1,max(0,ui.height-224)}, [4]f32{rule[0],rule[1],rule[2],0.22})
-	}
-	for y := 94.0; y < ui.height-130; y += 24 {
-		push_rect(vertices, UI_Rect{18,y,max(0,ui.width-36),1}, [4]f32{rule[0],rule[1],rule[2],0.16})
-	}
-
-	row := UI_Rect{source_panel.x+6, source_panel.y+source_panel.h-108+ui.source_scroll, source_panel.w-12, 29}
+	source_content := source_content_rect(source_search, source_panel)
+	row := UI_Rect{source_content.x, source_content.y+source_content.h-29+ui.source_scroll, source_content.w, 29}
 	for source, index in state.sources {
 		if len(ui.source_search) > 0 && !strings.contains(source.title, ui.source_search) && !strings.contains(source.video_id, ui.source_search) { continue }
-		if row.y+row.h >= source_panel.y && row.y <= source_panel.y+source_panel.h {
+		if row.y >= source_content.y && row.y+row.h <= source_content.y+source_content.h {
 			color := [4]f32{0.046,0.050,0.048,0.96}
 			if contains(row, ui.mouse) { color = [4]f32{0.075,0.081,0.076,1} }
 			if index == state.active_source {
@@ -441,12 +517,13 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		row.y -= 30
 	}
 
-	row = UI_Rect{transcript.x+6, transcript.y+transcript.h-64+ui.transcript_scroll, transcript.w-12, 25}
+	transcript_content := transcript_content_rect(transcript)
+	row = UI_Rect{transcript_content.x, transcript_content.y+transcript_content.h-25+ui.transcript_scroll, transcript_content.w, 25}
 	if state.active_source >= 0 {
 		source_id := state.sources[state.active_source].id
 		for segment in state.segments {
 			if segment.source_id != source_id { continue }
-			if row.y+row.h >= transcript.y && row.y <= transcript.y+transcript.h {
+			if row.y >= transcript_content.y && row.y+row.h <= transcript_content.y+transcript_content.h {
 				color := [4]f32{0.043,0.047,0.045,0.96}
 				if contains(row, ui.mouse) { color = [4]f32{0.071,0.078,0.073,1} }
 				push_rect(vertices, row, color)
@@ -456,10 +533,11 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 	}
 
-	row = UI_Rect{exercise_panel.x+6, exercise_panel.y+exercise_panel.h-108+ui.exercise_scroll, exercise_panel.w-12, 29}
+	exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+	row = UI_Rect{exercise_content.x, exercise_content.y+exercise_content.h-29+ui.exercise_scroll, exercise_content.w, 29}
 	for exercise in state.exercises {
 		if len(ui.exercise_search) > 0 && !strings.contains(exercise.name, ui.exercise_search) { continue }
-		if row.y+row.h >= exercise_panel.y && row.y <= exercise_panel.y+exercise_panel.h {
+		if row.y >= exercise_content.y && row.y+row.h <= exercise_content.y+exercise_content.h {
 			color := [4]f32{0.046,0.050,0.048,0.96}
 			if contains(row, ui.mouse) { color = [4]f32{0.075,0.081,0.076,1} }
 			push_rect(vertices, row, color)
@@ -480,7 +558,6 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		push_border(vertices, rect, border)
 	}
 	push_rect(vertices, UI_Rect{18,30,ui.width-36,1}, border)
-	push_rect(vertices, UI_Rect{18,18,6,6}, cyan)
 	focus_rect := UI_Rect{}
 	#partial switch ui.focus {
 	case .URL:             focus_rect = import_field
@@ -503,12 +580,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	defer CGContextRelease(ctx)
 	CGContextClearRect(ctx, Rect{Point{0,0}, Size{f64(width),f64(height)}})
 	font_name := CFStringCreateWithCString(nil, "BerkeleyMonoVariable-Regular", 0x08000100)
-	font := CTFontCreateWithName(font_name, 12.5*ui.scale, nil)
-	label_font := CTFontCreateWithName(font_name, 10.5*ui.scale, nil)
-	title_font := CTFontCreateWithName(font_name, 15*ui.scale, nil)
+	small_font := CTFontCreateWithName(font_name, SMALL_FONT_SIZE*ui.scale, nil)
+	title_font := CTFontCreateWithName(font_name, TITLE_FONT_SIZE*ui.scale, nil)
 	CFRelease(font_name)
-	defer CFRelease(font)
-	defer CFRelease(label_font)
+	defer CFRelease(small_font)
 	defer CFRelease(title_font)
 	s := ui.scale
 	ink := [4]f64{0.89,0.88,0.82,1}
@@ -520,116 +595,130 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 
 	// Machine header.
 	draw_text(ctx, title_font, "VOCAL TRAINING / SIGNAL WORKBENCH", 34*s, (ui.height-43)*s, bright)
-	draw_text(ctx, label_font, "VT–01", (ui.width-154)*s, (ui.height-40)*s, orange)
-	draw_text(ctx, label_font, "LOCAL  //  ARM64  //  METAL", (ui.width-360)*s, (ui.height-40)*s, muted)
-	draw_text(ctx, label_font, "COMMAND / INGEST", 18*s, (ui.height-78)*s, muted)
-	draw_text(ctx, label_font, "EXECUTE", (ui.width-112)*s, (ui.height-102)*s, [4]f64{0.08,0.025,0.01,1})
+	draw_text(ctx, small_font, "VT–01", (ui.width-154)*s, (ui.height-40)*s, orange)
+	draw_text(ctx, small_font, "LOCAL  //  ARM64  //  METAL", (ui.width-360)*s, (ui.height-40)*s, muted)
+	draw_text(ctx, small_font, "COMMAND / INGEST", 38*s, (ui.height-78)*s, muted)
+	draw_text(ctx, small_font, "EXECUTE", (ui.width-112)*s, (ui.height-102)*s, [4]f64{0.08,0.025,0.01,1})
 	url_text := ui.url_input
 	if len(url_text) == 0 {
-		draw_text(ctx, font, "$ paste youtube url(s) here", 30*s, (ui.height-103)*s, dim)
+		draw_text(ctx, small_font, "$ paste youtube url(s) here", 30*s, (ui.height-103)*s, dim)
 	} else {
-		draw_clipped_text(ctx, font, fmt.tprintf("$ %s", url_text), 30*s, (ui.height-103)*s, (ui.width-220)*s, ink)
+		draw_clipped_text(ctx, small_font, fmt.tprintf("$ %s", url_text), 30*s, (ui.height-103)*s, (ui.width-220)*s, ink)
 	}
 
 	// Panel designators and live counters.
-	_, _, _, source_panel, player, transcript, _, exercise_panel, _, controls := layout_rects()
-	draw_text(ctx, label_font, "01 / SOURCE REGISTER", (source_panel.x+10)*s, (source_panel.y+source_panel.h-22)*s, muted)
-	draw_text(ctx, label_font, fmt.tprintf("%03d ITEMS", len(state.sources)), (source_panel.x+source_panel.w-86)*s, (source_panel.y+source_panel.h-22)*s, cyan)
-	draw_text(ctx, label_font, "02 / MONITOR", (player.x+10)*s, (player.y+player.h-22)*s, muted)
-	draw_text(ctx, label_font, state.active_source >= 0 ? "SIGNAL LOCK" : "NO SIGNAL", (player.x+player.w-112)*s, (player.y+player.h-22)*s, state.active_source >= 0 ? cyan : dim)
-	draw_text(ctx, label_font, "03 / TIMED TRANSCRIPT", (transcript.x+10)*s, (transcript.y+transcript.h-22)*s, muted)
-	draw_text(ctx, label_font, fmt.tprintf("%04d SEGMENTS", len(state.segments)), (transcript.x+transcript.w-112)*s, (transcript.y+transcript.h-22)*s, cyan)
-	draw_text(ctx, label_font, "04 / EXERCISE BANK", (exercise_panel.x+10)*s, (exercise_panel.y+exercise_panel.h-22)*s, muted)
-	draw_text(ctx, label_font, fmt.tprintf("%03d SAVED", len(state.exercises)), (exercise_panel.x+exercise_panel.w-92)*s, (exercise_panel.y+exercise_panel.h-22)*s, cyan)
+	_, _, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls := layout_rects()
+	draw_text(ctx, small_font, "01 / SOURCE REGISTER", (source_panel.x+10)*s, (source_panel.y+source_panel.h-22)*s, muted)
+	draw_text(ctx, small_font, fmt.tprintf("%03d ITEMS", len(state.sources)), (source_panel.x+source_panel.w-86)*s, (source_panel.y+source_panel.h-22)*s, cyan)
+	draw_text(ctx, small_font, "02 / MONITOR", (player.x+10)*s, (player.y+player.h-22)*s, muted)
+	draw_text(ctx, small_font, state.active_source >= 0 ? "SIGNAL LOCK" : "NO SIGNAL", (player.x+player.w-112)*s, (player.y+player.h-22)*s, state.active_source >= 0 ? cyan : dim)
+	draw_text(ctx, small_font, "03 / TIMED TRANSCRIPT", (transcript.x+10)*s, (transcript.y+transcript.h-22)*s, muted)
+	draw_text(ctx, small_font, fmt.tprintf("%04d SEGMENTS", len(state.segments)), (transcript.x+transcript.w-112)*s, (transcript.y+transcript.h-22)*s, cyan)
+	draw_text(ctx, small_font, "04 / EXERCISE BANK", (exercise_panel.x+10)*s, (exercise_panel.y+exercise_panel.h-22)*s, muted)
+	draw_text(ctx, small_font, fmt.tprintf("%03d SAVED", len(state.exercises)), (exercise_panel.x+exercise_panel.w-92)*s, (exercise_panel.y+exercise_panel.h-22)*s, cyan)
 
 	source_text := ui.source_search
 	if len(source_text) == 0 { source_text = "/ filter source register" }
-	draw_clipped_text(ctx, label_font, source_text, (source_panel.x+16)*s, (source_panel.y+source_panel.h-62)*s, (source_panel.w-30)*s, dim)
+	draw_clipped_text(ctx, small_font, source_text, (source_panel.x+16)*s, (source_panel.y+source_panel.h-62)*s, (source_panel.w-30)*s, dim)
 	exercise_search_text := ui.exercise_search
 	if len(exercise_search_text) == 0 { exercise_search_text = "/ filter exercise bank" }
-	draw_clipped_text(ctx, label_font, exercise_search_text, (exercise_panel.x+16)*s, (exercise_panel.y+exercise_panel.h-62)*s, (exercise_panel.w-30)*s, dim)
+	draw_clipped_text(ctx, small_font, exercise_search_text, (exercise_panel.x+16)*s, (exercise_panel.y+exercise_panel.h-62)*s, (exercise_panel.w-30)*s, dim)
 	exercise_name_text := ui.exercise_name
 	if len(exercise_name_text) == 0 { exercise_name_text = "NAME / optional designation" }
-	draw_clipped_text(ctx, label_font, exercise_name_text, (exercise_panel.x+16)*s, (exercise_panel.y+19)*s, (exercise_panel.w-30)*s, len(ui.exercise_name) > 0 ? ink : dim)
+	draw_clipped_text(ctx, small_font, exercise_name_text, (exercise_panel.x+16)*s, (exercise_panel.y+19)*s, (exercise_panel.w-30)*s, len(ui.exercise_name) > 0 ? ink : dim)
 
-	row_y := source_panel.y+source_panel.h-100+ui.source_scroll
+	source_content := source_content_rect(source_search, source_panel)
+	CGContextSaveGState(ctx)
+	CGContextClipToRect(ctx, Rect{Point{source_content.x*s,source_content.y*s},Size{source_content.w*s,source_content.h*s}})
+	row_y := source_content.y+source_content.h-20+ui.source_scroll
 	visible_source_index := 1
 	for source, index in state.sources {
 		if len(ui.source_search) > 0 && !strings.contains(source.title, ui.source_search) && !strings.contains(source.video_id, ui.source_search) { continue }
-		if row_y >= source_panel.y && row_y <= source_panel.y+source_panel.h {
+		if row_y >= source_content.y+7 && row_y <= source_content.y+source_content.h-3 {
 			row_color := ink
 			if index == state.active_source { row_color = orange }
-			draw_text(ctx, label_font, fmt.tprintf("%02d", visible_source_index), (source_panel.x+14)*s, row_y*s, muted)
-			draw_clipped_text(ctx, font, source.title, (source_panel.x+48)*s, row_y*s, (source_panel.w-62)*s, row_color)
+			draw_text(ctx, small_font, fmt.tprintf("%02d", visible_source_index), (source_panel.x+14)*s, row_y*s, muted)
+			draw_clipped_text(ctx, small_font, source.title, (source_panel.x+48)*s, row_y*s, (source_panel.w-62)*s, row_color)
 		}
 		row_y -= 30
 		visible_source_index += 1
 	}
 	if len(state.sources) == 0 {
-		draw_text(ctx, label_font, "0000  REGISTER EMPTY", (source_panel.x+14)*s, (source_panel.y+source_panel.h-124)*s, dim)
+		draw_text(ctx, small_font, "0000  REGISTER EMPTY", (source_content.x+8)*s, (source_content.y+source_content.h-20)*s, dim)
 	}
+	CGContextRestoreGState(ctx)
 
 	if state.active_source < 0 {
-		draw_text(ctx, title_font, "NO INPUT SIGNAL", (player.x+20)*s, (player.y+player.h/2)*s, dim)
-		draw_text(ctx, label_font, "INGEST A SOURCE TO INITIALIZE MONITOR", (player.x+20)*s, (player.y+player.h/2-25)*s, muted)
+		draw_text(ctx, small_font, "NO INPUT SIGNAL", (player.x+20)*s, (player.y+player.h/2)*s, dim)
+		draw_text(ctx, small_font, "INGEST A SOURCE TO INITIALIZE MONITOR", (player.x+20)*s, (player.y+player.h/2-20)*s, muted)
 	} else {
 		source := &state.sources[state.active_source]
-		draw_clipped_text(ctx, label_font, source.title, (player.x+14)*s, (player.y+15)*s, (player.w-170)*s, ink)
+		draw_clipped_text(ctx, small_font, source.title, (player.x+14)*s, (player.y+15)*s, (player.w-170)*s, ink)
 		if seconds, ok := current_seconds(); ok {
-			draw_text(ctx, label_font, fmt.tprintf("T+%07.2f", seconds), (player.x+player.w-112)*s, (player.y+15)*s, cyan)
+			draw_text(ctx, small_font, fmt.tprintf("T+%07.2f", seconds), (player.x+player.w-112)*s, (player.y+15)*s, cyan)
 		}
 	}
 
-	row_y = transcript.y+transcript.h-56+ui.transcript_scroll
+	transcript_content := transcript_content_rect(transcript)
+	CGContextSaveGState(ctx)
+	CGContextClipToRect(ctx, Rect{Point{transcript_content.x*s,transcript_content.y*s},Size{transcript_content.w*s,transcript_content.h*s}})
+	row_y = transcript_content.y+transcript_content.h-17+ui.transcript_scroll
 	if state.active_source >= 0 {
 		source_id := state.sources[state.active_source].id
 		segment_index := 1
 		for segment in state.segments {
 			if segment.source_id != source_id { continue }
-			if row_y >= transcript.y && row_y <= transcript.y+transcript.h {
-				draw_text(ctx, label_font, fmt.tprintf("%03d", segment_index), (transcript.x+14)*s, row_y*s, muted)
-				draw_text(ctx, label_font, fmt.tprintf("%07.2f", segment.start_seconds), (transcript.x+58)*s, row_y*s, cyan)
-				draw_clipped_text(ctx, font, segment.text, (transcript.x+132)*s, row_y*s, (transcript.w-146)*s, ink)
+			if row_y >= transcript_content.y+7 && row_y <= transcript_content.y+transcript_content.h-3 {
+				draw_text(ctx, small_font, fmt.tprintf("%03d", segment_index), (transcript.x+14)*s, row_y*s, muted)
+				draw_text(ctx, small_font, fmt.tprintf("%07.2f", segment.start_seconds), (transcript.x+58)*s, row_y*s, cyan)
+				draw_clipped_text(ctx, small_font, segment.text, (transcript.x+132)*s, row_y*s, (transcript.w-146)*s, ink)
 			}
 			row_y -= 26
 			segment_index += 1
 		}
 	}
 	if len(state.segments) == 0 {
-		draw_text(ctx, label_font, "0000  NO TIMECODE DATA / LOAD CAPTIONS", (transcript.x+14)*s, (transcript.y+transcript.h-58)*s, dim)
+		draw_text(ctx, small_font, "0000  NO TIMECODE DATA / LOAD CAPTIONS", (transcript_content.x+8)*s, (transcript_content.y+transcript_content.h-17)*s, dim)
 	}
+	CGContextRestoreGState(ctx)
 
-	row_y = exercise_panel.y+exercise_panel.h-100+ui.exercise_scroll
+	exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+	CGContextSaveGState(ctx)
+	CGContextClipToRect(ctx, Rect{Point{exercise_content.x*s,exercise_content.y*s},Size{exercise_content.w*s,exercise_content.h*s}})
+	row_y = exercise_content.y+exercise_content.h-20+ui.exercise_scroll
 	exercise_index := 1
 	for exercise in state.exercises {
 		if len(ui.exercise_search) > 0 && !strings.contains(exercise.name, ui.exercise_search) { continue }
-		if row_y >= exercise_panel.y && row_y <= exercise_panel.y+exercise_panel.h {
-			draw_text(ctx, label_font, fmt.tprintf("E%02d", exercise_index), (exercise_panel.x+14)*s, row_y*s, muted)
-			draw_clipped_text(ctx, font, exercise.name, (exercise_panel.x+52)*s, row_y*s, (exercise_panel.w-68)*s, ink)
+		if row_y >= exercise_content.y+7 && row_y <= exercise_content.y+exercise_content.h-3 {
+			draw_text(ctx, small_font, fmt.tprintf("E%02d", exercise_index), (exercise_panel.x+14)*s, row_y*s, muted)
+			draw_clipped_text(ctx, small_font, exercise.name, (exercise_panel.x+52)*s, row_y*s, (exercise_panel.w-68)*s, ink)
 		}
 		row_y -= 30
 		exercise_index += 1
 	}
 	if len(state.exercises) == 0 {
-		draw_text(ctx, label_font, "E00  BANK EMPTY", (exercise_panel.x+14)*s, (exercise_panel.y+exercise_panel.h-124)*s, dim)
+		draw_text(ctx, small_font, "E00  BANK EMPTY", (exercise_content.x+8)*s, (exercise_content.y+exercise_content.h-20)*s, dim)
 	}
+	CGContextRestoreGState(ctx)
 
 	labels := [8]string{"MARK IN","MARK OUT","COMMIT","RUN","HOLD","CAPTIONS","AUDITION","DATA"}
 	for label, i in labels {
 		rect := control_rect(controls, i)
-		draw_text(ctx, label_font, fmt.tprintf("%02d", i+1), (rect.x+9)*s, (rect.y+25)*s, muted)
+		baseline := rect.y+17
+		draw_text(ctx, small_font, fmt.tprintf("%02d", i+1), (rect.x+9)*s, baseline*s, muted)
 		button_color := ink
 		if i == 2 { button_color = orange }
-		draw_clipped_text(ctx, font, label, (rect.x+34)*s, (rect.y+25)*s, (rect.w-40)*s, button_color)
+		draw_clipped_text(ctx, small_font, label, (rect.x+34)*s, baseline*s, (rect.w-40)*s, button_color)
 	}
 
 	range_text := "RANGE --:--:-- → --:--:--"
 	if state.has_start || state.has_end {
 		range_text = fmt.tprintf("RANGE %07.2f → %07.2f", state.range_start, state.range_end)
 	}
-	draw_text(ctx, label_font, range_text, 32*s, 21*s, state.has_start && state.has_end ? cyan : muted)
-	draw_clipped_text(ctx, label_font, fmt.tprintf("SYS / %s", ui.status), 332*s, 21*s, (ui.width-520)*s, muted)
-	draw_text(ctx, label_font, "60 HZ / ONLINE", (ui.width-142)*s, 21*s, cyan)
+	footer_baseline := 12.5
+	draw_text(ctx, small_font, range_text, 18*s, footer_baseline*s, state.has_start && state.has_end ? cyan : muted)
+	draw_clipped_text(ctx, small_font, fmt.tprintf("SYS / %s", ui.status), 332*s, footer_baseline*s, (ui.width-520)*s, muted)
+	draw_text(ctx, small_font, "60 HZ / ONLINE", (ui.width-142)*s, footer_baseline*s, cyan)
 	return pixels
 }
 
@@ -691,20 +780,22 @@ rebuild_accessibility :: proc() {
 	add_ax_element(array, element_class, "YouTube URLs", "AXTextField", import_field, .URL)
 	add_ax_element(array, element_class, "Import", "AXButton", import_button, .Import)
 	add_ax_element(array, element_class, "Filter sources", "AXTextField", source_search, .Source_Search)
-	row := UI_Rect{source_panel.x+6, source_panel.y+source_panel.h-108+ui.source_scroll, source_panel.w-12, 29}
+	source_content := source_content_rect(source_search, source_panel)
+	row := UI_Rect{source_content.x, source_content.y+source_content.h-29+ui.source_scroll, source_content.w, 29}
 	for source, index in state.sources {
 		if len(ui.source_search) > 0 && !strings.contains(source.title, ui.source_search) && !strings.contains(source.video_id, ui.source_search) { continue }
-		if row.y+row.h >= source_panel.y && row.y <= source_panel.y+source_panel.h {
+		if row.y >= source_content.y && row.y+row.h <= source_content.y+source_content.h {
 			add_ax_element(array, element_class, source.title, "AXButton", row, .Source, index)
 		}
 		row.y -= 30
 	}
-	row = UI_Rect{transcript.x+6, transcript.y+transcript.h-64+ui.transcript_scroll, transcript.w-12, 25}
+	transcript_content := transcript_content_rect(transcript)
+	row = UI_Rect{transcript_content.x, transcript_content.y+transcript_content.h-25+ui.transcript_scroll, transcript_content.w, 25}
 	if state.active_source >= 0 {
 		source_id := state.sources[state.active_source].id
 		for segment in state.segments {
 			if segment.source_id != source_id { continue }
-			if row.y+row.h >= transcript.y && row.y <= transcript.y+transcript.h {
+			if row.y >= transcript_content.y && row.y+row.h <= transcript_content.y+transcript_content.h {
 				label := fmt.tprintf("%.1f seconds, %s", segment.start_seconds, segment.text)
 				add_ax_element(array, element_class, label, "AXButton", row, .Transcript, seconds=segment.start_seconds)
 			}
@@ -712,10 +803,11 @@ rebuild_accessibility :: proc() {
 		}
 	}
 	add_ax_element(array, element_class, "Filter exercises", "AXTextField", exercise_search, .Exercise_Search)
-	row = UI_Rect{exercise_panel.x+6, exercise_panel.y+exercise_panel.h-108+ui.exercise_scroll, exercise_panel.w-12, 29}
+	exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+	row = UI_Rect{exercise_content.x, exercise_content.y+exercise_content.h-29+ui.exercise_scroll, exercise_content.w, 29}
 	for exercise, index in state.exercises {
 		if len(ui.exercise_search) > 0 && !strings.contains(exercise.name, ui.exercise_search) { continue }
-		if row.y+row.h >= exercise_panel.y && row.y <= exercise_panel.y+exercise_panel.h {
+		if row.y >= exercise_content.y && row.y+row.h <= exercise_content.y+exercise_content.h {
 			add_ax_element(array, element_class, exercise.name, "AXButton", row, .Exercise, index)
 		}
 		row.y -= 30
@@ -851,7 +943,8 @@ render_frame :: proc() {
 	encode_solid_vertices(encoder, vertices[:])
 	delete(vertices)
 
-	_, _, _, _, player_rect, _, _, _, _, _ := layout_rects()
+	_, _, _, _, player, _, _, _, _, _ := layout_rects()
+	player_rect := player_content_rect(player)
 	if video_texture, video_width, video_height := current_video_texture(); video_texture != nil {
 		aspect := f64(video_width)/f64(video_height)
 		draw_rect := player_rect
@@ -874,10 +967,6 @@ render_frame :: proc() {
 		delete(pixels)
 	}
 	encode_texture(encoder, ui.text_texture, UI_Rect{0,0,ui.width,ui.height}, 1)
-	uniforms := Effect_Uniforms{f32(ui.width*ui.scale), f32(ui.height*ui.scale), ui.frame_time, 1}
-	msg_void_id(encoder, sel_registerName("setRenderPipelineState:"), ui.effect_pipeline)
-	msg_void_ptr_u_u(encoder, sel_registerName("setFragmentBytes:length:atIndex:"), &uniforms, size_of(Effect_Uniforms), 0)
-	msg_void_u_u_u(encoder, sel_registerName("drawPrimitives:vertexStart:vertexCount:"), 3, 0, 3)
 
 	msg_void(encoder, sel_registerName("endEncoding"))
 	msg_void_id(command_buffer, sel_registerName("presentDrawable:"), drawable)
@@ -894,8 +983,6 @@ struct SolidVertex { float x; float y; float r; float g; float b; float a; };
 struct TextureVertex { float x; float y; float u; float v; float r; float g; float b; float a; };
 struct SolidOut { float4 position [[position]]; float4 color; };
 struct TextureOut { float4 position [[position]]; float2 uv; float4 color; };
-struct EffectOut { float4 position [[position]]; float2 uv; };
-struct EffectUniforms { float width; float height; float time; float intensity; };
 vertex SolidOut solid_vertex(const device SolidVertex *v [[buffer(0)]], uint i [[vertex_id]]) {
 	SolidOut o; o.position=float4(v[i].x,v[i].y,0,1); o.color=float4(v[i].r,v[i].g,v[i].b,v[i].a); return o;
 }
@@ -906,29 +993,6 @@ vertex TextureOut texture_vertex(const device TextureVertex *v [[buffer(0)]], ui
 fragment float4 texture_fragment(TextureOut in [[stage_in]], texture2d<float> image [[texture(0)]]) {
 	constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
 	return image.sample(s, in.uv) * in.color;
-}
-vertex EffectOut effect_vertex(uint i [[vertex_id]]) {
-	float2 p = float2((i << 1) & 2, i & 2);
-	EffectOut o;
-	o.position = float4(p * 2.0 - 1.0, 0.0, 1.0);
-	o.uv = float2(p.x, 1.0-p.y);
-	return o;
-}
-float hash21(float2 p) {
-	p = fract(p * float2(123.34, 456.21));
-	p += dot(p, p + 45.32);
-	return fract(p.x * p.y);
-}
-fragment float4 effect_fragment(EffectOut in [[stage_in]], constant EffectUniforms &u [[buffer(0)]]) {
-	float2 uv = in.uv;
-	float2 q = uv * 2.0 - 1.0;
-	float edge = smoothstep(0.52, 1.35, length(q * float2(0.78, 1.0)));
-	float scan = 0.5 + 0.5 * sin(uv.y * u.height * 3.14159265);
-	float noise = hash21(floor(uv * float2(u.width, u.height)) + floor(u.time * 24.0));
-	float sweep = exp(-90.0 * abs(fract(uv.y + u.time * 0.025) - 0.5));
-	float alpha = 0.012 + scan * 0.014 + edge * 0.16 + noise * 0.012;
-	float3 glow = float3(0.08, 0.34, 0.32) * sweep * 0.20;
-	return float4(glow, min(alpha, 0.24));
 }`
 	error: Id
 	library := msg_id_id_error(ui.device, sel_registerName("newLibraryWithSource:options:error:"), nsstring(source), nil, &error)
@@ -937,8 +1001,6 @@ fragment float4 effect_fragment(EffectOut in [[stage_in]], constant EffectUnifor
 	solid_fragment := msg_id_id(library, sel_registerName("newFunctionWithName:"), nsstring("solid_fragment"))
 	texture_vertex := msg_id_id(library, sel_registerName("newFunctionWithName:"), nsstring("texture_vertex"))
 	texture_fragment := msg_id_id(library, sel_registerName("newFunctionWithName:"), nsstring("texture_fragment"))
-	effect_vertex := msg_id_id(library, sel_registerName("newFunctionWithName:"), nsstring("effect_vertex"))
-	effect_fragment := msg_id_id(library, sel_registerName("newFunctionWithName:"), nsstring("effect_fragment"))
 
 	desc := msg_id(objc_getClass("MTLRenderPipelineDescriptor"), sel_registerName("new"))
 	msg_void_id(desc, sel_registerName("setVertexFunction:"), solid_vertex)
@@ -958,19 +1020,7 @@ fragment float4 effect_fragment(EffectOut in [[stage_in]], constant EffectUnifor
 	msg_void_i(texture_attachment, sel_registerName("setSourceAlphaBlendFactor:"), 1)
 	msg_void_i(texture_attachment, sel_registerName("setDestinationAlphaBlendFactor:"), 5)
 	ui.texture_pipeline = msg_id_id_error_2(ui.device, sel_registerName("newRenderPipelineStateWithDescriptor:error:"), texture_desc, &error)
-
-	effect_desc := msg_id(objc_getClass("MTLRenderPipelineDescriptor"), sel_registerName("new"))
-	msg_void_id(effect_desc, sel_registerName("setVertexFunction:"), effect_vertex)
-	msg_void_id(effect_desc, sel_registerName("setFragmentFunction:"), effect_fragment)
-	effect_attachment := msg_id_uint(msg_id(effect_desc, sel_registerName("colorAttachments")), sel_registerName("objectAtIndexedSubscript:"), 0)
-	msg_void_i(effect_attachment, sel_registerName("setPixelFormat:"), 80)
-	msg_void_bool(effect_attachment, sel_registerName("setBlendingEnabled:"), true)
-	msg_void_i(effect_attachment, sel_registerName("setSourceRGBBlendFactor:"), 1)
-	msg_void_i(effect_attachment, sel_registerName("setDestinationRGBBlendFactor:"), 5)
-	msg_void_i(effect_attachment, sel_registerName("setSourceAlphaBlendFactor:"), 1)
-	msg_void_i(effect_attachment, sel_registerName("setDestinationAlphaBlendFactor:"), 5)
-	ui.effect_pipeline = msg_id_id_error_2(ui.device, sel_registerName("newRenderPipelineStateWithDescriptor:error:"), effect_desc, &error)
-	return ui.solid_pipeline != nil && ui.texture_pipeline != nil && ui.effect_pipeline != nil
+	return ui.solid_pipeline != nil && ui.texture_pipeline != nil
 }
 
 metal_player_load :: proc(path: string) {
@@ -1018,29 +1068,35 @@ dispatch_click :: proc(point: Point) {
 	if contains(import_button, point) { on_import(nil,nil,nil); return }
 	if contains(player, point) { on_toggle_playback(nil,nil,nil); return }
 
-	row := UI_Rect{source_panel.x+6, source_panel.y+source_panel.h-108+ui.source_scroll, source_panel.w-12, 29}
+	source_content := source_content_rect(source_search, source_panel)
+	row := UI_Rect{source_content.x, source_content.y+source_content.h-29+ui.source_scroll, source_content.w, 29}
 	for source, index in state.sources {
 		if len(ui.source_search) > 0 && !strings.contains(source.title, ui.source_search) && !strings.contains(source.video_id, ui.source_search) { continue }
-		if contains(row, point) {
+		if row.y >= source_content.y && row.y+row.h <= source_content.y+source_content.h && contains(row, point) {
 			ui_event_tag = index
 			on_select_source(nil,nil,nil)
 			return
 		}
 		row.y -= 30
 	}
-	row = UI_Rect{transcript.x+6, transcript.y+transcript.h-64+ui.transcript_scroll, transcript.w-12, 25}
+	transcript_content := transcript_content_rect(transcript)
+	row = UI_Rect{transcript_content.x, transcript_content.y+transcript_content.h-25+ui.transcript_scroll, transcript_content.w, 25}
 	if state.active_source >= 0 {
 		source_id := state.sources[state.active_source].id
 		for segment in state.segments {
 			if segment.source_id != source_id { continue }
-			if contains(row, point) { seek_seconds(segment.start_seconds); return }
+			if row.y >= transcript_content.y && row.y+row.h <= transcript_content.y+transcript_content.h && contains(row, point) {
+				seek_seconds(segment.start_seconds)
+				return
+			}
 			row.y -= 26
 		}
 	}
-	row = UI_Rect{exercise_panel.x+6, exercise_panel.y+exercise_panel.h-108+ui.exercise_scroll, exercise_panel.w-12, 29}
+	exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+	row = UI_Rect{exercise_content.x, exercise_content.y+exercise_content.h-29+ui.exercise_scroll, exercise_content.w, 29}
 	for exercise, index in state.exercises {
 		if len(ui.exercise_search) > 0 && !strings.contains(exercise.name, ui.exercise_search) { continue }
-		if contains(row, point) {
+		if row.y >= exercise_content.y && row.y+row.h <= exercise_content.y+exercise_content.h && contains(row, point) {
 			ui_event_tag = index
 			on_play_exercise(nil,nil,nil)
 			return
@@ -1078,10 +1134,17 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 	delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
-	_,_,_,source_panel,_,transcript,_,exercise_panel,_,_ := layout_rects()
-	if contains(source_panel, point) { ui.source_scroll += delta }
-	else if contains(transcript, point) { ui.transcript_scroll += delta }
-	else if contains(exercise_panel, point) { ui.exercise_scroll += delta }
+	_, _, source_search, source_panel, _, transcript, exercise_search, exercise_panel, exercise_name, _ := layout_rects()
+	source_content := source_content_rect(source_search, source_panel)
+	transcript_content := transcript_content_rect(transcript)
+	exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+	if contains(source_content, point) {
+		ui.source_scroll = bounded_scroll(ui.source_scroll, delta, filtered_source_count(), 29, 30, source_content.h)
+	} else if contains(transcript_content, point) {
+		ui.transcript_scroll = bounded_scroll(ui.transcript_scroll, delta, active_segment_count(), 25, 26, transcript_content.h)
+	} else if contains(exercise_content, point) {
+		ui.exercise_scroll = bounded_scroll(ui.exercise_scroll, delta, filtered_exercise_count(), 29, 30, exercise_content.h)
+	}
 	ui.needs_redraw = true
 }
 
@@ -1156,9 +1219,9 @@ on_metal_has_marked :: proc "c" (self: Id, command: Sel) -> bool { return ui.has
 on_metal_range :: proc "c" (self: Id, command: Sel) -> NS_Range {
 	context = runtime.default_context()
 	target := focused_text()
-	if target == nil { return NS_Range{uint(-1),0} }
+	if target == nil { return NS_Range{~uint(0),0} }
 	if command == sel_registerName("markedRange") {
-		if !ui.has_marked_text { return NS_Range{uint(-1),0} }
+		if !ui.has_marked_text { return NS_Range{~uint(0),0} }
 		return NS_Range{uint(len(target^)-len(ui.marked_text)), uint(len(ui.marked_text))}
 	}
 	return NS_Range{uint(len(target^)),0}
@@ -1179,12 +1242,7 @@ on_metal_accepts_first :: proc "c" (self: Id, command: Sel) -> bool { return tru
 
 on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
-	ui.frame_time += 1.0/60.0
-	clock_tick := int(ui.frame_time*5)
-	if state.player != nil && msg_f32(state.player, sel_registerName("rate")) > 0 && clock_tick != ui.last_clock_tick {
-		ui.last_clock_tick = clock_tick
-		ui.needs_redraw = true
-	}
+	if state.player != nil && msg_f32(state.player, sel_registerName("rate")) > 0 { ui.needs_redraw = true }
 	frame := msg_rect(ui.view, sel_registerName("bounds"))
 	if ui.width != frame.size.width || ui.height != frame.size.height {
 		ui.width, ui.height = frame.size.width, frame.size.height
@@ -1199,6 +1257,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 		}
 	}
 	if ui.scale <= 0 { ui.scale = 1 }
+	normalize_scroll_offsets()
 	msg_void_size(ui.layer, sel_registerName("setDrawableSize:"), Size{ui.width*ui.scale,ui.height*ui.scale})
 	render_frame()
 }

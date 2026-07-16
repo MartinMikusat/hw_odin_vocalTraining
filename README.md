@@ -14,8 +14,15 @@ YouTube's original-language automatic caption track.
 The interface uses the installed Berkeley Mono variable font and treats the
 window as one technical instrument rather than a collection of native widgets.
 The source register, video monitor, timed transcript, exercise bank, command
-line, and transport rail share a measured grid. A final Metal pass adds subtle
-scan modulation, phosphor noise, edge falloff, and a slow diagnostic sweep.
+line, and transport rail share a measured grid.
+
+The command field uses a reusable segmented-border heading: the box's top
+border stops eight points before the heading and resumes eight points after its
+declared width. Keep the heading text origin, declared width, and border gap
+paired when applying this treatment to another field.
+
+Typography uses two sizes: 10.5 points throughout the interface and 21 points
+for the `VOCAL TRAINING / SIGNAL WORKBENCH` title only.
 
 When no text field has focus, press **Space** to toggle playback or **1–8** to
 activate the matching numbered transport control.
