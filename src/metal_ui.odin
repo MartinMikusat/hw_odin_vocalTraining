@@ -116,6 +116,7 @@ CF_Range :: struct { location, length: int }
 
 SMALL_FONT_SIZE :: 10.5
 TITLE_FONT_SIZE :: SMALL_FONT_SIZE*2
+TRACE_FOREIGN_LIFETIMES :: #config(VT_TRACE_FOREIGN_LIFETIMES, false)
 
 Text_Align :: enum {
 	Start,
@@ -166,6 +167,36 @@ CONTROL_STATUS       :: Id(rawptr(uintptr(2)))
 CONTROL_SOURCE       :: Id(rawptr(uintptr(3)))
 CONTROL_EXERCISE     :: Id(rawptr(uintptr(4)))
 CONTROL_EXERCISE_NAME:: Id(rawptr(uintptr(5)))
+
+trace_foreign_lifetime :: proc(action, kind: string, value: rawptr, owner: string) {
+	when TRACE_FOREIGN_LIFETIMES {
+		fmt.eprintf("[foreign] %-7s %-16s %v  %s\n", action, kind, value, owner)
+	}
+}
+
+foreign_created :: proc(value: rawptr, kind, owner: string) -> rawptr {
+	trace_foreign_lifetime("create", kind, value, owner)
+	return value
+}
+
+foreign_retain :: proc(value: rawptr, kind, owner: string) -> rawptr {
+	if value == nil { return nil }
+	retained := CFRetain(value)
+	trace_foreign_lifetime("retain", kind, retained, owner)
+	return retained
+}
+
+foreign_release :: proc(value: rawptr, kind, owner: string) {
+	if value == nil { return }
+	trace_foreign_lifetime("release", kind, value, owner)
+	CFRelease(value)
+}
+
+assert_foreign :: proc(value: rawptr, message: string) {
+	when ODIN_DEBUG {
+		assert(value != nil, message)
+	}
+}
 
 msg_bool :: proc(receiver: Id, selector: Sel) -> bool {
 	p := transmute(proc "c" (Id, Sel) -> bool)send_address
@@ -466,6 +497,7 @@ push_texture_rect :: proc(vertices: ^[dynamic]Texture_Vertex, rect: UI_Rect, col
 make_text_run :: proc(font: rawptr, text: string) -> Text_Run {
 	run: Text_Run
 	if len(text) == 0 { return run }
+	assert_foreign(font, "make_text_run requires a valid CTFont")
 	bytes := transmute([]u8)text
 	string_ref := CFStringCreateWithBytes(nil, raw_data(bytes), len(bytes), 0x08000100, false)
 	if string_ref == nil { return run }
@@ -483,7 +515,7 @@ make_text_run :: proc(font: rawptr, text: string) -> Text_Run {
 		CFAttributedStringSetAttribute(attributed, range, kCTLigatureAttributeName, ligature_value)
 		CFRelease(ligature_value)
 	}
-	run.line = CTLineCreateWithAttributedString(attributed)
+	run.line = foreign_created(CTLineCreateWithAttributedString(attributed), "CTLine", "make_text_run")
 	if run.line != nil {
 		run.advance = CTLineGetTypographicBounds(run.line, &run.ascent, &run.descent, &run.leading)
 	}
@@ -491,7 +523,7 @@ make_text_run :: proc(font: rawptr, text: string) -> Text_Run {
 }
 
 delete_text_run :: proc(run: ^Text_Run) {
-	if run.line != nil { CFRelease(run.line) }
+	foreign_release(run.line, "CTLine", "delete_text_run")
 	run^ = {}
 }
 
@@ -499,14 +531,14 @@ truncated_text_run :: proc(run: Text_Run, font: rawptr, max_width: f64) -> Text_
 	if run.line == nil { return {} }
 	if run.advance <= max_width {
 		result := run
-		result.line = CFRetain(run.line)
+		result.line = foreign_retain(run.line, "CTLine", "truncated_text_run")
 		return result
 	}
 	token := make_text_run(font, "…")
 	defer delete_text_run(&token)
 	if token.line == nil || token.advance > max_width { return {} }
 	truncated: Text_Run
-	truncated.line = CTLineCreateTruncatedLine(run.line, max_width, 1, token.line)
+	truncated.line = foreign_created(CTLineCreateTruncatedLine(run.line, max_width, 1, token.line), "CTLine", "truncated_text_run")
 	if truncated.line != nil {
 		truncated.advance = CTLineGetTypographicBounds(truncated.line, &truncated.ascent, &truncated.descent, &truncated.leading)
 	}
@@ -542,6 +574,9 @@ text_origin :: proc(rect: UI_Rect, run: Text_Run, horizontal, vertical: Text_Ali
 
 draw_text_run :: proc(ctx: rawptr, run: Text_Run, origin: Point, color: [4]f64) {
 	if ctx == nil || run.line == nil { return }
+	assert_foreign(ctx, "draw_text_run requires a valid CGContext")
+	assert_foreign(run.line, "draw_text_run requires a valid CTLine")
+	trace_foreign_lifetime("draw", "CTLine", run.line, "draw_text_run")
 	CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], color[3])
 	CGContextSetTextPosition(ctx, origin.x, origin.y)
 	CTLineDraw(run.line, ctx)
@@ -681,17 +716,23 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 build_text_overlay :: proc(width, height: uint) -> []u8 {
 	pixels := make([]u8, int(width*height*4))
 	space := CGColorSpaceCreateDeviceRGB()
+	assert_foreign(space, "CGColorSpaceCreateDeviceRGB failed")
 	ctx := CGBitmapContextCreate(raw_data(pixels), width, height, 8, width*4, space, 0x2002)
 	CGColorSpaceRelease(space)
+	assert_foreign(ctx, "CGBitmapContextCreate failed")
 	if ctx == nil { return pixels }
 	defer CGContextRelease(ctx)
 	CGContextClearRect(ctx, Rect{Point{0,0}, Size{f64(width),f64(height)}})
 	font_name := CFStringCreateWithCString(nil, "BerkeleyMonoVariable-Regular", 0x08000100)
+	assert_foreign(font_name, "Unable to create the UI font name")
+	if font_name == nil { return pixels }
 	small_font := CTFontCreateWithName(font_name, SMALL_FONT_SIZE*ui.scale, nil)
 	title_font := CTFontCreateWithName(font_name, TITLE_FONT_SIZE*ui.scale, nil)
+	assert_foreign(small_font, "Unable to create the small UI font")
+	assert_foreign(title_font, "Unable to create the title UI font")
 	CFRelease(font_name)
-	defer CFRelease(small_font)
-	defer CFRelease(title_font)
+	defer foreign_release(small_font, "CTFont", "build_text_overlay")
+	defer foreign_release(title_font, "CTFont", "build_text_overlay")
 	s := ui.scale
 	ink := [4]f64{0.89,0.88,0.82,1}
 	bright := [4]f64{0.97,0.95,0.88,1}
@@ -1017,15 +1058,20 @@ current_video_texture :: proc() -> (Id, uint, uint) {
 	display_time: CMTime
 	buffer := msg_id_time_time(ui.video_output, sel_registerName("copyPixelBufferForItemTime:itemTimeForDisplay:"), time, &display_time)
 	if buffer == nil { return ui.last_video_texture, ui.last_video_width, ui.last_video_height }
-	defer CFRelease(buffer)
+	trace_foreign_lifetime("create", "CVPixelBuffer", buffer, "current_video_texture")
+	defer foreign_release(buffer, "CVPixelBuffer", "current_video_texture")
 	width := CVPixelBufferGetWidth(buffer)
 	height := CVPixelBufferGetHeight(buffer)
+	when ODIN_DEBUG {
+		assert(width > 0 && height > 0, "CVPixelBuffer has invalid dimensions")
+	}
 	cv_texture: rawptr
 	if CVMetalTextureCacheCreateTextureFromImage(nil, ui.texture_cache, buffer, nil, 80, width, height, 0, &cv_texture) != 0 {
 		return ui.last_video_texture, ui.last_video_width, ui.last_video_height
 	}
 	if cv_texture == nil { return ui.last_video_texture, ui.last_video_width, ui.last_video_height }
-	defer CFRelease(cv_texture)
+	trace_foreign_lifetime("create", "CVMetalTexture", cv_texture, "current_video_texture")
+	defer foreign_release(cv_texture, "CVMetalTexture", "current_video_texture")
 	texture := CVMetalTextureGetTexture(cv_texture)
 	if texture == nil { return ui.last_video_texture, ui.last_video_width, ui.last_video_height }
 	retained := msg_id(texture, sel_registerName("retain"))
@@ -1443,14 +1489,20 @@ build_metal_window :: proc() {
 	msg_void_id(state.window, sel_registerName("setContentView:"), ui.view)
 
 	ui.device = MTLCreateSystemDefaultDevice()
+	assert_foreign(rawptr(ui.device), "MTLCreateSystemDefaultDevice failed")
 	ui.queue = msg_id(ui.device, sel_registerName("newCommandQueue"))
+	assert_foreign(rawptr(ui.queue), "Unable to create the Metal command queue")
 	ui.layer = msg_id(objc_getClass("CAMetalLayer"), sel_registerName("layer"))
+	assert_foreign(rawptr(ui.layer), "Unable to create CAMetalLayer")
 	msg_void_id(ui.layer, sel_registerName("setDevice:"), ui.device)
 	msg_void_i(ui.layer, sel_registerName("setPixelFormat:"), 80)
 	msg_void_bool(ui.layer, sel_registerName("setFramebufferOnly:"), true)
 	msg_void_bool(ui.view, sel_registerName("setWantsLayer:"), true)
 	msg_void_id(ui.view, sel_registerName("setLayer:"), ui.layer)
-	CVMetalTextureCacheCreate(nil,nil,ui.device,nil,&ui.texture_cache)
+	cache_status := CVMetalTextureCacheCreate(nil,nil,ui.device,nil,&ui.texture_cache)
+	when ODIN_DEBUG {
+		assert(cache_status == 0 && ui.texture_cache != nil, "Unable to create CVMetalTextureCache")
+	}
 	if !compile_pipelines() {
 		fmt.eprintln("Unable to compile Metal UI pipelines")
 		return

@@ -64,11 +64,20 @@ width; the text origin, width, and border gap remain paired.
 
 ### Build
 
-Install Odin and ensure `odin` is on `PATH`, then build with:
+Install Odin and ensure `odin` is on `PATH`. The default build is unoptimized,
+includes debug information and assertions, and emits a matching dSYM:
 
 ```sh
 ./build.sh
 open build/VocalTraining.app
+```
+
+Other build modes use separate output directories:
+
+```sh
+./build.sh trace    # debug build with Core Foundation lifetime logging
+./build.sh asan     # AddressSanitizer
+./build.sh release  # optimized production build
 ```
 
 The same binary supports scripted imports for diagnostics:
@@ -85,7 +94,50 @@ Run the dependency-free watcher during development:
 ./dev.sh
 ```
 
-It fingerprints `src/*.odin`, `build.sh`, and `Info.plist` every half-second.
-A successful change rebuilds and relaunches the app; a failed build leaves the
-currently running app untouched. Press `Ctrl-C` to stop the watcher and app.
-Library data remains in Application Support across relaunches.
+It fingerprints the source, build scripts, and `Info.plist` every half-second.
+A successful change rebuilds and relaunches the debug app; a failed build
+leaves the currently running app untouched. Metal validation is enabled.
+Press `Ctrl-C` to stop the watcher and app.
+
+If the app exits abnormally, the watcher copies the exact executable, its
+dSYM, the newest macOS crash report, the binary UUID, and the Git revision into
+`build/crashes/<timestamp>-<mode>/` before another build can replace them.
+
+### Crash diagnosis
+
+Run the app under LLDB when reproducing a deterministic interaction crash:
+
+```sh
+./dev-lldb.sh
+```
+
+LLDB prints all thread backtraces, ARM64 registers, the caller frame, and its
+instructions when the process faults. Each launch stores the LLDB transcript,
+exact executable, dSYM, UUID, and Git revision in
+`build/lldb-sessions/<timestamp>/`. Run AddressSanitizer for heap use-after-free,
+buffer overruns, and double releases:
+
+```sh
+./dev-asan.sh
+```
+
+Run the lifetime-tracing build to print CoreText and Core Video object
+creation, retention, drawing, and release transitions:
+
+```sh
+./dev-trace.sh
+```
+
+Apple's allocator diagnostics are available as separate debug profiles:
+
+```sh
+./dev-memory.sh scribble
+./dev-memory.sh guard-edges
+./dev-memory.sh zombies
+./dev-memory.sh guard-malloc
+```
+
+`scribble` poisons released allocations, `guard-edges` guards large heap
+boundaries, `zombies` reports Objective-C messages sent after release, and
+`guard-malloc` places allocations behind guard pages. These modes deliberately
+consume more memory and run more slowly than `./dev.sh`.
