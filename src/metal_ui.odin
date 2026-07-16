@@ -20,23 +20,37 @@ foreign core_graphics {
 	CGContextSaveGState         :: proc "c" (ctx: rawptr) ---
 	CGContextRestoreGState      :: proc "c" (ctx: rawptr) ---
 	CGContextClipToRect         :: proc "c" (ctx: rawptr, rect: Rect) ---
+	CGContextSetTextPosition    :: proc "c" (ctx: rawptr, x, y: f64) ---
 }
 
 foreign import core_text "system:CoreText.framework"
 foreign core_text {
-	CTFontCreateWithName           :: proc "c" (name: rawptr, size: f64, transform: rawptr) -> rawptr ---
-	CTFontGetGlyphsForCharacters   :: proc "c" (font: rawptr, characters: ^u16, glyphs: ^u16, count: int) -> bool ---
-	CTFontGetAdvancesForGlyphs     :: proc "c" (font: rawptr, orientation: u32, glyphs: ^u16, advances: ^Size, count: int) -> f64 ---
-	CTFontGetAscent                :: proc "c" (font: rawptr) -> f64 ---
-	CTFontGetDescent               :: proc "c" (font: rawptr) -> f64 ---
-	CTFontGetLeading               :: proc "c" (font: rawptr) -> f64 ---
-	CTFontDrawGlyphs               :: proc "c" (font: rawptr, glyphs: ^u16, positions: ^Point, count: int, ctx: rawptr) ---
+	CTFontCreateWithName              :: proc "c" (name: rawptr, size: f64, transform: rawptr) -> rawptr ---
+	CTLineCreateWithAttributedString  :: proc "c" (string: rawptr) -> rawptr ---
+	CTLineCreateTruncatedLine         :: proc "c" (line: rawptr, width: f64, truncation_type: u32, token: rawptr) -> rawptr ---
+	CTLineGetTypographicBounds        :: proc "c" (line: rawptr, ascent, descent, leading: ^f64) -> f64 ---
+	CTLineGetGlyphRuns                :: proc "c" (line: rawptr) -> rawptr ---
+	CTLineDraw                        :: proc "c" (line, ctx: rawptr) ---
+	CTRunGetGlyphCount                :: proc "c" (run: rawptr) -> int ---
+	kCTFontAttributeName: rawptr
+	kCTForegroundColorFromContextAttributeName: rawptr
+	kCTLigatureAttributeName: rawptr
 }
 
 foreign import core_foundation "system:CoreFoundation.framework"
 foreign core_foundation {
-	CFStringCreateWithCString :: proc "c" (allocator: rawptr, text: cstring, encoding: u32) -> rawptr ---
-	CFRelease                 :: proc "c" (value: rawptr) ---
+	CFStringCreateWithCString           :: proc "c" (allocator: rawptr, text: cstring, encoding: u32) -> rawptr ---
+	CFStringCreateWithBytes             :: proc "c" (allocator: rawptr, bytes: [^]u8, count: int, encoding: u32, external: bool) -> rawptr ---
+	CFStringGetLength                   :: proc "c" (string: rawptr) -> int ---
+	CFAttributedStringCreateMutable     :: proc "c" (allocator: rawptr, max_length: int) -> rawptr ---
+	CFAttributedStringReplaceString     :: proc "c" (string: rawptr, range: CF_Range, replacement: rawptr) ---
+	CFAttributedStringSetAttribute      :: proc "c" (string: rawptr, range: CF_Range, name, value: rawptr) ---
+	CFArrayGetCount                     :: proc "c" (array: rawptr) -> int ---
+	CFArrayGetValueAtIndex              :: proc "c" (array: rawptr, index: int) -> rawptr ---
+	CFNumberCreate                      :: proc "c" (allocator: rawptr, number_type: int, value: rawptr) -> rawptr ---
+	CFRetain                            :: proc "c" (value: rawptr) -> rawptr ---
+	CFRelease                           :: proc "c" (value: rawptr) ---
+	kCFBooleanTrue: rawptr
 }
 
 foreign import core_video "system:CoreVideo.framework"
@@ -98,6 +112,7 @@ MTL_Origin :: struct { x, y, z: uint }
 MTL_Size :: struct { width, height, depth: uint }
 MTL_Region :: struct { origin: MTL_Origin, size: MTL_Size }
 NS_Range :: struct { location, length: uint }
+CF_Range :: struct { location, length: int }
 
 SMALL_FONT_SIZE :: 10.5
 TITLE_FONT_SIZE :: SMALL_FONT_SIZE*2
@@ -109,8 +124,7 @@ Text_Align :: enum {
 }
 
 Text_Run :: struct {
-	glyphs: []u16,
-	advances: []Size,
+	line: rawptr,
 	advance: f64,
 	ascent: f64,
 	descent: f64,
@@ -450,34 +464,64 @@ push_texture_rect :: proc(vertices: ^[dynamic]Texture_Vertex, rect: UI_Rect, col
 }
 
 make_text_run :: proc(font: rawptr, text: string) -> Text_Run {
-	run := Text_Run{
-		ascent=CTFontGetAscent(font),
-		descent=CTFontGetDescent(font),
-		leading=CTFontGetLeading(font),
-	}
+	run: Text_Run
 	if len(text) == 0 { return run }
-	characters: [dynamic]u16
-	defer delete(characters)
-	for rune in text {
-		if rune <= 0xffff {
-			append(&characters, u16(rune))
-		} else {
-			value := u32(rune)-0x10000
-			append(&characters, u16(0xd800+(value>>10)), u16(0xdc00+(value&0x3ff)))
-		}
+	bytes := transmute([]u8)text
+	string_ref := CFStringCreateWithBytes(nil, raw_data(bytes), len(bytes), 0x08000100, false)
+	if string_ref == nil { return run }
+	defer CFRelease(string_ref)
+	attributed := CFAttributedStringCreateMutable(nil, 0)
+	if attributed == nil { return run }
+	defer CFRelease(attributed)
+	CFAttributedStringReplaceString(attributed, CF_Range{0,0}, string_ref)
+	range := CF_Range{0,CFStringGetLength(string_ref)}
+	CFAttributedStringSetAttribute(attributed, range, kCTFontAttributeName, font)
+	CFAttributedStringSetAttribute(attributed, range, kCTForegroundColorFromContextAttributeName, kCFBooleanTrue)
+	standard_ligatures := i32(1)
+	ligature_value := CFNumberCreate(nil, 9, &standard_ligatures)
+	if ligature_value != nil {
+		CFAttributedStringSetAttribute(attributed, range, kCTLigatureAttributeName, ligature_value)
+		CFRelease(ligature_value)
 	}
-	if len(characters) == 0 { return run }
-	run.glyphs = make([]u16, len(characters))
-	run.advances = make([]Size, len(characters))
-	CTFontGetGlyphsForCharacters(font, &characters[0], &run.glyphs[0], len(characters))
-	run.advance = CTFontGetAdvancesForGlyphs(font, 0, &run.glyphs[0], &run.advances[0], len(run.glyphs))
+	run.line = CTLineCreateWithAttributedString(attributed)
+	if run.line != nil {
+		run.advance = CTLineGetTypographicBounds(run.line, &run.ascent, &run.descent, &run.leading)
+	}
 	return run
 }
 
 delete_text_run :: proc(run: ^Text_Run) {
-	if run.glyphs != nil { delete(run.glyphs) }
-	if run.advances != nil { delete(run.advances) }
+	if run.line != nil { CFRelease(run.line) }
 	run^ = {}
+}
+
+truncated_text_run :: proc(run: Text_Run, font: rawptr, max_width: f64) -> Text_Run {
+	if run.line == nil { return {} }
+	if run.advance <= max_width {
+		result := run
+		result.line = CFRetain(run.line)
+		return result
+	}
+	token := make_text_run(font, "…")
+	defer delete_text_run(&token)
+	if token.line == nil || token.advance > max_width { return {} }
+	truncated: Text_Run
+	truncated.line = CTLineCreateTruncatedLine(run.line, max_width, 1, token.line)
+	if truncated.line != nil {
+		truncated.advance = CTLineGetTypographicBounds(truncated.line, &truncated.ascent, &truncated.descent, &truncated.leading)
+	}
+	return truncated
+}
+
+text_run_glyph_count :: proc(run: Text_Run) -> int {
+	if run.line == nil { return 0 }
+	runs := CTLineGetGlyphRuns(run.line)
+	if runs == nil { return 0 }
+	count := 0
+	for index in 0..<CFArrayGetCount(runs) {
+		count += CTRunGetGlyphCount(CFArrayGetValueAtIndex(runs, index))
+	}
+	return count
 }
 
 text_origin :: proc(rect: UI_Rect, run: Text_Run, horizontal, vertical: Text_Align, inset: f64 = 0) -> Point {
@@ -496,17 +540,11 @@ text_origin :: proc(rect: UI_Rect, run: Text_Run, horizontal, vertical: Text_Ali
 	return Point{x, baseline}
 }
 
-draw_text_run :: proc(ctx, font: rawptr, run: Text_Run, origin: Point, color: [4]f64) {
-	if len(run.glyphs) == 0 { return }
-	positions := make([]Point, len(run.glyphs))
-	defer delete(positions)
-	pen := origin.x
-	for i in 0..<len(run.glyphs) {
-		positions[i] = Point{pen, origin.y}
-		pen += run.advances[i].width
-	}
+draw_text_run :: proc(ctx: rawptr, run: Text_Run, origin: Point, color: [4]f64) {
+	if ctx == nil || run.line == nil { return }
 	CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], color[3])
-	CTFontDrawGlyphs(font, &run.glyphs[0], &positions[0], len(run.glyphs), ctx)
+	CGContextSetTextPosition(ctx, origin.x, origin.y)
+	CTLineDraw(run.line, ctx)
 }
 
 draw_text_in_rect :: proc(
@@ -518,15 +556,24 @@ draw_text_in_rect :: proc(
 	inset: f64 = 0,
 	clip := true,
 ) {
-	if rect.w <= 0 || rect.h <= 0 || len(text) == 0 { return }
+	if ctx == nil || rect.w <= 0 || rect.h <= 0 || len(text) == 0 { return }
 	run := make_text_run(font, text)
 	defer delete_text_run(&run)
+	available_width := max(0, (rect.w-inset*2)*ui.scale)
+	draw_run := run
+	truncated: Text_Run
+	if run.advance > available_width {
+		truncated = truncated_text_run(run, font, available_width)
+		if truncated.line == nil { return }
+		draw_run = truncated
+	}
 	if clip {
 		CGContextSaveGState(ctx)
-		defer CGContextRestoreGState(ctx)
 		CGContextClipToRect(ctx, Rect{Point{rect.x*ui.scale,rect.y*ui.scale},Size{rect.w*ui.scale,rect.h*ui.scale}})
 	}
-	draw_text_run(ctx, font, run, text_origin(rect, run, horizontal, vertical, inset), color)
+	draw_text_run(ctx, draw_run, text_origin(rect, draw_run, horizontal, vertical, inset), color)
+	if clip { CGContextRestoreGState(ctx) }
+	delete_text_run(&truncated)
 }
 
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {

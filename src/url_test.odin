@@ -193,3 +193,107 @@ metal_ui_text_origin_uses_run_metrics_and_container_rect_test :: proc(t: ^testin
 	testing.expect_value(t, end.x, 65)
 	testing.expect_value(t, end.y, 37)
 }
+
+@(test)
+core_text_shapes_and_measures_complete_lines_test :: proc(t: ^testing.T) {
+	font_name := CFStringCreateWithCString(nil, "HoeflerText-Regular", 0x08000100)
+	testing.expect(t, font_name != nil)
+	defer CFRelease(font_name)
+	font := CTFontCreateWithName(font_name, 32, nil)
+	testing.expect(t, font != nil)
+	defer CFRelease(font)
+
+	pair := make_text_run(font, "AV")
+	a := make_text_run(font, "A")
+	v := make_text_run(font, "V")
+	ligature := make_text_run(font, "fi")
+	arabic := make_text_run(font, "سلام")
+	defer delete_text_run(&pair)
+	defer delete_text_run(&a)
+	defer delete_text_run(&v)
+	defer delete_text_run(&ligature)
+	defer delete_text_run(&arabic)
+
+	testing.expect(t, pair.line != nil && arabic.line != nil)
+	testing.expect(t, pair.advance < a.advance+v.advance)
+	testing.expect(t, text_run_glyph_count(ligature) < 2)
+	testing.expect(t, text_run_glyph_count(arabic) > 0)
+}
+
+@(test)
+core_text_truncation_uses_a_shaped_ellipsis_line_test :: proc(t: ^testing.T) {
+	font_name := CFStringCreateWithCString(nil, "Helvetica", 0x08000100)
+	defer CFRelease(font_name)
+	font := CTFontCreateWithName(font_name, 18, nil)
+	defer CFRelease(font)
+	full := make_text_run(font, "A deliberately long proportional-font label")
+	defer delete_text_run(&full)
+	truncated := truncated_text_run(full, font, full.advance/2)
+	defer delete_text_run(&truncated)
+	testing.expect(t, truncated.line != nil)
+	testing.expect(t, truncated.advance <= full.advance/2)
+	testing.expect(t, text_run_glyph_count(truncated) > 0)
+}
+
+@(test)
+core_text_draws_the_measured_line_into_the_overlay_context_test :: proc(t: ^testing.T) {
+	pixels := make([]u8, 256*64*4)
+	defer delete(pixels)
+	space := CGColorSpaceCreateDeviceRGB()
+	defer CGColorSpaceRelease(space)
+	ctx := CGBitmapContextCreate(raw_data(pixels), 256, 64, 8, 256*4, space, 0x2002)
+	testing.expect(t, ctx != nil)
+	defer CGContextRelease(ctx)
+	font_name := CFStringCreateWithCString(nil, "Helvetica", 0x08000100)
+	defer CFRelease(font_name)
+	font := CTFontCreateWithName(font_name, 24, nil)
+	defer CFRelease(font)
+	run := make_text_run(font, "Voice fi سلام")
+	defer delete_text_run(&run)
+	draw_text_run(ctx, run, Point{4,24}, [4]f64{1,1,1,1})
+	has_ink := false
+	for pixel in pixels {
+		if pixel != 0 {
+			has_ink = true
+			break
+		}
+	}
+	testing.expect(t, has_ink)
+}
+
+@(test)
+core_text_draws_a_truncated_line_before_releasing_it_test :: proc(t: ^testing.T) {
+	pixels := make([]u8, 96*32*4)
+	defer delete(pixels)
+	space := CGColorSpaceCreateDeviceRGB()
+	defer CGColorSpaceRelease(space)
+	ctx := CGBitmapContextCreate(raw_data(pixels), 96, 32, 8, 96*4, space, 0x2002)
+	testing.expect(t, ctx != nil)
+	defer CGContextRelease(ctx)
+	font_name := CFStringCreateWithCString(nil, "Helvetica", 0x08000100)
+	defer CFRelease(font_name)
+	font := CTFontCreateWithName(font_name, 18, nil)
+	defer CFRelease(font)
+	previous_scale := ui.scale
+	ui.scale = 1
+	defer ui.scale = previous_scale
+
+	draw_text_in_rect(
+		ctx,
+		font,
+		"A deliberately long proportional-font label",
+		UI_Rect{0,0,96,32},
+		.Start,
+		.Center,
+		[4]f64{1,1,1,1},
+	)
+
+	has_ink := false
+	for pixel in pixels {
+		if pixel != 0 {
+			has_ink = true
+			break
+		}
+	}
+	testing.expect(t, has_ink)
+}

@@ -53,7 +53,10 @@ video, and Core Video maps decoded frames into Metal textures.
 The interface uses Berkeley Mono and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface and 21 points for the
 `VOCAL TRAINING / SIGNAL WORKBENCH` title and `EXECUTE` action. Container text
-is positioned from measured glyph-run advances and font ascent/descent metrics.
+is shaped as a complete CoreText line, then positioned from its measured
+advance and ascent/descent metrics. Measurement, alignment, truncation, and
+drawing reuse that same shaped line, preserving kerning, ligatures, fallback
+fonts, combining marks, bidirectional ordering, and complex-script shaping.
 
 The command field uses a segmented-border heading. Its top border stops eight
 points before the heading and resumes eight points after the declared heading
