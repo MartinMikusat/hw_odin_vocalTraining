@@ -2,6 +2,7 @@ package main
 
 import "core:testing"
 import "core:encoding/json"
+import "core:os"
 import "core:strings"
 
 @(test)
@@ -296,4 +297,35 @@ core_text_draws_a_truncated_line_before_releasing_it_test :: proc(t: ^testing.T)
 		}
 	}
 	testing.expect(t, has_ink)
+}
+
+@(test)
+metal_player_survives_autorelease_pool_drain_and_replacement_test :: proc(t: ^testing.T) {
+	objc_handle := os.dlopen("/usr/lib/libobjc.A.dylib", os.RTLD_NOW)
+	testing.expect(t, objc_handle != nil)
+	testing.expect(t, os.dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", os.RTLD_NOW) != nil)
+	testing.expect(t, os.dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", os.RTLD_NOW) != nil)
+	previous_send := send_address
+	send_address = os.dlsym(objc_handle, "objc_msgSend")
+	testing.expect(t, send_address != nil)
+	defer {
+		metal_player_clear()
+		send_address = previous_send
+	}
+	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
+	testing.expect(t, app != nil)
+
+	first_pool := msg_id(objc_getClass("NSAutoreleasePool"), sel_registerName("new"))
+	testing.expect(t, metal_player_load("/tmp/vocal-training-player-lifetime-one.mp4"))
+	first_player := state.player
+	msg_void(first_pool, sel_registerName("drain"))
+	testing.expect(t, first_player != nil)
+	testing.expect(t, msg_f32(first_player, sel_registerName("rate")) >= 0)
+
+	second_pool := msg_id(objc_getClass("NSAutoreleasePool"), sel_registerName("new"))
+	testing.expect(t, metal_player_load("/tmp/vocal-training-player-lifetime-two.mp4"))
+	second_player := state.player
+	msg_void(second_pool, sel_registerName("drain"))
+	testing.expect(t, second_player != nil)
+	testing.expect(t, msg_f32(second_player, sel_registerName("rate")) >= 0)
 }

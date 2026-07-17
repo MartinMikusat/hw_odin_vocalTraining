@@ -341,11 +341,11 @@ seek_seconds :: proc(seconds: f64) {
 	msg_void_time(state.player, sel_registerName("seekToTime:"), t)
 }
 
-load_source_player :: proc(index: int) {
-	if index < 0 || index >= len(state.sources) { return }
-	state.active_source = index
+load_source_player :: proc(index: int) -> bool {
+	if index < 0 || index >= len(state.sources) { return false }
 	path := state.sources[index].media_path
-	metal_player_load(path)
+	if !metal_player_load(path) { return false }
+	state.active_source = index
 	state.has_start, state.has_end = false, false
 	set_text(state.exercise_name_input, "")
 	if state.has_pending_hint {
@@ -357,6 +357,7 @@ load_source_player :: proc(index: int) {
 		}
 	}
 	refresh_transcript()
+	return true
 }
 
 refresh_transcript :: proc() {
@@ -531,7 +532,10 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	export_job_running = false
 	if !export_job_success { set_text(state.status, fmt.tprintf("ffmpeg failed; details: %s", diagnostic_log_path("ffmpeg"))); return }
 	if export_job_preview {
-		metal_player_load(export_job.clip_path)
+		if !metal_player_load(export_job.clip_path) {
+			set_text(state.status, "Unable to load the exported preview")
+			return
+		}
 		msg_void(state.player, sel_registerName("play"))
 		set_text(state.status, fmt.tprintf("Previewing %.2f seconds", export_job.end_seconds-export_job.start_seconds))
 		return
@@ -546,8 +550,12 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	index := ui_event_tag
 	if sender != nil { index = int(msg_uint(sender, sel_registerName("tag"))) }
-	load_source_player(index)
-	set_text(state.status, fmt.tprintf("Loaded %s", state.sources[index].title))
+	if index < 0 || index >= len(state.sources) { return }
+	if load_source_player(index) {
+		set_text(state.status, fmt.tprintf("Loaded %s", state.sources[index].title))
+	} else {
+		set_text(state.status, "Unable to load the selected source")
+	}
 }
 
 on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
@@ -557,7 +565,10 @@ on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if index < 0 || index >= len(state.exercises) { return }
 	exercise := &state.exercises[index]
 	if !os.exists(exercise.clip_path) { set_text(state.status, "The exported clip file is missing"); return }
-	metal_player_load(exercise.clip_path)
+	if !metal_player_load(exercise.clip_path) {
+		set_text(state.status, "Unable to load the selected exercise")
+		return
+	}
 	msg_void(state.player, sel_registerName("play"))
 	set_text(state.status, fmt.tprintf("Playing %s", exercise.name))
 }
@@ -600,5 +611,6 @@ main :: proc() {
 	}
 	pool := msg_id(objc_getClass("NSAutoreleasePool"), sel_registerName("new"))
 	build_metal_window()
+	metal_player_clear()
 	msg_void(pool, sel_registerName("drain"))
 }

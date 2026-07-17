@@ -1182,21 +1182,59 @@ fragment float4 texture_fragment(TextureOut in [[stage_in]], texture2d<float> im
 	return ui.solid_pipeline != nil && ui.texture_pipeline != nil
 }
 
-metal_player_load :: proc(path: string) {
+metal_player_clear_texture :: proc() {
 	if ui.last_video_texture != nil {
 		msg_void(ui.last_video_texture, sel_registerName("release"))
 		ui.last_video_texture = nil
 		ui.last_video_width, ui.last_video_height = 0, 0
 	}
+}
+
+metal_player_clear :: proc() {
+	metal_player_clear_texture()
+	player := state.player
+	output := ui.video_output
+	state.player = nil
+	ui.video_output = nil
+	if player != nil {
+		msg_void(player, sel_registerName("pause"))
+		msg_void(player, sel_registerName("release"))
+	}
+	if output != nil {
+		msg_void(output, sel_registerName("release"))
+	}
+}
+
+metal_player_load :: proc(path: string) -> bool {
 	url := msg_id_id(objc_getClass("NSURL"), sel_registerName("fileURLWithPath:"), nsstring(path))
+	if url == nil { return false }
 	item := msg_id_id(objc_getClass("AVPlayerItem"), sel_registerName("playerItemWithURL:"), url)
+	if item == nil { return false }
 	pixel_type := msg_id_uint(objc_getClass("NSNumber"), sel_registerName("numberWithUnsignedInt:"), 0x42475241)
 	settings := msg_id_id_id(objc_getClass("NSDictionary"), sel_registerName("dictionaryWithObject:forKey:"), pixel_type, nsstring("PixelFormatType"))
 	output := msg_id_id(msg_id(objc_getClass("AVPlayerItemVideoOutput"), sel_registerName("alloc")), sel_registerName("initWithPixelBufferAttributes:"), settings)
+	if output == nil { return false }
 	msg_void_id(item, sel_registerName("addOutput:"), output)
-	state.player = msg_id_id(objc_getClass("AVPlayer"), sel_registerName("playerWithPlayerItem:"), item)
+	player := msg_id_id(msg_id(objc_getClass("AVPlayer"), sel_registerName("alloc")), sel_registerName("initWithPlayerItem:"), item)
+	if player == nil {
+		msg_void(output, sel_registerName("release"))
+		return false
+	}
+
+	old_player := state.player
+	old_output := ui.video_output
+	state.player = player
 	ui.video_output = output
+	metal_player_clear_texture()
+	if old_player != nil {
+		msg_void(old_player, sel_registerName("pause"))
+		msg_void(old_player, sel_registerName("release"))
+	}
+	if old_output != nil {
+		msg_void(old_output, sel_registerName("release"))
+	}
 	ui.needs_redraw = true
+	return true
 }
 
 activate_control :: proc(index: int) {
