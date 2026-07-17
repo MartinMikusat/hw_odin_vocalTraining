@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:strings"
 import "base:runtime"
+import mem_virtual "core:mem/virtual"
 
 foreign import metal "system:Metal.framework"
 foreign metal {
@@ -424,7 +425,7 @@ active_segment_count :: proc() -> int {
 	if state.active_source < 0 { return 0 }
 	count := 0
 	source_id := state.sources[state.active_source].id
-	for segment in state.segments {
+	for segment in state.transcripts.segments {
 		if segment.source_id == source_id { count += 1 }
 	}
 	return count
@@ -482,7 +483,7 @@ push_border_with_heading_gap :: proc(vertices: ^[dynamic]Solid_Vertex, rect: UI_
 	push_rect(vertices, UI_Rect{right_x, top, max(0, rect.x+rect.w-right_x), 1}, color)
 }
 
-push_texture_rect :: proc(vertices: ^[dynamic]Texture_Vertex, rect: UI_Rect, color: [4]f32) {
+texture_rect_vertices :: proc(rect: UI_Rect, color: [4]f32) -> [6]Texture_Vertex {
 	x0 := f32(rect.x/ui.width*2-1)
 	x1 := f32((rect.x+rect.w)/ui.width*2-1)
 	y0 := f32(rect.y/ui.height*2-1)
@@ -491,7 +492,7 @@ push_texture_rect :: proc(vertices: ^[dynamic]Texture_Vertex, rect: UI_Rect, col
 	v1 := Texture_Vertex{x1,y0,1,1,color[0],color[1],color[2],color[3]}
 	v2 := Texture_Vertex{x1,y1,1,0,color[0],color[1],color[2],color[3]}
 	v3 := Texture_Vertex{x0,y1,0,0,color[0],color[1],color[2],color[3]}
-	append(vertices, v0, v1, v2, v0, v2, v3)
+	return [6]Texture_Vertex{v0, v1, v2, v0, v2, v3}
 }
 
 make_text_run :: proc(font: rawptr, text: string) -> Text_Run {
@@ -663,7 +664,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	row = UI_Rect{transcript_content.x, transcript_content.y+transcript_content.h-25+ui.transcript_scroll, transcript_content.w, 25}
 	if state.active_source >= 0 {
 		source_id := state.sources[state.active_source].id
-		for segment in state.segments {
+		for segment in state.transcripts.segments {
 			if segment.source_id != source_id { continue }
 			if row.y >= transcript_content.y && row.y+row.h <= transcript_content.y+transcript_content.h {
 				color := [4]f32{0.043,0.047,0.045,0.96}
@@ -714,7 +715,15 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 }
 
 build_text_overlay :: proc(width, height: uint) -> []u8 {
-	pixels := make([]u8, int(width*height*4))
+	if height == 0 || width > max(uint)/height || width*height > max(uint)/4 {
+		arena_note_failure(&memory.redraw_stats)
+		return nil
+	}
+	pixels, allocation_error := mem_virtual.make(&memory.redraw, []u8, int(width*height*4))
+	if allocation_error != nil {
+		arena_note_failure(&memory.redraw_stats)
+		return nil
+	}
 	space := CGColorSpaceCreateDeviceRGB()
 	assert_foreign(space, "CGColorSpaceCreateDeviceRGB failed")
 	ctx := CGBitmapContextCreate(raw_data(pixels), width, height, 8, width*4, space, 0x2002)
@@ -766,7 +775,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	draw_text_in_rect(ctx, small_font, "02 / MONITOR", player_header, .Start, .Center, muted, 10)
 	draw_text_in_rect(ctx, small_font, state.active_source >= 0 ? "SIGNAL LOCK" : "NO SIGNAL", player_header, .End, .Center, state.active_source >= 0 ? cyan : dim, 10)
 	draw_text_in_rect(ctx, small_font, "03 / TIMED TRANSCRIPT", transcript_header, .Start, .Center, muted, 10)
-	draw_text_in_rect(ctx, small_font, fmt.tprintf("%04d SEGMENTS", len(state.segments)), transcript_header, .End, .Center, cyan, 10)
+	draw_text_in_rect(ctx, small_font, fmt.tprintf("%04d SEGMENTS", len(state.transcripts.segments)), transcript_header, .End, .Center, cyan, 10)
 	draw_text_in_rect(ctx, small_font, "04 / EXERCISE BANK", exercise_header, .Start, .Center, muted, 10)
 	draw_text_in_rect(ctx, small_font, fmt.tprintf("%03d SAVED", len(state.exercises)), exercise_header, .End, .Center, cyan, 10)
 
@@ -821,7 +830,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	if state.active_source >= 0 {
 		source_id := state.sources[state.active_source].id
 		segment_index := 1
-		for segment in state.segments {
+		for segment in state.transcripts.segments {
 			if segment.source_id != source_id { continue }
 			if row.y >= transcript_content.y && row.y+row.h <= transcript_content.y+transcript_content.h {
 				draw_text_in_rect(ctx, small_font, fmt.tprintf("%03d", segment_index), UI_Rect{row.x+8,row.y,36,row.h}, .Start, .Center, muted)
@@ -832,7 +841,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			segment_index += 1
 		}
 	}
-	if len(state.segments) == 0 {
+	if len(state.transcripts.segments) == 0 {
 		draw_text_in_rect(ctx, small_font, "0000  NO TIMECODE DATA / LOAD CAPTIONS", UI_Rect{transcript_content.x,transcript_content.y+transcript_content.h-25,transcript_content.w,25}, .Start, .Center, dim, 8)
 	}
 	CGContextRestoreGState(ctx)
@@ -879,16 +888,20 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 ensure_text_texture :: proc(width, height: uint) -> bool {
 	if ui.text_texture != nil && ui.text_width == width && ui.text_height == height { return false }
 	desc := msg_id_u_u_u_b(objc_getClass("MTLTextureDescriptor"), sel_registerName("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), 80, width, height, false)
-	ui.text_texture = msg_id_id(ui.device, sel_registerName("newTextureWithDescriptor:"), desc)
+	texture := msg_id_id(ui.device, sel_registerName("newTextureWithDescriptor:"), desc)
+	if texture == nil {
+		ui.needs_redraw = true
+		return false
+	}
+	if ui.text_texture != nil { msg_void(ui.text_texture, sel_registerName("release")) }
+	ui.text_texture = texture
 	ui.text_width, ui.text_height = width, height
 	return true
 }
 
 encode_texture :: proc(encoder, texture: Id, rect: UI_Rect, alpha: f32) {
 	if texture == nil { return }
-	vertices: [dynamic]Texture_Vertex
-	defer delete(vertices)
-	push_texture_rect(&vertices, rect, [4]f32{1,1,1,alpha})
+	vertices := texture_rect_vertices(rect, [4]f32{1,1,1,alpha})
 	msg_void_id(encoder, sel_registerName("setRenderPipelineState:"), ui.texture_pipeline)
 	msg_void_ptr_u_u(encoder, sel_registerName("setVertexBytes:length:atIndex:"), raw_data(vertices[:]), uint(len(vertices))*size_of(Texture_Vertex), 0)
 	msg_void_id_u(encoder, sel_registerName("setFragmentTexture:atIndex:"), texture, 0)
@@ -947,7 +960,7 @@ rebuild_accessibility :: proc() {
 	row = UI_Rect{transcript_content.x, transcript_content.y+transcript_content.h-25+ui.transcript_scroll, transcript_content.w, 25}
 	if state.active_source >= 0 {
 		source_id := state.sources[state.active_source].id
-		for segment in state.segments {
+		for segment in state.transcripts.segments {
 			if segment.source_id != source_id { continue }
 			if row.y >= transcript_content.y && row.y+row.h <= transcript_content.y+transcript_content.h {
 				label := fmt.tprintf("%.1f seconds, %s", segment.start_seconds, segment.text)
@@ -983,6 +996,7 @@ find_ax_action :: proc(element: Id) -> ^AX_Action {
 
 on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	action := find_ax_action(self)
 	if action == nil { return false }
 	#partial switch action.kind {
@@ -1013,6 +1027,7 @@ on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 
 on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	action := find_ax_action(self)
 	if action == nil { return nil }
 	#partial switch action.kind {
@@ -1026,6 +1041,7 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 
 on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	action := find_ax_action(self)
 	if action == nil { return }
 	utf8 := msg_id(value, sel_registerName("UTF8String"))
@@ -1083,6 +1099,7 @@ current_video_texture :: proc() -> (Id, uint, uint) {
 
 render_frame :: proc() {
 	if ui.layer == nil || ui.width <= 0 || ui.height <= 0 { return }
+	arena_reset(&memory.frame, &memory.frame_stats)
 	drawable := msg_id(ui.layer, sel_registerName("nextDrawable"))
 	if drawable == nil { return }
 	texture := msg_id(drawable, sel_registerName("texture"))
@@ -1094,13 +1111,29 @@ render_frame :: proc() {
 	msg_void_i(attachment, sel_registerName("setLoadAction:"), 2)
 	msg_void_i(attachment, sel_registerName("setStoreAction:"), 1)
 	msg_void_clear_color(attachment, sel_registerName("setClearColor:"), MTL_Clear_Color{0.026,0.028,0.027,1})
+
+	pixel_width := uint(max(1, ui.width*ui.scale))
+	pixel_height := uint(max(1, ui.height*ui.scale))
+	texture_resized := ensure_text_texture(pixel_width, pixel_height)
+	redraw_requested := ui.needs_redraw || texture_resized
+	overlay_uploaded := !redraw_requested
+	if redraw_requested {
+		arena_reset(&memory.redraw, &memory.redraw_stats)
+		pixels := build_text_overlay(pixel_width, pixel_height)
+		if pixels != nil {
+			msg_void_region_u_ptr_u(ui.text_texture, sel_registerName("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), MTL_Region{MTL_Origin{0,0,0},MTL_Size{pixel_width,pixel_height,1}}, 0, raw_data(pixels), pixel_width*4)
+			overlay_uploaded = true
+		}
+	}
+
 	encoder := msg_id_id(command_buffer, sel_registerName("renderCommandEncoderWithDescriptor:"), pass)
 
-	vertices: [dynamic]Solid_Vertex
-	build_geometry(&vertices)
+	frame_allocator := mem_virtual.arena_allocator(&memory.frame)
+	vertices, vertices_error := make([dynamic]Solid_Vertex, 0, 1024, frame_allocator)
+	if vertices_error != nil { arena_note_failure(&memory.frame_stats) }
+	if vertices_error == nil { build_geometry(&vertices) }
 	msg_void_id(encoder, sel_registerName("setRenderPipelineState:"), ui.solid_pipeline)
-	encode_solid_vertices(encoder, vertices[:])
-	delete(vertices)
+	if vertices_error == nil { encode_solid_vertices(encoder, vertices[:]) }
 
 	_, _, _, _, player, _, _, _, _, _ := layout_rects()
 	player_rect := player_content_rect(player)
@@ -1117,21 +1150,34 @@ render_frame :: proc() {
 		encode_texture(encoder, video_texture, draw_rect, 1)
 	}
 
-	pixel_width := uint(max(1, ui.width*ui.scale))
-	pixel_height := uint(max(1, ui.height*ui.scale))
-	texture_resized := ensure_text_texture(pixel_width, pixel_height)
-	if ui.needs_redraw || texture_resized {
-		pixels := build_text_overlay(pixel_width, pixel_height)
-		msg_void_region_u_ptr_u(ui.text_texture, sel_registerName("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), MTL_Region{MTL_Origin{0,0,0},MTL_Size{pixel_width,pixel_height,1}}, 0, raw_data(pixels), pixel_width*4)
-		delete(pixels)
-	}
 	encode_texture(encoder, ui.text_texture, UI_Rect{0,0,ui.width,ui.height}, 1)
 
 	msg_void(encoder, sel_registerName("endEncoding"))
 	msg_void_id(command_buffer, sel_registerName("presentDrawable:"), drawable)
 	msg_void(command_buffer, sel_registerName("commit"))
+	memory.frame_stats.high_water = max(memory.frame_stats.high_water, memory.frame.total_used)
+	memory.redraw_stats.high_water = max(memory.redraw_stats.high_water, memory.redraw.total_used)
 	if ui.needs_redraw { rebuild_accessibility() }
-	ui.needs_redraw = false
+	ui.needs_redraw = !overlay_uploaded
+}
+
+ui_memory_destroy :: proc() {
+	metal_player_clear()
+	if ui.ax_children != nil { msg_void(ui.ax_children, sel_registerName("release")) }
+	if ui.text_texture != nil { msg_void(ui.text_texture, sel_registerName("release")) }
+	if ui.solid_pipeline != nil { msg_void(ui.solid_pipeline, sel_registerName("release")) }
+	if ui.texture_pipeline != nil { msg_void(ui.texture_pipeline, sel_registerName("release")) }
+	if ui.queue != nil { msg_void(ui.queue, sel_registerName("release")) }
+	if ui.texture_cache != nil { foreign_release(ui.texture_cache, "CVMetalTextureCache", "ui_memory_destroy") }
+	delete(ui.url_input)
+	delete(ui.source_search)
+	delete(ui.exercise_search)
+	delete(ui.exercise_name)
+	delete(ui.status)
+	delete(ui.marked_text)
+	delete(ax_actions)
+	ui = {}
+	ax_actions = nil
 }
 
 compile_pipelines :: proc() -> bool {
@@ -1280,7 +1326,7 @@ dispatch_click :: proc(point: Point) {
 	row = UI_Rect{transcript_content.x, transcript_content.y+transcript_content.h-25+ui.transcript_scroll, transcript_content.w, 25}
 	if state.active_source >= 0 {
 		source_id := state.sources[state.active_source].id
-		for segment in state.segments {
+		for segment in state.transcripts.segments {
 			if segment.source_id != source_id { continue }
 			if row.y >= transcript_content.y && row.y+row.h <= transcript_content.y+transcript_content.h && contains(row, point) {
 				seek_seconds(segment.start_seconds)
@@ -1310,6 +1356,7 @@ dispatch_click :: proc(point: Point) {
 
 on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	ui.mouse = msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
 	dispatch_click(ui.mouse)
@@ -1318,6 +1365,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 
 on_metal_mouse_moved :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	next := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
 	if next != ui.mouse {
@@ -1328,6 +1376,7 @@ on_metal_mouse_moved :: proc "c" (self: Id, command: Sel, event: Id) {
 
 on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
@@ -1347,6 +1396,7 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 
 on_metal_insert_text :: proc "c" (self: Id, command: Sel, value: Id, replacement: NS_Range) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	target := focused_text()
 	if target == nil { return }
 	if ui.has_marked_text && len(ui.marked_text) <= len(target^) {
@@ -1361,6 +1411,7 @@ on_metal_insert_text :: proc "c" (self: Id, command: Sel, value: Id, replacement
 
 on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	target := focused_text()
 	if selector == sel_registerName("deleteBackward:") {
 		if target != nil { remove_last_character(target) }
@@ -1376,6 +1427,7 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 
 on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if ui.focus == .None {
 		key := msg_uint(event, sel_registerName("keyCode"))
 		if key == 49 { on_toggle_playback(nil,nil,nil); return }
@@ -1394,6 +1446,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 
 on_metal_set_marked :: proc "c" (self: Id, command: Sel, value: Id, selected, replacement: NS_Range) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	target := focused_text()
 	if target == nil { return }
 	if ui.has_marked_text && len(ui.marked_text) <= len(target^) {
@@ -1409,12 +1462,14 @@ on_metal_set_marked :: proc "c" (self: Id, command: Sel, value: Id, selected, re
 
 on_metal_unmark :: proc "c" (self: Id, command: Sel) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	ui_set_string(&ui.marked_text, "")
 	ui.has_marked_text = false
 }
 on_metal_has_marked :: proc "c" (self: Id, command: Sel) -> bool { return ui.has_marked_text }
 on_metal_range :: proc "c" (self: Id, command: Sel) -> NS_Range {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	target := focused_text()
 	if target == nil { return NS_Range{~uint(0),0} }
 	if command == sel_registerName("markedRange") {
@@ -1425,12 +1480,14 @@ on_metal_range :: proc "c" (self: Id, command: Sel) -> NS_Range {
 }
 on_metal_valid_attributes :: proc "c" (self: Id, command: Sel) -> Id {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	return msg_id(objc_getClass("NSArray"), sel_registerName("array"))
 }
 on_metal_attributed_substring :: proc "c" (self: Id, command: Sel, range: NS_Range, actual: ^NS_Range) -> Id { return nil }
 on_metal_character_index :: proc "c" (self: Id, command: Sel, point: Point) -> uint { return 0 }
 on_metal_first_rect :: proc "c" (self: Id, command: Sel, range: NS_Range, actual: ^NS_Range) -> Rect {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	frame := msg_rect(state.window, sel_registerName("frame"))
 	return Rect{Point{frame.origin.x+ui.mouse.x,frame.origin.y+ui.mouse.y},Size{1,18}}
 }
@@ -1439,6 +1496,7 @@ on_metal_accepts_first :: proc "c" (self: Id, command: Sel) -> bool { return tru
 
 on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if state.player != nil && msg_f32(state.player, sel_registerName("rate")) > 0 { ui.needs_redraw = true }
 	frame := msg_rect(ui.view, sel_registerName("bounds"))
 	if ui.width != frame.size.width || ui.height != frame.size.height {

@@ -5,6 +5,7 @@ import "core:os"
 import "core:strings"
 import "core:thread"
 import "base:runtime"
+import mem_virtual "core:mem/virtual"
 
 Id  :: rawptr
 Sel :: rawptr
@@ -76,7 +77,7 @@ App_State :: struct {
 	pending_hint: f64,
 	has_pending_hint: bool,
 	sources: [dynamic]Source_Video,
-	segments: [dynamic]Transcript_Segment,
+	transcripts: Transcript_Generation,
 	hints: [dynamic]Import_Hint,
 	exercises: [dynamic]Exercise,
 }
@@ -85,14 +86,38 @@ state: App_State
 send_address: rawptr
 system_address: rawptr
 last_imported_source: int = -1
-import_job_text: string
-import_job_accepted: int
-import_job_failed: int
-import_job_running: bool
-export_job: Exercise
-export_job_running: bool
-export_job_preview: bool
-export_job_success: bool
+
+Import_Job :: struct {
+	thread: ^thread.Thread,
+	completion_target: Id,
+	arena: ^mem_virtual.Arena,
+	input: string,
+	sources: [dynamic]Source_Video,
+	hints: [dynamic]Import_Hint,
+	new_sources: [dynamic]Source_Video,
+	new_hints: [dynamic]Import_Hint,
+	snapshot_transcripts: Transcript_Generation,
+	transcripts: Transcript_Generation,
+	has_transcript_update: bool,
+	last_video_id: string,
+	pending_hint: f64,
+	has_pending_hint: bool,
+	accepted: int,
+	failed: int,
+}
+
+Export_Job :: struct {
+	thread: ^thread.Thread,
+	completion_target: Id,
+	arena: ^mem_virtual.Arena,
+	exercise: Exercise,
+	source_path: string,
+	preview: bool,
+	success: bool,
+}
+
+import_job: ^Import_Job
+export_job: ^Export_Job
 
 msg_id :: proc(receiver: Id, selector: Sel) -> Id {
 	p := transmute(proc "c" (Id, Sel) -> Id)send_address
@@ -295,9 +320,10 @@ import_url :: proc(url: string) -> bool {
 	if result != 0 { return false }
 	id_copy := strings.clone(video_id)
 	url_copy := strings.clone(url)
-	append(&state.sources, Source_Video{id=id_copy, video_id=strings.clone(video_id), title=strings.clone(video_id), url=url_copy, media_path=fmt.tprintf("%s/sources/%s.mp4", dir, video_id)})
+	append(&state.sources, Source_Video{id=id_copy, video_id=strings.clone(video_id), title=strings.clone(video_id), url=url_copy, media_path=fmt.aprintf("%s/sources/%s.mp4", dir, video_id)})
 	last_imported_source = len(state.sources)-1
 	if metadata, loaded := load_download_metadata(video_id); loaded {
+		delete(state.sources[len(state.sources)-1].title)
 		state.sources[len(state.sources)-1].title = strings.clone(metadata.title)
 		state.sources[len(state.sources)-1].duration = metadata.duration
 		delete(metadata.title)
@@ -375,6 +401,8 @@ refresh_exercises :: proc() {
 
 on_transcribe :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if import_job != nil { set_text(state.status, "Wait for the active import to finish"); return }
 	if state.active_source < 0 { set_text(state.status, "Import or select a source first"); return }
 	source := &state.sources[state.active_source]
 	count := load_youtube_transcript(source)
@@ -385,68 +413,196 @@ on_transcribe :: proc "c" (self: Id, command: Sel, sender: Id) {
 
 on_seek_transcript :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	tag := msg_uint(sender, sel_registerName("tag"))
 	seek_seconds(f64(tag)/1000)
 }
 
-export_exercise :: proc(exercise: ^Exercise) -> bool {
-	source: ^Source_Video
-	for &candidate in state.sources { if candidate.id == exercise.source_id { source = &candidate; break } }
-	if source == nil { return false }
+export_exercise :: proc(exercise: ^Exercise, source_path: string, allocator := context.allocator) -> bool {
 	dir := app_support_dir()
 	os.make_directory(fmt.tprintf("%s/clips", dir))
-	exercise.clip_path = fmt.tprintf("%s/clips/%s.mp4", dir, exercise.id)
-	command := clip_export_command(source.media_path, exercise.clip_path, exercise.start_seconds, exercise.end_seconds)
+	exercise.clip_path = fmt.aprintf("%s/clips/%s.mp4", dir, exercise.id, allocator=allocator)
+	command := clip_export_command(source_path, exercise.clip_path, exercise.start_seconds, exercise.end_seconds)
 	c_command := strings.clone_to_cstring(command)
 	defer delete(c_command)
 	run := transmute(proc "c" (cstring) -> int)system_address
 	return run(c_command) == 0
 }
 
-import_worker :: proc() {
+import_job_destroy :: proc(job: ^Import_Job) {
+	if job == nil { return }
+	transcript_generation_destroy(&job.snapshot_transcripts)
+	transcript_generation_destroy(&job.transcripts)
+	growing_arena_destroy(job.arena)
+	free(job)
+}
+
+import_job_create :: proc(input: string) -> ^Import_Job {
+	arena, ok := growing_arena_create()
+	if !ok { return nil }
+	job := new(Import_Job)
+	job.arena = arena
+	job.completion_target = state.delegate_target
+	allocator := mem_virtual.arena_allocator(arena)
+	job.input = strings.clone(input, allocator)
+	job.sources = make([dynamic]Source_Video, 0, len(state.sources), allocator)
+	job.hints = make([dynamic]Import_Hint, 0, len(state.hints), allocator)
+	job.new_sources = make([dynamic]Source_Video, allocator)
+	job.new_hints = make([dynamic]Import_Hint, allocator)
+	for source in state.sources {
+		copy, copied := clone_source_video(source, allocator)
+		if !copied { import_job_destroy(job); return nil }
+		append(&job.sources, copy)
+	}
+	for hint in state.hints {
+		copy, copied := clone_import_hint(hint, allocator)
+		if !copied { import_job_destroy(job); return nil }
+		append(&job.hints, copy)
+	}
+	job.snapshot_transcripts, ok = transcript_generation_copy(state.transcripts.segments[:])
+	if !ok { import_job_destroy(job); return nil }
+	return job
+}
+
+import_job_find_source :: proc(job: ^Import_Job, video_id: string) -> ^Source_Video {
+	for &source in job.sources { if source.video_id == video_id { return &source } }
+	for &source in job.new_sources { if source.video_id == video_id { return &source } }
+	return nil
+}
+
+import_job_has_hint :: proc(job: ^Import_Job, source_id: string, seconds: f64) -> bool {
+	for hint in job.hints { if hint.source_id == source_id && hint.seconds == seconds { return true } }
+	for hint in job.new_hints { if hint.source_id == source_id && hint.seconds == seconds { return true } }
+	return false
+}
+
+import_job_add_hint :: proc(job: ^Import_Job, source_id: string, seconds: f64) {
+	if import_job_has_hint(job, source_id, seconds) { return }
+	allocator := mem_virtual.arena_allocator(job.arena)
+	append(&job.new_hints, Import_Hint{source_id=strings.clone(source_id, allocator), seconds=seconds})
+	job.pending_hint, job.has_pending_hint = seconds, true
+}
+
+import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
+	video_id, valid := parse_video_id(url)
+	if !valid { return false }
+	allocator := mem_virtual.arena_allocator(job.arena)
+	job.last_video_id = strings.clone(video_id, allocator)
+	if source := import_job_find_source(job, video_id); source != nil {
+		if seconds, has_time := parse_timestamp(url); has_time { import_job_add_hint(job, source.id, seconds) }
+		return true
+	}
+
+	dir := app_support_dir()
+	os.make_directory(dir)
+	os.make_directory(fmt.tprintf("%s/sources", dir))
+	output := fmt.tprintf("%s/sources/%s.%%(ext)s", dir, video_id)
+	command := youtube_download_command(url, output, diagnostic_log_path("yt-dlp"))
+	c_command := strings.clone_to_cstring(command)
+	defer delete(c_command)
+	run := transmute(proc "c" (cstring) -> int)system_address
+	if run(c_command) != 0 { return false }
+
+	source := Source_Video{
+		id=strings.clone(video_id, allocator),
+		video_id=strings.clone(video_id, allocator),
+		title=strings.clone(video_id, allocator),
+		url=strings.clone(url, allocator),
+		media_path=fmt.aprintf("%s/sources/%s.mp4", dir, video_id, allocator=allocator),
+	}
+	if metadata, loaded := load_download_metadata(video_id, allocator); loaded {
+		source.title = metadata.title
+		source.duration = metadata.duration
+	}
+	append(&job.new_sources, source)
+	if seconds, has_time := parse_timestamp(url); has_time { import_job_add_hint(job, source.id, seconds) }
+
+	previous := job.snapshot_transcripts.segments[:]
+	if job.has_transcript_update { previous = job.transcripts.segments[:] }
+	if next, _, loaded := build_transcript_generation(&job.new_sources[len(job.new_sources)-1], previous); loaded {
+		transcript_generation_destroy(&job.transcripts)
+		job.transcripts = next
+		job.has_transcript_update = true
+	}
+	return true
+}
+
+import_worker :: proc(t: ^thread.Thread) {
 	context = runtime.default_context()
-	import_job_accepted, import_job_failed = 0, 0
-	for raw in strings.split_lines(import_job_text) {
+	job := cast(^Import_Job)t.data
+	for raw in strings.split_lines(job.input) {
 		url := strings.trim_space(raw)
 		if len(url) == 0 { continue }
-		if import_url(url) { import_job_accepted += 1 } else { import_job_failed += 1 }
+		if import_job_process_url(job, url) { job.accepted += 1 } else { job.failed += 1 }
 	}
-	msg_void_sel_id_b(state.delegate_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("importFinished:"), nil, false)
+	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("importFinished:"), nil, false)
 }
 
 on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
-	if import_job_accepted > 0 {
-		load_source_player(last_imported_source)
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	job := import_job
+	if job == nil { return }
+	thread.join(job.thread)
+	thread.destroy(job.thread)
+	job.thread = nil
+	defer {
+		import_job = nil
+		import_job_destroy(job)
+	}
+	if job.accepted > 0 {
+		for source in job.new_sources {
+			copy, copied := clone_source_video(source)
+			if copied { append(&state.sources, copy) }
+		}
+		for hint in job.new_hints {
+			copy, copied := clone_import_hint(hint)
+			if copied { append(&state.hints, copy) }
+		}
+		if job.has_transcript_update {
+			install_transcript_generation(job.transcripts)
+			job.transcripts = {}
+		}
+		for source, index in state.sources {
+			if source.video_id == job.last_video_id { last_imported_source = index; break }
+		}
+		if job.has_pending_hint {
+			state.pending_hint, state.has_pending_hint = job.pending_hint, true
+		}
+		if last_imported_source >= 0 { load_source_player(last_imported_source) }
 		save_library()
 		refresh_sources()
 	}
-	if import_job_failed > 0 {
-		set_text(state.status, fmt.tprintf("Imported %d; %d failed. Log: %s", import_job_accepted, import_job_failed, diagnostic_log_path("yt-dlp")))
+	if job.failed > 0 {
+		set_text(state.status, fmt.tprintf("Imported %d; %d failed. Log: %s", job.accepted, job.failed, diagnostic_log_path("yt-dlp")))
 	} else {
-		set_text(state.status, fmt.tprintf("Imported %d source(s)", import_job_accepted))
+		set_text(state.status, fmt.tprintf("Imported %d source(s)", job.accepted))
 	}
-	delete(import_job_text)
-	import_job_text = ""
-	import_job_running = false
 }
 
 on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
-	if import_job_running { set_text(state.status, "An import is already running"); return }
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if import_job != nil { set_text(state.status, "An import is already running"); return }
 	if !helper_available("yt-dlp") { set_text(state.status, "yt-dlp is missing; install it with: brew install yt-dlp"); return }
 	input := strings.trim_space(field_text(state.url_input))
 	if len(input) == 0 { set_text(state.status, "Paste at least one YouTube URL"); return }
-	import_job_text = strings.clone(input)
-	import_job_running = true
+	job := import_job_create(input)
+	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
+	worker := thread.create(import_worker)
+	if worker == nil { import_job_destroy(job); set_text(state.status, "Unable to start import worker"); return }
+	job.thread = worker
+	worker.data = job
+	import_job = job
 	os.make_directory(app_support_dir())
 	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
 	set_text(state.status, "Downloading video and YouTube captions...")
-	thread.run(import_worker)
+	thread.start(worker)
 }
 
 on_set_start :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if seconds, ok := current_seconds(); ok {
 		state.range_start, state.has_start = seconds, true
 		set_text(state.status, fmt.tprintf("Start: %.2f seconds", seconds))
@@ -455,6 +611,7 @@ on_set_start :: proc "c" (self: Id, command: Sel, sender: Id) {
 
 on_set_end :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if seconds, ok := current_seconds(); ok {
 		state.range_end, state.has_end = seconds, true
 		set_text(state.status, fmt.tprintf("Range: %.2f - %.2f seconds", state.range_start, seconds))
@@ -463,7 +620,8 @@ on_set_end :: proc "c" (self: Id, command: Sel, sender: Id) {
 
 on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
-	if export_job_running { set_text(state.status, "A clip export is already running"); return }
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if export_job != nil { set_text(state.status, "A clip export is already running"); return }
 	if !helper_available("ffmpeg") { set_text(state.status, "ffmpeg is missing; install it with: brew install ffmpeg"); return }
 	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_exercise_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
 		set_text(state.status, "Select a source and mark a valid start/end range")
@@ -475,27 +633,30 @@ on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 	id := fmt.tprintf("%s-%d", source.video_id, number)
 	name := fmt.tprintf("%s Exercise %d", source.title, number)
 	entered := strings.trim_space(field_text(state.exercise_name_input))
-	if len(entered) > 0 { name = strings.clone(entered) }
-	export_job = Exercise{id=id, source_id=strings.clone(source.id), name=name, start_seconds=state.range_start, end_seconds=state.range_end}
-	export_job_preview = false
-	export_job_running = true
+	if len(entered) > 0 { name = entered }
+	job := export_job_create(Exercise{id=id, source_id=source.id, name=name, start_seconds=state.range_start, end_seconds=state.range_end}, source.media_path, false)
+	if job == nil { set_text(state.status, "Unable to allocate export job"); return }
+	export_job = job
 	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
 	set_text(state.status, "Exporting exercise clip...")
-	thread.run(export_worker)
+	thread.start(job.thread)
 }
 
 on_play :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if state.player != nil { msg_void(state.player, sel_registerName("play")) }
 }
 
 on_pause :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if state.player != nil { msg_void(state.player, sel_registerName("pause")) }
 }
 
 on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if state.player == nil { return }
 	if msg_f32(state.player, sel_registerName("rate")) > 0 {
 		msg_void(state.player, sel_registerName("pause"))
@@ -506,48 +667,87 @@ on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
 
 on_preview :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
-	if export_job_running { set_text(state.status, "A clip export is already running"); return }
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if export_job != nil { set_text(state.status, "A clip export is already running"); return }
 	if !helper_available("ffmpeg") { set_text(state.status, "ffmpeg is missing; install it with: brew install ffmpeg"); return }
 	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_exercise_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
 		set_text(state.status, "Mark a valid start and end before previewing")
 		return
 	}
 	source := &state.sources[state.active_source]
-	export_job = Exercise{id="preview", source_id=source.id, name="Range Preview", start_seconds=state.range_start, end_seconds=state.range_end}
-	export_job_preview = true
-	export_job_running = true
+	job := export_job_create(Exercise{id="preview", source_id=source.id, name="Range Preview", start_seconds=state.range_start, end_seconds=state.range_end}, source.media_path, true)
+	if job == nil { set_text(state.status, "Unable to allocate preview job"); return }
+	export_job = job
 	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
 	set_text(state.status, "Preparing range preview...")
-	thread.run(export_worker)
+	thread.start(job.thread)
 }
 
-export_worker :: proc() {
+export_job_destroy :: proc(job: ^Export_Job) {
+	if job == nil { return }
+	growing_arena_destroy(job.arena)
+	free(job)
+}
+
+export_job_create :: proc(exercise: Exercise, source_path: string, preview: bool) -> ^Export_Job {
+	arena, ok := growing_arena_create()
+	if !ok { return nil }
+	job := new(Export_Job)
+	job.arena = arena
+	job.completion_target = state.delegate_target
+	allocator := mem_virtual.arena_allocator(arena)
+	copy, copied := clone_exercise(exercise, allocator)
+	if !copied { export_job_destroy(job); return nil }
+	job.exercise = copy
+	job.source_path = strings.clone(source_path, allocator)
+	job.preview = preview
+	worker := thread.create(export_worker)
+	if worker == nil { export_job_destroy(job); return nil }
+	job.thread = worker
+	worker.data = job
+	return job
+}
+
+export_worker :: proc(t: ^thread.Thread) {
 	context = runtime.default_context()
-	export_job_success = export_exercise(&export_job)
-	msg_void_sel_id_b(state.delegate_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("exportFinished:"), nil, false)
+	job := cast(^Export_Job)t.data
+	job.success = export_exercise(&job.exercise, job.source_path, mem_virtual.arena_allocator(job.arena))
+	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("exportFinished:"), nil, false)
 }
 
 on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
-	export_job_running = false
-	if !export_job_success { set_text(state.status, fmt.tprintf("ffmpeg failed; details: %s", diagnostic_log_path("ffmpeg"))); return }
-	if export_job_preview {
-		if !metal_player_load(export_job.clip_path) {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	job := export_job
+	if job == nil { return }
+	thread.join(job.thread)
+	thread.destroy(job.thread)
+	job.thread = nil
+	defer {
+		export_job = nil
+		export_job_destroy(job)
+	}
+	if !job.success { set_text(state.status, fmt.tprintf("ffmpeg failed; details: %s", diagnostic_log_path("ffmpeg"))); return }
+	if job.preview {
+		if !metal_player_load(job.exercise.clip_path) {
 			set_text(state.status, "Unable to load the exported preview")
 			return
 		}
 		msg_void(state.player, sel_registerName("play"))
-		set_text(state.status, fmt.tprintf("Previewing %.2f seconds", export_job.end_seconds-export_job.start_seconds))
+		set_text(state.status, fmt.tprintf("Previewing %.2f seconds", job.exercise.end_seconds-job.exercise.start_seconds))
 		return
 	}
-	append(&state.exercises, export_job)
+	exercise, copied := clone_exercise(job.exercise)
+	if !copied { set_text(state.status, "Unable to store exported exercise"); return }
+	append(&state.exercises, exercise)
 	save_library()
 	refresh_exercises()
-	set_text(state.status, fmt.tprintf("Saved %s (%.2f seconds)", export_job.name, export_job.end_seconds-export_job.start_seconds))
+	set_text(state.status, fmt.tprintf("Saved %s (%.2f seconds)", job.exercise.name, job.exercise.end_seconds-job.exercise.start_seconds))
 }
 
 on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	index := ui_event_tag
 	if sender != nil { index = int(msg_uint(sender, sel_registerName("tag"))) }
 	if index < 0 || index >= len(state.sources) { return }
@@ -560,6 +760,7 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 
 on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	index := ui_event_tag
 	if sender != nil { index = int(msg_uint(sender, sel_registerName("tag"))) }
 	if index < 0 || index >= len(state.exercises) { return }
@@ -575,6 +776,7 @@ on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
 
 on_filter_lists :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	refresh_sources()
 	refresh_exercises()
 }
@@ -585,17 +787,44 @@ should_terminate_after_window_close :: proc "c" (self: Id, command: Sel, sender:
 
 on_open_data_folder :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	os.make_directory(app_support_dir())
 	url := msg_id_id(objc_getClass("NSURL"), sel_registerName("fileURLWithPath:"), nsstring(app_support_dir()))
 	workspace := msg_id(objc_getClass("NSWorkspace"), sel_registerName("sharedWorkspace"))
 	msg_void_id(workspace, sel_registerName("openURL:"), url)
 }
 
+jobs_shutdown :: proc() {
+	if import_job != nil {
+		if import_job.thread != nil {
+			thread.join(import_job.thread)
+			thread.destroy(import_job.thread)
+			import_job.thread = nil
+		}
+		import_job_destroy(import_job)
+		import_job = nil
+	}
+	if export_job != nil {
+		if export_job.thread != nil {
+			thread.join(export_job.thread)
+			thread.destroy(export_job.thread)
+			export_job.thread = nil
+		}
+		export_job_destroy(export_job)
+		export_job = nil
+	}
+}
+
 main :: proc() {
+	if !memory_init() { fmt.eprintln("Unable to initialize memory arenas"); return }
+	defer memory_destroy()
+	defer app_state_memory_destroy()
+	defer jobs_shutdown()
 	configure_helper_path()
 	objc_handle := os.dlopen("/usr/lib/libobjc.A.dylib", os.RTLD_NOW)
 	send_address = os.dlsym(objc_handle, "objc_msgSend")
 	if send_address == nil { fmt.eprintln("Unable to resolve objc_msgSend"); return }
+	defer ui_memory_destroy()
 	libsystem_handle := os.dlopen("/usr/lib/libSystem.B.dylib", os.RTLD_NOW)
 	system_address = os.dlsym(libsystem_handle, "system")
 	if system_address == nil { fmt.eprintln("Unable to resolve system"); return }

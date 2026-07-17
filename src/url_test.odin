@@ -4,6 +4,7 @@ import "core:testing"
 import "core:encoding/json"
 import "core:os"
 import "core:strings"
+import mem_virtual "core:mem/virtual"
 
 @(test)
 parse_standard_youtube_url_test :: proc(t: ^testing.T) {
@@ -328,4 +329,57 @@ metal_player_survives_autorelease_pool_drain_and_replacement_test :: proc(t: ^te
 	msg_void(second_pool, sel_registerName("drain"))
 	testing.expect(t, second_player != nil)
 	testing.expect(t, msg_f32(second_player, sel_registerName("rate")) >= 0)
+}
+
+@(test)
+virtual_arena_reset_reclaims_the_complete_frame_test :: proc(t: ^testing.T) {
+	arena: mem_virtual.Arena
+	init_error := mem_virtual.arena_init_static(&arena, 1024*1024, 4096)
+	testing.expect(t, init_error == nil)
+	defer mem_virtual.arena_destroy(&arena)
+	allocator := mem_virtual.arena_allocator(&arena)
+	vertices := make([dynamic]Solid_Vertex, 0, 64, allocator)
+	append(&vertices, Solid_Vertex{x=1,y=2})
+	testing.expect(t, arena.total_used > 0)
+	stats := Arena_Stats{name="test"}
+	arena_reset(&arena, &stats)
+	testing.expect_value(t, arena.total_used, uint(0))
+	testing.expect_value(t, stats.reset_count, u64(1))
+	testing.expect(t, stats.high_water > 0)
+}
+
+@(test)
+transcript_generation_owns_all_reachable_strings_test :: proc(t: ^testing.T) {
+	input := [2]Transcript_Segment{
+		{id="one",source_id="source-a",start_seconds=1,text="Warm up"},
+		{id="two",source_id="source-b",start_seconds=2,text="Scale"},
+	}
+	generation, ok := transcript_generation_copy(input[:])
+	testing.expect(t, ok)
+	testing.expect_value(t, len(generation.segments), 2)
+	testing.expect_value(t, generation.segments[0].text, "Warm up")
+	testing.expect(t, generation.arena.total_used > 0)
+	transcript_generation_destroy(&generation)
+	testing.expect(t, generation.arena == nil)
+	testing.expect_value(t, len(generation.segments), 0)
+}
+
+@(test)
+durable_model_clone_survives_source_arena_destruction_test :: proc(t: ^testing.T) {
+	scratch, ok := growing_arena_create(64*1024, 4096)
+	testing.expect(t, ok)
+	allocator := mem_virtual.arena_allocator(scratch)
+	source := Source_Video{
+		id=strings.clone("source", allocator),
+		video_id=strings.clone("video", allocator),
+		title=strings.clone("Warmup", allocator),
+		url=strings.clone("https://example.test", allocator),
+		media_path=strings.clone("/tmp/source.mp4", allocator),
+	}
+	copy, copied := clone_source_video(source)
+	testing.expect(t, copied)
+	growing_arena_destroy(scratch)
+	defer delete_source_video(&copy)
+	testing.expect_value(t, copy.title, "Warmup")
+	testing.expect_value(t, copy.media_path, "/tmp/source.mp4")
 }

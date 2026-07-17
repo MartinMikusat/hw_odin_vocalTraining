@@ -62,6 +62,27 @@ The command field uses a segmented-border heading. Its top border stops eight
 points before the heading and resumes eight points after the declared heading
 width; the text origin, width, and border gap remain paired.
 
+### Memory ownership
+
+The renderer owns two virtual-memory arenas. The frame arena holds solid
+geometry until `setVertexBytes` copies it into Metal's command stream, then the
+next frame resets the complete arena. The redraw arena holds the scaled RGBA
+overlay until `replaceRegion` copies it into the retained text texture, then
+the next dirty redraw resets that arena. Debug builds print each arena's
+high-water mark, reset count, and allocation-failure count at shutdown.
+
+Each import or export worker owns a private growing arena and never reads the
+mutable UI or application arrays. The main thread joins the worker, clones its
+small durable records into the heap, swaps any completed transcript generation
+into `App_State`, and destroys the worker arena. Transcript segments and every
+string reachable from them share one generation arena, so replacement installs
+the new generation before destroying the old one.
+
+Sources, import hints, exercises, and mutable UI strings remain individually
+heap-owned because they change independently. Core Foundation, Objective-C,
+AVFoundation, and Metal objects retain explicit release calls; an arena reset
+never substitutes for framework reference counting.
+
 ### Build
 
 Install Odin and ensure `odin` is on `PATH`. The default build is unoptimized,
