@@ -2,6 +2,8 @@ package main
 
 import "core:fmt"
 import "core:os"
+import os2 "core:os/os2"
+import "core:path/filepath"
 import "core:strings"
 import "core:thread"
 import "base:runtime"
@@ -291,12 +293,36 @@ diagnostic_log_path :: proc(name: string) -> string {
 	return fmt.tprintf("%s/%s.log", app_support_dir(), name)
 }
 
-youtube_download_command :: proc(url, output, log_path: string) -> string {
-	return fmt.tprintf("yt-dlp --no-playlist --force-overwrites --write-info-json --write-subs --write-auto-subs --sub-langs 'en,.*-orig' --sub-format json3 -f 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b' -S 'res,vcodec:h264' --merge-output-format mp4 -o %s %s >> %s 2>&1", shell_quote(output), shell_quote(url), shell_quote(log_path))
+embedded_helper_path :: proc(executable_path, name: string) -> string {
+	executable_dir := filepath.dir(executable_path, context.temp_allocator)
+	path, _ := filepath.join(
+		[]string{executable_dir, "..", "Resources", "helpers", name},
+		context.temp_allocator,
+	)
+	return path
 }
 
-clip_export_command :: proc(source_path, clip_path: string, start_seconds, end_seconds: f64) -> string {
-	return fmt.tprintf("ffmpeg -y -loglevel error -ss %.3f -i %s -t %.3f -c:v libx264 -c:a aac -movflags +faststart %s >> %s 2>&1", start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(diagnostic_log_path("ffmpeg")))
+helper_command :: proc(name: string) -> string {
+	executable_path, err := os2.get_executable_path(context.temp_allocator)
+	if err == nil {
+		candidate := embedded_helper_path(executable_path, name)
+		if os.exists(candidate) { return candidate }
+	}
+	return name
+}
+
+youtube_download_command :: proc(url, output, log_path: string, yt_dlp := "", ffmpeg := "") -> string {
+	yt_dlp_command := yt_dlp
+	ffmpeg_command := ffmpeg
+	if len(yt_dlp_command) == 0 { yt_dlp_command = helper_command("yt-dlp") }
+	if len(ffmpeg_command) == 0 { ffmpeg_command = helper_command("ffmpeg") }
+	return fmt.tprintf("%s --no-playlist --force-overwrites --write-info-json --write-subs --write-auto-subs --sub-langs 'en,.*-orig' --sub-format json3 --ffmpeg-location %s -f 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b' -S 'res,vcodec:h264' --merge-output-format mp4 -o %s %s >> %s 2>&1", shell_quote(yt_dlp_command), shell_quote(ffmpeg_command), shell_quote(output), shell_quote(url), shell_quote(log_path))
+}
+
+clip_export_command :: proc(source_path, clip_path: string, start_seconds, end_seconds: f64, ffmpeg := "") -> string {
+	ffmpeg_command := ffmpeg
+	if len(ffmpeg_command) == 0 { ffmpeg_command = helper_command("ffmpeg") }
+	return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -c:v libx264 -c:a aac -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(diagnostic_log_path("ffmpeg")))
 }
 
 import_url :: proc(url: string) -> bool {
@@ -342,12 +368,67 @@ import_url :: proc(url: string) -> bool {
 	return true
 }
 
-helper_available :: proc(name: string) -> bool {
-	command := fmt.tprintf("command -v %s >/dev/null 2>&1", name)
+helper_available :: proc(name: string) -> (available: bool, reason: string) {
+	command_path := helper_command(name)
+	lookup := fmt.tprintf("command -v %s >/dev/null 2>&1", shell_quote(command_path))
+	c_lookup := strings.clone_to_cstring(lookup)
+	run := transmute(proc "c" (cstring) -> int)system_address
+	found := run(c_lookup) == 0
+	delete(c_lookup)
+	if !found { return false, fmt.tprintf("%s was not found", name) }
+
+	version_flag := "--version"
+	expected_output := "[0-9]*.[0-9]*.[0-9]*"
+	if name == "ffmpeg" {
+		version_flag = "-version"
+		expected_output = "ffmpeg\\ version\\ *"
+	}
+	os.make_directory(app_support_dir())
+	log_path := diagnostic_log_path(name)
+	command := fmt.tprintf(
+		"output=$(%s %s 2>&1); status=$?; if [ \"$status\" -eq 0 ]; then case \"$output\" in %s) exit 0 ;; esac; fi; printf '%%s\\n' \"$output\" >> %s 2>/dev/null || true; exit 1",
+		shell_quote(command_path),
+		version_flag,
+		expected_output,
+		shell_quote(log_path),
+	)
 	c_command := strings.clone_to_cstring(command)
 	defer delete(c_command)
-	run := transmute(proc "c" (cstring) -> int)system_address
-	return run(c_command) == 0
+	if run(c_command) != 0 {
+		return false, fmt.tprintf("%s could not run or returned an invalid version; details: %s", name, log_path)
+	}
+	return true, ""
+}
+
+require_helper :: proc(name: string) -> bool {
+	available, reason := helper_available(name)
+	if available { return true }
+	set_text(state.status, reason)
+	return false
+}
+
+validate_startup_helpers :: proc() {
+	yt_dlp_available, yt_dlp_reason := helper_available("yt-dlp")
+	ffmpeg_available, ffmpeg_reason := helper_available("ffmpeg")
+	if yt_dlp_available && ffmpeg_available { return }
+
+	message := "Vocal Training checked its media helpers before starting."
+	if !yt_dlp_available {
+		message = fmt.tprintf("%s\n\n%s. YouTube import and refetch are unavailable.", message, yt_dlp_reason)
+	}
+	if !ffmpeg_available {
+		message = fmt.tprintf("%s\n\n%s. Import, refetch, preview, and exercise export are unavailable.", message, ffmpeg_reason)
+	}
+	message = fmt.tprintf("%s\n\nNo media task was started. Contact the person who provided this app.", message)
+	set_text(state.status, message)
+
+	alert := msg_id(msg_id(objc_getClass("NSAlert"), sel_registerName("alloc")), sel_registerName("init"))
+	msg_void_id(alert, sel_registerName("setMessageText:"), nsstring("Media helpers are unavailable"))
+	msg_void_id(alert, sel_registerName("setInformativeText:"), nsstring(message))
+	_ = msg_id_id(alert, sel_registerName("addButtonWithTitle:"), nsstring("OK"))
+	msg_void_i(alert, sel_registerName("setAlertStyle:"), 2)
+	_ = msg_uint(alert, sel_registerName("runModal"))
+	msg_void(alert, sel_registerName("release"))
 }
 
 configure_helper_path :: proc() {
@@ -641,7 +722,7 @@ on_refetch_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if import_job != nil { set_text(state.status, "An import is already running"); return }
 	if state.active_source < 0 || state.active_source >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
-	if !helper_available("yt-dlp") { set_text(state.status, "yt-dlp is missing; install it with: brew install yt-dlp"); return }
+	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
 	source := &state.sources[state.active_source]
 	job := import_job_create(source.url, source.video_id)
 	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
@@ -663,7 +744,7 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if import_job != nil { set_text(state.status, "An import is already running"); return }
-	if !helper_available("yt-dlp") { set_text(state.status, "yt-dlp is missing; install it with: brew install yt-dlp"); return }
+	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
 	input := strings.trim_space(field_text(state.url_input))
 	if len(input) == 0 { set_text(state.status, "Paste at least one YouTube URL"); return }
 	job := import_job_create(input)
@@ -702,7 +783,7 @@ on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if export_job != nil { set_text(state.status, "A clip export is already running"); return }
-	if !helper_available("ffmpeg") { set_text(state.status, "ffmpeg is missing; install it with: brew install ffmpeg"); return }
+	if !require_helper("ffmpeg") { return }
 	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_exercise_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
 		set_text(state.status, "Select a source and mark a valid start/end range")
 		return
@@ -749,7 +830,7 @@ on_preview :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if export_job != nil { set_text(state.status, "A clip export is already running"); return }
-	if !helper_available("ffmpeg") { set_text(state.status, "ffmpeg is missing; install it with: brew install ffmpeg"); return }
+	if !require_helper("ffmpeg") { return }
 	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_exercise_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
 		set_text(state.status, "Mark a valid start and end before previewing")
 		return
@@ -913,6 +994,10 @@ main :: proc() {
 	state.active_source = -1
 	load_library()
 	if len(os.args) == 3 && os.args[1] == "--import" {
+		yt_dlp_available, yt_dlp_reason := helper_available("yt-dlp")
+		if !yt_dlp_available { fmt.eprintln(yt_dlp_reason); return }
+		ffmpeg_available, ffmpeg_reason := helper_available("ffmpeg")
+		if !ffmpeg_available { fmt.eprintln(ffmpeg_reason); return }
 		if import_url(os.args[2]) && save_library() {
 			fmt.println("Imported source, YouTube captions, and timestamp hint")
 			return

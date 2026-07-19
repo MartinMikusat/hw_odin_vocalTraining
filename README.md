@@ -17,6 +17,11 @@ Install the media tools:
 brew install yt-dlp ffmpeg
 ```
 
+The app validates both tools at startup and immediately before each media
+operation. It prefers executables packaged in
+`Contents/Resources/helpers/`, then searches the development machine's
+`PATH`; it never installs or downloads tools itself.
+
 The application stores its library in
 `~/Library/Application Support/VocalTraining`. Only download media you are
 authorized to download.

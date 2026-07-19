@@ -3176,5 +3176,6 @@ build_metal_window :: proc() {
 	msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
 	msg_void_id(state.window, sel_registerName("makeKeyAndOrderFront:"), nil)
 	msg_void_i(app, sel_registerName("activateIgnoringOtherApps:"), 1)
+	validate_startup_helpers()
 	msg_void(app, sel_registerName("run"))
 }

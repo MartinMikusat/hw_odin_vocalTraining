@@ -95,8 +95,41 @@ youtube_command_requests_timed_captions_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+embedded_helper_path_uses_app_resources_test :: proc(t: ^testing.T) {
+	path := embedded_helper_path(
+		"/Applications/VocalTraining.app/Contents/MacOS/VocalTraining",
+		"ffmpeg",
+	)
+	testing.expect_value(
+		t,
+		path,
+		"/Applications/VocalTraining.app/Contents/Resources/helpers/ffmpeg",
+	)
+}
+
+@(test)
+youtube_command_uses_resolved_helpers_test :: proc(t: ^testing.T) {
+	command := youtube_download_command(
+		"https://youtu.be/abc",
+		"/tmp/source.%(ext)s",
+		"/tmp/download.log",
+		"/Applications/VocalTraining.app/Contents/Resources/helpers/yt-dlp",
+		"/Applications/VocalTraining.app/Contents/Resources/helpers/ffmpeg",
+	)
+	testing.expect(t, strings.has_prefix(command, "'/Applications/VocalTraining.app/Contents/Resources/helpers/yt-dlp'"))
+	testing.expect(t, strings.contains(command, "--ffmpeg-location '/Applications/VocalTraining.app/Contents/Resources/helpers/ffmpeg'"))
+}
+
+@(test)
 clip_command_uses_range_duration_test :: proc(t: ^testing.T) {
-	command := clip_export_command("/tmp/source video.mp4", "/tmp/clip.mp4", 12.5, 20.25)
+	command := clip_export_command(
+		"/tmp/source video.mp4",
+		"/tmp/clip.mp4",
+		12.5,
+		20.25,
+		"/Applications/VocalTraining.app/Contents/Resources/helpers/ffmpeg",
+	)
+	testing.expect(t, strings.has_prefix(command, "'/Applications/VocalTraining.app/Contents/Resources/helpers/ffmpeg'"))
 	testing.expect(t, strings.contains(command, "-ss 12.500"))
 	testing.expect(t, strings.contains(command, "-t 7.750"))
 	testing.expect(t, strings.contains(command, "'/tmp/source video.mp4'"))
