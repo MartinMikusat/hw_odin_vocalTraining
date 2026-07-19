@@ -47,6 +47,9 @@ Select **Refetch at Best Available Quality** to replace its media, metadata, and
 captions.
 The refetch operation also rebuilds each saved exercise from that source at the
 new resolution.
+During a download, the footer shows its completion, current stream size,
+transfer speed, and remaining time. Select **Stop** to terminate yt-dlp and
+leave the source library unchanged.
 
 The Source Register marks a source as **MISSING** when its merged MP4 file is
 not available. Right-click that source and refetch it. Inspect `yt-dlp.log` if

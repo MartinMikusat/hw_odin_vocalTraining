@@ -695,6 +695,15 @@ activity_spinner_advances_and_wraps_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+download_progress_uses_latest_complete_progress_line_test :: proc(t: ^testing.T) {
+	status, ok := download_progress_status("noise\nVT_PROGRESS| 12.5%|80.0MiB|4.0MiB/s|00:18\nVT_PROGRESS| 25.0%|80.0MiB|5.0MiB/s|00:12\n")
+	testing.expect(t, ok)
+	testing.expect_value(t, status, "Downloading 25.0% / 80.0MiB / 5.0MiB/s / ETA 00:12")
+	_, ok = download_progress_status("noise only")
+	testing.expect(t, !ok)
+}
+
+@(test)
 mode_button_stays_inside_the_header_test :: proc(t: ^testing.T) {
 	rect := mode_button_rect_for_size(1100, 720)
 	header := app_header_rect_for_size(1100, 720)

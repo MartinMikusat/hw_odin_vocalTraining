@@ -694,6 +694,10 @@ activity_spinner :: proc(tick: uint) -> string {
 	return frames[(tick / 8) % len(frames)]
 }
 
+import_cancel_rect :: proc() -> UI_Rect {
+	return UI_Rect{max(18, ui.width - 304), 3, 88, 24}
+}
+
 control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
 	slot := control_slot_for_action(ui.mode, action)
 	if slot < 0 {return {}}
@@ -2171,6 +2175,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		state.has_start && state.has_end ? cyan : muted,
 	)
 	status_rect := UI_Rect{footer.x + 314, footer.y, max(0, footer.w - 500), footer.h}
+	if import_job != nil {status_rect.w = max(0, import_cancel_rect().x - status_rect.x - 6)}
 	status_text := fmt.tprintf("SYS / %s", ui.status)
 	status_color := muted
 	if import_job != nil || export_job != nil {
@@ -2189,6 +2194,12 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		status_color,
 		10,
 	)
+	if import_job != nil {
+		cancel := import_cancel_rect()
+		fill_overlay_rect(ctx, cancel, [4]f64{0.15, 0.035, 0.025, 1})
+		fill_overlay_border(ctx, cancel, orange)
+		draw_text_in_rect(ctx, small_font, "STOP", cancel, .Center, .Center, bright)
+	}
 	draw_text_in_rect(ctx, small_font, "60 HZ / ONLINE", footer, .End, .Center, cyan)
 	draw_source_details(ctx, small_font, bright, muted, cyan)
 
@@ -3181,6 +3192,11 @@ dispatch_click :: proc(point: Point) {
 		ui_set_string(&ui.marked_text, "")
 		ui.has_marked_text = false
 	}
+	if import_job != nil && contains(import_cancel_rect(), point) {
+		import_job_cancel(import_job)
+		set_text(state.status, "Stopping download...")
+		return
+	}
 	if ui.source_details_open {
 		modal := source_details_rect()
 		if contains(source_details_close_rect(modal), point) || !contains(modal, point) {close_source_details(); return}
@@ -3573,7 +3589,10 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if import_job != nil || export_job != nil {
 		ui.activity_tick += 1
-		if ui.activity_tick % 8 == 0 {ui.needs_redraw = true}
+		if ui.activity_tick % 8 == 0 {
+			if import_job != nil {refresh_import_progress()}
+			ui.needs_redraw = true
+		}
 	} else {
 		ui.activity_tick = 0
 	}

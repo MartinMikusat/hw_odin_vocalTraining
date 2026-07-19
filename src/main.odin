@@ -6,6 +6,7 @@ import os2 "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
 import "core:thread"
+import "core:sync"
 import "base:runtime"
 import mem_virtual "core:mem/virtual"
 
@@ -24,6 +25,7 @@ foreign objc {
 foreign import libc "system:System.framework"
 foreign libc {
 	getenv :: proc "c" (name: cstring) -> cstring ---
+	kill   :: proc "c" (pid, signal: i32) -> i32 ---
 }
 
 Point :: struct { x, y: f64 }
@@ -122,6 +124,10 @@ Import_Job :: struct {
 	refreshed_exercises: int,
 	failed_exercise_refreshes: int,
 	missing_merged_media: int,
+	process_mutex: sync.Mutex,
+	process: os2.Process,
+	has_process: bool,
+	cancelled: bool,
 }
 
 Export_Job :: struct {
@@ -325,6 +331,40 @@ app_support_dir :: proc() -> string {
 
 diagnostic_log_path :: proc(name: string) -> string {
 	return fmt.tprintf("%s/%s.log", app_support_dir(), name)
+}
+
+import_progress_path :: proc() -> string {
+	return fmt.tprintf("%s/yt-dlp-progress.log", app_support_dir())
+}
+
+download_progress_status :: proc(contents: string) -> (string, bool) {
+	latest := ""
+	remaining_lines := contents
+	for line in strings.split_lines_iterator(&remaining_lines) {
+		if strings.has_prefix(line, "VT_PROGRESS|") {latest = line}
+	}
+	if len(latest) == 0 {return "", false}
+	fields: [5]string
+	field_count := 0
+	remaining_fields := latest
+	for field in strings.split_iterator(&remaining_fields, "|") {
+		if field_count >= len(fields) {return "", false}
+		fields[field_count] = field
+		field_count += 1
+	}
+	if field_count != len(fields) {return "", false}
+	percent := strings.trim_space(fields[1])
+	total := strings.trim_space(fields[2])
+	speed := strings.trim_space(fields[3])
+	eta := strings.trim_space(fields[4])
+	return fmt.tprintf("Downloading %s / %s / %s / ETA %s", percent, total, speed, eta), true
+}
+
+refresh_import_progress :: proc() {
+	if import_job == nil {return}
+	contents, read_ok := os.read_entire_file(import_progress_path(), context.temp_allocator)
+	if !read_ok {return}
+	if status, ok := download_progress_status(string(contents)); ok {set_text(state.status, status)}
 }
 
 embedded_helper_path :: proc(executable_path, name: string) -> string {
@@ -661,6 +701,52 @@ import_job_add_hint :: proc(job: ^Import_Job, source_id: string, seconds: f64) {
 	job.pending_hint, job.has_pending_hint = seconds, true
 }
 
+import_job_cancel :: proc(job: ^Import_Job) {
+	if job == nil {return}
+	sync.mutex_lock(&job.process_mutex)
+	job.cancelled = true
+	if job.has_process {_ = kill(i32(job.process.pid), 15)}
+	sync.mutex_unlock(&job.process_mutex)
+}
+
+import_job_is_cancelled :: proc(job: ^Import_Job) -> bool {
+	sync.mutex_lock(&job.process_mutex)
+	cancelled := job.cancelled
+	sync.mutex_unlock(&job.process_mutex)
+	return cancelled
+}
+
+import_job_run_download :: proc(job: ^Import_Job, url, output: string) -> bool {
+	progress_file, progress_error := os2.open(import_progress_path(), {.Write, .Create, .Trunc, .Inheritable})
+	if progress_error != nil {return false}
+	defer os2.close(progress_file)
+	log_file, log_error := os2.open(diagnostic_log_path("yt-dlp"), {.Write, .Create, .Append, .Inheritable})
+	if log_error != nil {return false}
+	defer os2.close(log_file)
+	command := [24]string{
+		helper_command("yt-dlp"), "--no-playlist", "--force-overwrites", "--write-info-json",
+		"--write-subs", "--write-auto-subs", "--sub-langs", "en,.*-orig", "--sub-format", "json3",
+		"--ffmpeg-location", helper_command("ffmpeg"), "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+		"-S", "res,vcodec:h264", "--merge-output-format", "mp4", "--newline",
+		"--progress-template", "download:VT_PROGRESS|%(progress._percent_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+		"-o", output, url,
+	}
+	process, start_error := os2.process_start({command=command[:], stdout=progress_file, stderr=log_file})
+	if start_error != nil {return false}
+	sync.mutex_lock(&job.process_mutex)
+	job.process, job.has_process = process, true
+	cancelled := job.cancelled
+	if cancelled {_ = kill(i32(process.pid), 15)}
+	sync.mutex_unlock(&job.process_mutex)
+	process_state, wait_error := os2.process_wait(process)
+	_ = os2.process_close(process)
+	sync.mutex_lock(&job.process_mutex)
+	job.has_process = false
+	cancelled = job.cancelled
+	sync.mutex_unlock(&job.process_mutex)
+	return !cancelled && wait_error == nil && process_state.success
+}
+
 import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	video_id, valid := parse_video_id(url)
 	if !valid { return false }
@@ -677,11 +763,8 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	os.make_directory(dir)
 	os.make_directory(fmt.tprintf("%s/sources", dir))
 	output := fmt.tprintf("%s/sources/%s.%%(ext)s", dir, video_id)
-	command := youtube_download_command(url, output, diagnostic_log_path("yt-dlp"))
-	c_command := strings.clone_to_cstring(command)
-	defer delete(c_command)
+	if !import_job_run_download(job, url, output) {return false}
 	run := transmute(proc "c" (cstring) -> int)system_address
-	if run(c_command) != 0 { return false }
 	media_path := fmt.tprintf("%s/sources/%s.mp4", dir, video_id)
 	if !os.exists(media_path) {
 		job.missing_merged_media += 1
@@ -750,6 +833,7 @@ import_worker :: proc(t: ^thread.Thread) {
 	context = runtime.default_context()
 	job := cast(^Import_Job)t.data
 	for raw in strings.split_lines(job.input) {
+		if import_job_is_cancelled(job) {break}
 		url := strings.trim_space(raw)
 		if len(url) == 0 { continue }
 		if import_job_process_url(job, url) { job.accepted += 1 } else { job.failed += 1 }
@@ -768,6 +852,10 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	defer {
 		import_job = nil
 		import_job_destroy(job)
+	}
+	if job.cancelled {
+		set_text(state.status, "Download stopped")
+		return
 	}
 	if job.accepted > 0 {
 		if job.has_source_update {
@@ -1171,6 +1259,7 @@ jobs_shutdown :: proc() {
 		source_metadata_job = nil
 	}
 	if import_job != nil {
+		import_job_cancel(import_job)
 		if import_job.thread != nil {
 			thread.join(import_job.thread)
 			thread.destroy(import_job.thread)
