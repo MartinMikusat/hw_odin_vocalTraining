@@ -57,6 +57,8 @@ Mark the start and end of a useful section, then commit the range as an
 exercise. Saved exercises appear in the exercise bank and play as standalone
 clips when selected. The Source Monitor volume controls adjust playback in 10%
 steps and retain that level when another source is loaded during the session.
+Its transport can play, pause, stop at zero, reset to the imported URL
+timestamp, and scrub across the complete source.
 
 When no text field has focus, press **Space** to toggle playback or **1–8** to
 activate the matching numbered transport control.

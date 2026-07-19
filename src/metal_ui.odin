@@ -115,6 +115,7 @@ UI_State :: struct {
 	marked_text:        string,
 	has_marked_text:    bool,
 	player_volume:      f32,
+	source_scrubbing:   bool,
 	activity_tick:      uint,
 	needs_redraw:       bool,
 }
@@ -189,6 +190,9 @@ AX_Kind :: enum {
 	Exercise_Name,
 	Volume_Down,
 	Volume_Up,
+	Source_Play_Pause,
+	Source_Stop,
+	Source_Reset,
 	Start,
 	End,
 	Save,
@@ -550,6 +554,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.mode == mode {return}
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
+	ui.source_scrubbing = false
 	if mode == .Play {
 		metal_player_clear()
 	} else {
@@ -692,6 +697,7 @@ transcript_content_rect :: proc(transcript: UI_Rect) -> UI_Rect {
 
 player_content_rect :: proc(player: UI_Rect) -> UI_Rect {
 	bottom_metadata_height := 30.0
+	if ui.mode == .Create {bottom_metadata_height = 64}
 	header_height := 35.0
 	return UI_Rect {
 		player.x + 1,
@@ -702,7 +708,7 @@ player_content_rect :: proc(player: UI_Rect) -> UI_Rect {
 }
 
 source_timestamp_rect :: proc(player: UI_Rect) -> UI_Rect {
-	return UI_Rect{player.x + player.w - 82, player.y, 72, 30}
+	return UI_Rect{player.x + player.w - 150, player.y, 140, 30}
 }
 
 source_volume_up_rect :: proc(player: UI_Rect) -> UI_Rect {
@@ -718,6 +724,42 @@ source_volume_value_rect :: proc(player: UI_Rect) -> UI_Rect {
 source_volume_down_rect :: proc(player: UI_Rect) -> UI_Rect {
 	value := source_volume_value_rect(player)
 	return UI_Rect{value.x - 28, player.y + 3, 24, 24}
+}
+
+source_play_pause_rect :: proc(player: UI_Rect) -> UI_Rect {
+	return UI_Rect{player.x + 10, player.y + 3, 62, 24}
+}
+
+source_stop_rect :: proc(player: UI_Rect) -> UI_Rect {
+	play := source_play_pause_rect(player)
+	return UI_Rect{play.x + play.w + 6, play.y, 48, play.h}
+}
+
+source_reset_rect :: proc(player: UI_Rect) -> UI_Rect {
+	stop := source_stop_rect(player)
+	return UI_Rect{stop.x + stop.w + 6, stop.y, 58, stop.h}
+}
+
+source_timeline_rect :: proc(player: UI_Rect) -> UI_Rect {
+	return UI_Rect{player.x + 10, player.y + 36, max(0, player.w - 20), 18}
+}
+
+source_timeline_seconds :: proc(point: Point, player: UI_Rect) -> f64 {
+	if state.active_source < 0 || state.active_source >= len(state.sources) {return 0}
+	timeline := source_timeline_rect(player)
+	return timeline_seconds_at_point(point, timeline, state.sources[state.active_source].duration)
+}
+
+timeline_seconds_at_point :: proc(point: Point, timeline: UI_Rect, duration: f64) -> f64 {
+	if timeline.w <= 0 {return 0}
+	ratio := min(max((point.x - timeline.x) / timeline.w, 0), 1)
+	return ratio * max(0, duration)
+}
+
+seek_source_timeline :: proc(point: Point, player: UI_Rect) {
+	if state.player == nil {return}
+	seek_seconds(source_timeline_seconds(point, player))
+	ui.needs_redraw = true
 }
 
 clamp_volume :: proc(value: f32) -> f32 {
@@ -1271,6 +1313,25 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			push_rect(vertices, rect, button_color)
 			push_border(vertices, rect, border)
 		}
+		transport_buttons := [3]UI_Rect{source_play_pause_rect(player), source_stop_rect(player), source_reset_rect(player)}
+		for rect in transport_buttons {
+			button_color := field
+			if contains(rect, ui.mouse) {button_color = panel_alt}
+			push_rect(vertices, rect, button_color)
+			push_border(vertices, rect, border)
+		}
+		timeline := source_timeline_rect(player)
+		track := UI_Rect{timeline.x, timeline.y + timeline.h / 2 - 2, timeline.w, 4}
+		push_rect(vertices, track, rule)
+		if state.active_source >= 0 && state.active_source < len(state.sources) {
+			duration := state.sources[state.active_source].duration
+			seconds, has_seconds := current_seconds()
+			progress := 0.0
+			if has_seconds && duration > 0 {progress = min(max(seconds / duration, 0), 1)}
+			push_rect(vertices, UI_Rect{track.x, track.y, track.w * progress, track.h}, border)
+			thumb_x := track.x + track.w * progress
+			push_rect(vertices, UI_Rect{thumb_x - 3, timeline.y + 2, 6, timeline.h - 4}, [4]f32{0.72, 0.72, 0.68, 1})
+		}
 	}
 	if ui.mode == .Create {
 		add_rect := source_add_button_rect(source_panel)
@@ -1695,18 +1756,11 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		)
 	} else if ui.mode == .Create {
 		source := &state.sources[state.active_source]
-		metadata := UI_Rect{player.x, player.y, player.w, 30}
 		volume_down := source_volume_down_rect(player)
-		draw_text_in_rect(
-			ctx,
-			small_font,
-			source.title,
-			UI_Rect{metadata.x, metadata.y, max(0, volume_down.x - metadata.x - 8), metadata.h},
-			.Start,
-			.Center,
-			ink,
-			10,
-		)
+		playing := msg_f32(state.player, sel_registerName("rate")) > 0
+		draw_text_in_rect(ctx, small_font, playing ? "PAUSE" : "PLAY", source_play_pause_rect(player), .Center, .Center, playing ? orange : cyan)
+		draw_text_in_rect(ctx, small_font, "STOP", source_stop_rect(player), .Center, .Center, muted)
+		draw_text_in_rect(ctx, small_font, "RESET", source_reset_rect(player), .Center, .Center, muted)
 		volume_color := cyan
 		if ui.player_volume <= 0 {volume_color = dim}
 		draw_text_in_rect(ctx, small_font, "-", volume_down, .Center, .Center, volume_color)
@@ -1731,10 +1785,11 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			volume_up_color,
 		)
 		if seconds, ok := current_seconds(); ok {
+			timestamp := fmt.tprintf("%s / %s", format_timestamp(seconds), format_timestamp(source.duration))
 			draw_timestamp_text_in_rect(
 				ctx,
 				small_font,
-				format_timestamp(seconds),
+				timestamp,
 				source_timestamp_rect(player),
 				.End,
 				.Center,
@@ -2425,6 +2480,10 @@ rebuild_accessibility :: proc() {
 		}
 	}
 	if ui.mode == .Create && state.player != nil {
+		playing := msg_f32(state.player, sel_registerName("rate")) > 0
+		add_ax_element(array, element_class, playing ? "Pause source" : "Play source", "AXButton", source_play_pause_rect(player), .Source_Play_Pause)
+		add_ax_element(array, element_class, "Stop source and return to zero", "AXButton", source_stop_rect(player), .Source_Stop)
+		add_ax_element(array, element_class, "Return to the imported source timestamp", "AXButton", source_reset_rect(player), .Source_Reset)
 		percent := volume_percent(ui.player_volume)
 		add_ax_element(
 			array,
@@ -2506,6 +2565,12 @@ on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 		adjust_player_volume(-0.1)
 	case .Volume_Up:
 		adjust_player_volume(0.1)
+	case .Source_Play_Pause:
+		on_toggle_playback(nil, nil, nil)
+	case .Source_Stop:
+		stop_source_playback()
+	case .Source_Reset:
+		reset_source_playback()
 	case .Start:
 		on_set_start(nil, nil, nil)
 	case .End:
@@ -2827,6 +2892,7 @@ metal_player_clear_texture :: proc() {
 }
 
 metal_player_clear :: proc() {
+	ui.source_scrubbing = false
 	metal_player_clear_texture()
 	player := state.player
 	output := ui.video_output
@@ -2953,6 +3019,14 @@ dispatch_click :: proc(point: Point) {
 	if ui.mode == .Create &&
 	   contains(source_add_button_rect(source_panel), point) {open_source_modal(); return}
 	if ui.mode == .Create && state.player != nil {
+		if contains(source_timeline_rect(player), point) {
+			ui.source_scrubbing = true
+			seek_source_timeline(point, player)
+			return
+		}
+		if contains(source_play_pause_rect(player), point) {on_toggle_playback(nil, nil, nil); return}
+		if contains(source_stop_rect(player), point) {stop_source_playback(); return}
+		if contains(source_reset_rect(player), point) {reset_source_playback(); return}
 		if contains(source_volume_down_rect(player), point) {adjust_player_volume(-0.1); return}
 		if contains(source_volume_up_rect(player), point) {adjust_player_volume(0.1); return}
 	}
@@ -3060,6 +3134,26 @@ on_metal_mouse_moved :: proc "c" (self: Id, command: Sel, event: Id) {
 	next := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
 	if next != ui.mouse {
 		ui.mouse = next
+		ui.needs_redraw = true
+	}
+}
+
+on_metal_mouse_dragged :: proc "c" (self: Id, command: Sel, event: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	window_point := msg_point(event, sel_registerName("locationInWindow"))
+	ui.mouse = msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
+	if ui.source_scrubbing && ui.mode == .Create {
+		_, _, _, _, player, _, _, _, _, _ := layout_rects()
+		seek_source_timeline(ui.mouse, player)
+	}
+	ui.needs_redraw = true
+}
+
+on_metal_mouse_up :: proc "c" (self: Id, command: Sel, event: Id) {
+	context = runtime.default_context()
+	if ui.source_scrubbing {
+		ui.source_scrubbing = false
 		ui.needs_redraw = true
 	}
 }
@@ -3360,7 +3454,8 @@ register_metal_view_class :: proc() -> Id {
 	class_addMethod(class, sel_registerName("mouseDown:"), rawptr(on_metal_mouse_down), "v@:@")
 	class_addMethod(class, sel_registerName("rightMouseDown:"), rawptr(on_metal_right_mouse_down), "v@:@")
 	class_addMethod(class, sel_registerName("mouseMoved:"), rawptr(on_metal_mouse_moved), "v@:@")
-	class_addMethod(class, sel_registerName("mouseDragged:"), rawptr(on_metal_mouse_moved), "v@:@")
+	class_addMethod(class, sel_registerName("mouseDragged:"), rawptr(on_metal_mouse_dragged), "v@:@")
+	class_addMethod(class, sel_registerName("mouseUp:"), rawptr(on_metal_mouse_up), "v@:@")
 	class_addMethod(class, sel_registerName("scrollWheel:"), rawptr(on_metal_scroll), "v@:@")
 	class_addMethod(class, sel_registerName("keyDown:"), rawptr(on_metal_key_down), "v@:@")
 	class_addMethod(class, sel_registerName("paste:"), rawptr(on_metal_paste), "v@:@")

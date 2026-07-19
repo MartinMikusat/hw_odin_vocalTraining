@@ -709,3 +709,21 @@ source_details_is_centered_and_contains_its_controls_test :: proc(t: ^testing.T)
 	testing.expect(t, refetch_button.x >= modal.x && refetch_button.x+refetch_button.w <= modal.x+modal.w)
 	testing.expect(t, last_row.y >= modal.y && last_row.y+last_row.h <= modal.y+modal.h)
 }
+
+@(test)
+source_timeline_maps_and_clamps_pointer_position_test :: proc(t: ^testing.T) {
+	timeline := UI_Rect{100, 20, 400, 18}
+	testing.expect_value(t, timeline_seconds_at_point(Point{100, 25}, timeline, 200), 0.0)
+	testing.expect_value(t, timeline_seconds_at_point(Point{300, 25}, timeline, 200), 100.0)
+	testing.expect_value(t, timeline_seconds_at_point(Point{600, 25}, timeline, 200), 200.0)
+}
+
+@(test)
+source_transport_and_timeline_stay_inside_player_test :: proc(t: ^testing.T) {
+	player := UI_Rect{300, 100, 580, 360}
+	controls := [4]UI_Rect{source_play_pause_rect(player), source_stop_rect(player), source_reset_rect(player), source_timeline_rect(player)}
+	for rect in controls {
+		testing.expect(t, rect.x >= player.x && rect.x+rect.w <= player.x+player.w)
+		testing.expect(t, rect.y >= player.y && rect.y+rect.h <= player.y+player.h)
+	}
+}

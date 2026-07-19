@@ -215,6 +215,11 @@ msg_void_time :: proc(receiver: Id, selector: Sel, value: CMTime) {
 	p := transmute(proc "c" (Id, Sel, CMTime))send_address
 	p(receiver, selector, value)
 }
+
+msg_void_time_time_time :: proc(receiver: Id, selector: Sel, value, tolerance_before, tolerance_after: CMTime) {
+	p := transmute(proc "c" (Id, Sel, CMTime, CMTime, CMTime))send_address
+	p(receiver, selector, value, tolerance_before, tolerance_after)
+}
 msg_void_sel_id_b :: proc(receiver: Id, selector: Sel, action: Sel, object: Id, wait: bool) {
 	p := transmute(proc "c" (Id, Sel, Sel, Id, bool))send_address
 	p(receiver, selector, action, object, wait)
@@ -492,7 +497,36 @@ valid_exercise_range :: proc(start, end, source_duration: f64) -> bool {
 seek_seconds :: proc(seconds: f64) {
 	if state.player == nil { return }
 	t := CMTime{value=i64(seconds*600), timescale=600, flags=1}
-	msg_void_time(state.player, sel_registerName("seekToTime:"), t)
+	tolerance := CMTime{value=10, timescale=600, flags=1}
+	msg_void_time_time_time(
+		state.player,
+		sel_registerName("seekToTime:toleranceBefore:toleranceAfter:"),
+		t,
+		tolerance,
+		tolerance,
+	)
+}
+
+source_initial_seconds :: proc(source_index: int) -> f64 {
+	if source_index < 0 || source_index >= len(state.sources) {return 0}
+	source_id := state.sources[source_index].id
+	for i := len(state.hints) - 1; i >= 0; i -= 1 {
+		if state.hints[i].source_id == source_id {return state.hints[i].seconds}
+	}
+	return 0
+}
+
+stop_source_playback :: proc() {
+	if state.player == nil {return}
+	msg_void(state.player, sel_registerName("pause"))
+	seek_seconds(0)
+	ui.needs_redraw = true
+}
+
+reset_source_playback :: proc() {
+	if state.player == nil || state.active_source < 0 {return}
+	seek_seconds(source_initial_seconds(state.active_source))
+	ui.needs_redraw = true
 }
 
 load_source_player :: proc(index: int) -> bool {
@@ -509,9 +543,7 @@ load_source_player :: proc(index: int) -> bool {
 		seek_seconds(state.pending_hint)
 		state.has_pending_hint = false
 	} else {
-		for i := len(state.hints)-1; i >= 0; i -= 1 {
-			if state.hints[i].source_id == state.sources[index].id { seek_seconds(state.hints[i].seconds); break }
-		}
+		seek_seconds(source_initial_seconds(index))
 	}
 	refresh_transcript()
 	return true
