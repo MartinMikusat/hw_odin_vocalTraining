@@ -22,9 +22,10 @@ operation. It prefers executables packaged in
 `Contents/Resources/helpers/`, then searches the development machine's
 `PATH`; it never installs or downloads tools itself.
 
-The application stores its library in
-`~/Library/Application Support/VocalTraining`. Only download media you are
-authorized to download.
+The application stores its SQLite library and downloaded media in
+`~/Library/Application Support/VocalTraining`. It migrates and removes the old
+`library.json` file after it verifies the new database. Only download media you
+are authorized to download.
 
 ### Workflow
 
@@ -39,9 +40,13 @@ while timestamps supplied through `t`, `start`, or `youtu.be` URL forms become
 initial playhead hints. Import fetches the best available MP4 video and M4A
 audio streams and merges them without transcoding. Import prefers an English
 caption track and otherwise accepts YouTube's original-language automatic
-captions. Select an existing source and press **Refetch** to replace its media,
-metadata, and captions using the best streams currently available. Refetch also
-rebuilds every saved exercise derived from that source at the new resolution.
+captions. Right-click a source to open the Source Details dialog. It shows the
+duration, resolution, frame rate, codecs, container, format ID, and local file
+size. The app loads missing file metadata in the background after startup.
+Select **Refetch at Best Available Quality** to replace its media, metadata, and
+captions.
+The refetch operation also rebuilds each saved exercise from that source at the
+new resolution.
 
 Select a source, load its captions, and click a timed transcript row to seek.
 Mark the start and end of a useful section, then commit the range as an
@@ -72,6 +77,10 @@ then positioned from its measured
 advance and ascent/descent metrics. Measurement, alignment, truncation, and
 drawing reuse that same shaped line, preserving kerning, ligatures, fallback
 fonts, combining marks, bidirectional ordering, and complex-script shaping.
+
+SQLite stores sources, transcript segments, hints, exercises, and source
+metadata. The main thread commits state changes in transactions. A startup
+worker fills missing metadata from existing yt-dlp files.
 
 ### Memory ownership
 

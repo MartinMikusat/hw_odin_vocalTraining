@@ -132,7 +132,7 @@ transcript_generation_copy :: proc(segments: []Transcript_Segment) -> (Transcrip
 }
 
 clone_source_video :: proc(source: Source_Video, allocator := context.allocator) -> (Source_Video, bool) {
-	result := Source_Video{duration=source.duration}
+	result := Source_Video{duration=source.duration, metadata_status=source.metadata_status}
 	copied := false
 	defer if !copied { delete_source_video(&result, allocator) }
 	value, err := strings.clone(source.id, allocator); if err != nil { return {}, false }; result.id = value
@@ -140,6 +140,11 @@ clone_source_video :: proc(source: Source_Video, allocator := context.allocator)
 	value, err = strings.clone(source.title, allocator); if err != nil { return {}, false }; result.title = value
 	value, err = strings.clone(source.url, allocator); if err != nil { return {}, false }; result.url = value
 	value, err = strings.clone(source.media_path, allocator); if err != nil { return {}, false }; result.media_path = value
+	result.metadata = Source_Context_Metadata{width=source.metadata.width, height=source.metadata.height, fps=source.metadata.fps, filesize_approx=source.metadata.filesize_approx}
+	value, err = strings.clone(source.metadata.vcodec, allocator); if err != nil { return {}, false }; result.metadata.vcodec = value
+	value, err = strings.clone(source.metadata.acodec, allocator); if err != nil { return {}, false }; result.metadata.acodec = value
+	value, err = strings.clone(source.metadata.ext, allocator); if err != nil { return {}, false }; result.metadata.ext = value
+	value, err = strings.clone(source.metadata.format_id, allocator); if err != nil { return {}, false }; result.metadata.format_id = value
 	copied = true
 	return result, true
 }
@@ -168,6 +173,7 @@ clone_exercise :: proc(exercise: Exercise, allocator := context.allocator) -> (E
 delete_source_video :: proc(source: ^Source_Video, allocator := context.allocator) {
 	if source == nil { return }
 	delete(source.id, allocator); delete(source.video_id, allocator); delete(source.title, allocator); delete(source.url, allocator); delete(source.media_path, allocator)
+	delete_source_context_metadata(&source.metadata, allocator)
 	source^ = {}
 }
 

@@ -75,6 +75,87 @@ youtube_json3_caption_mapping_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+source_context_metadata_maps_selected_download_format_test :: proc(t: ^testing.T) {
+	fixture := `{"width":1920,"height":1080,"fps":30,"vcodec":"avc1.640028","acodec":"mp4a.40.2","ext":"mp4","format_id":"137+140","filesize_approx":76886301}`
+	metadata: Source_Context_Metadata
+	err := json.unmarshal_string(fixture, &metadata, .JSON)
+	defer {
+		delete(metadata.vcodec)
+		delete(metadata.acodec)
+		delete(metadata.ext)
+		delete(metadata.format_id)
+	}
+	testing.expect(t, err == nil)
+	testing.expect_value(t, metadata.width, 1920)
+	testing.expect_value(t, metadata.height, 1080)
+	testing.expect_value(t, metadata.fps, 30)
+	testing.expect_value(t, metadata.vcodec, "avc1.640028")
+	testing.expect_value(t, metadata.acodec, "mp4a.40.2")
+	testing.expect_value(t, metadata.format_id, "137+140")
+}
+
+@(test)
+source_context_file_size_uses_readable_units_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, format_file_size(999), "999 B")
+	testing.expect_value(t, format_file_size(1_500), "1.5 KB")
+	testing.expect_value(t, format_file_size(76_886_301), "76.9 MB")
+	testing.expect_value(t, format_file_size(1_500_000_000), "1.50 GB")
+	testing.expect_value(t, format_frame_rate(30), "30 fps")
+	testing.expect_value(t, format_frame_rate(29.97), "29.97 fps")
+}
+
+@(test)
+sqlite_source_round_trip_preserves_metadata_and_unicode_test :: proc(t: ^testing.T) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(path, &database, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, nil) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+	source := Source_Video {
+		id = "source-1",
+		video_id = "abc",
+		title = "Warm-up – Žltý hlas",
+		url = "https://youtu.be/abc",
+		media_path = "/tmp/voice.mp4",
+		duration = 333,
+		metadata_status = .Available,
+		metadata = Source_Context_Metadata{width=1920, height=1080, fps=29.97, vcodec="avc1", acodec="mp4a", ext="mp4", format_id="137+140", filesize_approx=76_886_301},
+	}
+	testing.expect(t, database_insert_source(database, source, 0))
+	statement, prepared := sqlite_prepare(database, "SELECT title, width, fps, file_size FROM sources WHERE id = 'source-1'")
+	testing.expect(t, prepared)
+	if !prepared {return}
+	testing.expect_value(t, sqlite3_step(statement), i32(SQLITE_ROW))
+	title, copied := sqlite_column_string(statement, 0)
+	defer delete(title)
+	testing.expect(t, copied)
+	testing.expect_value(t, title, source.title)
+	testing.expect_value(t, int(sqlite3_column_int(statement, 1)), 1920)
+	testing.expect_value(t, sqlite3_column_double(statement, 2), 29.97)
+	testing.expect_value(t, sqlite3_column_int64(statement, 3), i64(76_886_301))
+	sqlite3_finalize(statement)
+	statement = nil
+	loaded: App_State
+	testing.expect(t, database_load_state(database, &loaded))
+	defer {
+		for &loaded_source in loaded.sources {delete_source_video(&loaded_source)}
+		for &hint in loaded.hints {delete_import_hint(&hint)}
+		for &exercise in loaded.exercises {delete_exercise(&exercise)}
+		delete(loaded.sources); delete(loaded.hints); delete(loaded.exercises)
+		transcript_generation_destroy(&loaded.transcripts)
+	}
+	testing.expect_value(t, len(loaded.sources), 1)
+	if len(loaded.sources) == 1 {
+		testing.expect_value(t, loaded.sources[0].title, source.title)
+		testing.expect_value(t, loaded.sources[0].metadata.width, 1920)
+		testing.expect_value(t, loaded.sources[0].metadata_status, Source_Metadata_Status.Available)
+	}
+}
+
+@(test)
 exercise_range_validation_test :: proc(t: ^testing.T) {
 	testing.expect(t, valid_exercise_range(10, 20, 60))
 	testing.expect(t, !valid_exercise_range(-1, 20, 60))
@@ -107,6 +188,21 @@ persisted_state_json_round_trip_test :: proc(t: ^testing.T) {
 	testing.expect(t, unmarshal_error == nil)
 	testing.expect_value(t, restored.sources[0].title, "Warmup")
 	testing.expect_value(t, restored.exercises[0].end_seconds, 24)
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(path, &database, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, nil) == SQLITE_OK
+	testing.expect(t, opened)
+	if opened {
+		defer sqlite3_close(database)
+		testing.expect(t, database_create_schema(database))
+		testing.expect(t, database_save_collections(database, restored.sources[:], restored.segments[:], restored.hints[:], restored.exercises[:]))
+		source_count, source_count_ok := database_count(database, "sources")
+		exercise_count, exercise_count_ok := database_count(database, "exercises")
+		testing.expect(t, source_count_ok && exercise_count_ok)
+		testing.expect_value(t, source_count, 1)
+		testing.expect_value(t, exercise_count, 1)
+	}
 }
 
 @(test)
@@ -573,15 +669,13 @@ mode_button_stays_inside_the_header_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-source_header_actions_do_not_overlap_test :: proc(t: ^testing.T) {
+source_header_add_action_stays_inside_panel_test :: proc(t: ^testing.T) {
 	panel := UI_Rect{12, 80, 350, 560}
 	add := source_add_button_rect(panel)
-	refetch := source_refetch_button_rect(panel)
-	testing.expect(t, refetch.x+refetch.w < add.x)
-	testing.expect_value(t, refetch.y, add.y)
-	testing.expect_value(t, refetch.h, add.h)
-	testing.expect(t, refetch.x >= panel.x)
+	testing.expect(t, add.x >= panel.x)
+	testing.expect(t, add.y >= panel.y)
 	testing.expect(t, add.x+add.w <= panel.x+panel.w)
+	testing.expect(t, add.y+add.h <= panel.y+panel.h)
 }
 
 @(test)
@@ -595,4 +689,17 @@ source_modal_is_centered_and_contains_its_controls_test :: proc(t: ^testing.T) {
 	testing.expect(t, input.x >= modal.x && input.x+input.w <= modal.x+modal.w)
 	testing.expect(t, cancel.y >= modal.y && cancel.y+cancel.h <= modal.y+modal.h)
 	testing.expect(t, confirm.x >= modal.x && confirm.x+confirm.w <= modal.x+modal.w)
+}
+
+@(test)
+source_details_is_centered_and_contains_its_controls_test :: proc(t: ^testing.T) {
+	modal := source_details_rect_for_size(1100, 720)
+	close_button := source_details_close_rect(modal)
+	refetch_button := source_details_refetch_rect(modal)
+	last_row := source_details_row_rect(modal, 8)
+	testing.expect_value(t, modal.x+modal.w/2, 550.0)
+	testing.expect_value(t, modal.y+modal.h/2, 360.0)
+	testing.expect(t, close_button.x >= modal.x && close_button.x+close_button.w <= modal.x+modal.w)
+	testing.expect(t, refetch_button.x >= modal.x && refetch_button.x+refetch_button.w <= modal.x+modal.w)
+	testing.expect(t, last_row.y >= modal.y && last_row.y+last_row.h <= modal.y+modal.h)
 }

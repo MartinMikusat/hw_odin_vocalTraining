@@ -31,6 +31,12 @@ Size  :: struct { width, height: f64 }
 Rect  :: struct { origin: Point, size: Size }
 CMTime :: struct { value: i64, timescale: i32, flags: u32, epoch: i64 }
 
+Source_Metadata_Status :: enum i32 {
+	Missing,
+	Available,
+	Unavailable,
+}
+
 Source_Video :: struct {
 	id: string,
 	video_id: string,
@@ -38,6 +44,8 @@ Source_Video :: struct {
 	url: string,
 	media_path: string,
 	duration: f64,
+	metadata: Source_Context_Metadata,
+	metadata_status: Source_Metadata_Status,
 }
 
 Transcript_Segment :: struct {
@@ -124,8 +132,18 @@ Export_Job :: struct {
 	success: bool,
 }
 
+Source_Metadata_Job :: struct {
+	thread: ^thread.Thread,
+	completion_target: Id,
+	video_id: string,
+	media_path: string,
+	metadata: Source_Context_Metadata,
+	metadata_loaded: bool,
+}
+
 import_job: ^Import_Job
 export_job: ^Export_Job
+source_metadata_job: ^Source_Metadata_Job
 
 msg_id :: proc(receiver: Id, selector: Sel) -> Id {
 	p := transmute(proc "c" (Id, Sel) -> Id)send_address
@@ -619,8 +637,23 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 		media_path=fmt.aprintf("%s/sources/%s.mp4", dir, video_id, allocator=allocator),
 	}
 	if metadata, loaded := load_download_metadata(video_id, allocator); loaded {
+		delete(source.title, allocator)
 		source.title = metadata.title
 		source.duration = metadata.duration
+		source.metadata = Source_Context_Metadata {
+			width = metadata.width,
+			height = metadata.height,
+			fps = metadata.fps,
+			vcodec = metadata.vcodec,
+			acodec = metadata.acodec,
+			ext = metadata.ext,
+			format_id = metadata.format_id,
+			filesize_approx = metadata.filesize_approx,
+		}
+		source.metadata_status = .Available
+		if file_info, stat_error := os.stat(source.media_path, context.temp_allocator); stat_error == nil {
+			source.metadata.filesize_approx = file_info.size
+		}
 	}
 	if existing != nil {
 		job.updated_source = source
@@ -724,6 +757,85 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	} else {
 		set_text(state.status, fmt.tprintf("Imported %d source(s)", job.accepted))
 	}
+}
+
+source_metadata_job_destroy :: proc(job: ^Source_Metadata_Job) {
+	if job == nil {return}
+	delete(job.video_id)
+	delete(job.media_path)
+	delete_source_context_metadata(&job.metadata)
+	free(job)
+}
+
+source_metadata_worker :: proc(t: ^thread.Thread) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	job := cast(^Source_Metadata_Job)t.data
+	job.metadata, job.metadata_loaded = load_source_context_metadata(job.video_id)
+	if file_info, stat_error := os.stat(job.media_path, context.temp_allocator); stat_error == nil {
+		job.metadata.filesize_approx = file_info.size
+	}
+	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("sourceMetadataFinished:"), nil, false)
+}
+
+request_source_metadata :: proc(video_id, media_path: string) {
+	if source_metadata_job != nil {return}
+	for source in state.sources {
+		if source.video_id == video_id && source.metadata_status != .Missing {return}
+	}
+	job := new(Source_Metadata_Job)
+	job.completion_target = state.delegate_target
+	job.video_id = strings.clone(video_id)
+	job.media_path = strings.clone(media_path)
+	worker := thread.create(source_metadata_worker)
+	if worker == nil {
+		source_metadata_job_destroy(job)
+		return
+	}
+	job.thread = worker
+	worker.data = job
+	source_metadata_job = job
+	thread.start(worker)
+}
+
+request_next_missing_source_metadata :: proc() {
+	if source_metadata_job != nil {return}
+	if ui.source_details_open && ui.source_details_index >= 0 && ui.source_details_index < len(state.sources) {
+		source := &state.sources[ui.source_details_index]
+		if source.metadata_status == .Missing {
+			request_source_metadata(source.video_id, source.media_path)
+			return
+		}
+	}
+	for source in state.sources {
+		if source.metadata_status == .Missing {
+			request_source_metadata(source.video_id, source.media_path)
+			return
+		}
+	}
+}
+
+on_source_metadata_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	job := source_metadata_job
+	if job == nil {return}
+	thread.join(job.thread)
+	thread.destroy(job.thread)
+	job.thread = nil
+	source_metadata_job = nil
+	for &source in state.sources {
+		if source.video_id != job.video_id || source.metadata_status != .Missing {continue}
+		delete_source_context_metadata(&source.metadata)
+		source.metadata = job.metadata
+		source.metadata_status = job.metadata_loaded ? .Available : .Unavailable
+		job.metadata = {}
+		break
+	}
+	source_metadata_job_destroy(job)
+	_ = save_library()
+	source_details_metadata_changed()
+	request_next_missing_source_metadata()
 }
 
 on_refetch_source :: proc "c" (self: Id, command: Sel, sender: Id) {
@@ -967,6 +1079,15 @@ on_open_data_folder :: proc "c" (self: Id, command: Sel, sender: Id) {
 }
 
 jobs_shutdown :: proc() {
+	if source_metadata_job != nil {
+		if source_metadata_job.thread != nil {
+			thread.join(source_metadata_job.thread)
+			thread.destroy(source_metadata_job.thread)
+			source_metadata_job.thread = nil
+		}
+		source_metadata_job_destroy(source_metadata_job)
+		source_metadata_job = nil
+	}
 	if import_job != nil {
 		if import_job.thread != nil {
 			thread.join(import_job.thread)
@@ -991,6 +1112,7 @@ main :: proc() {
 	if !memory_init() { fmt.eprintln("Unable to initialize memory arenas"); return }
 	defer memory_destroy()
 	defer app_state_memory_destroy()
+	defer database_close()
 	defer jobs_shutdown()
 	configure_helper_path()
 	objc_handle := os.dlopen("/usr/lib/libobjc.A.dylib", os.RTLD_NOW)

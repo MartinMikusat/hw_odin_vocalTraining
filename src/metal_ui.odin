@@ -101,6 +101,8 @@ UI_State :: struct {
 	focus:              UI_Focus,
 	mode:               UI_Mode,
 	source_modal_open:  bool,
+	source_details_open: bool,
+	source_details_index: int,
 	url_input:          string,
 	source_search:      string,
 	exercise_search:    string,
@@ -174,8 +176,9 @@ Timestamp_Fade_Ranges :: struct {
 AX_Kind :: enum {
 	Mode_Toggle,
 	Open_Source_Modal,
-	Refetch_Source,
 	Cancel_Source_Modal,
+	Close_Source_Details,
+	Refetch_Source_Details,
 	URL,
 	Import,
 	Source_Search,
@@ -203,7 +206,7 @@ AX_Action :: struct {
 	seconds: f64,
 }
 
-ui := UI_State{player_volume = 1}
+ui := UI_State{player_volume = 1, source_details_index = -1}
 ui_event_tag: int
 ax_actions: [dynamic]AX_Action
 
@@ -455,11 +458,6 @@ source_add_button_rect :: proc(source_panel: UI_Rect) -> UI_Rect {
 	}
 }
 
-source_refetch_button_rect :: proc(source_panel: UI_Rect) -> UI_Rect {
-	add := source_add_button_rect(source_panel)
-	return UI_Rect{add.x - 76, add.y, 68, add.h}
-}
-
 source_modal_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
 	width := min(max(520, view_width * 0.46), 720)
 	height := min(max(330, view_height * 0.48), 410)
@@ -482,7 +480,56 @@ source_modal_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + modal.w - 180, modal.y + 24, 156, 34}
 }
 
+source_details_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
+	width := min(max(560, view_width * 0.52), 720)
+	height := min(max(470, view_height * 0.68), 550)
+	return UI_Rect{(view_width - width) / 2, (view_height - height) / 2, width, height}
+}
+
+source_details_rect :: proc() -> UI_Rect {
+	return source_details_rect_for_size(ui.width, ui.height)
+}
+
+source_details_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
+}
+
+source_details_refetch_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + modal.w - 286, modal.y + 22, 262, 34}
+}
+
+source_details_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + modal.h - 142 - f64(row) * 31, modal.w - 48, 30}
+}
+
+close_source_details :: proc() {
+	ui.source_details_open = false
+	ui.source_details_index = -1
+	ui.needs_redraw = true
+}
+
+source_details_metadata_changed :: proc() {
+	ui.needs_redraw = true
+	if !ui.source_details_open || ui.source_details_index < 0 || ui.source_details_index >= len(state.sources) {return}
+	source := &state.sources[ui.source_details_index]
+	request_source_metadata(source.video_id, source.media_path)
+}
+
+open_source_details :: proc(source_index: int) {
+	if source_index < 0 || source_index >= len(state.sources) {return}
+	if ui.source_details_open {close_source_details()}
+	ui.source_details_index = source_index
+	ui.source_details_open = true
+	ui.focus = .None
+	ui.has_marked_text = false
+	ui_set_string(&ui.marked_text, "")
+	ui.needs_redraw = true
+	source := &state.sources[source_index]
+	request_source_metadata(source.video_id, source.media_path)
+}
+
 open_source_modal :: proc() {
+	if ui.source_details_open {close_source_details()}
 	ui.source_modal_open = true
 	ui.focus = .URL
 	if state.window != nil && ui.view != nil {
@@ -502,6 +549,7 @@ close_source_modal :: proc() {
 set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.mode == mode {return}
 	if ui.source_modal_open {close_source_modal()}
+	if ui.source_details_open {close_source_details()}
 	if mode == .Play {
 		metal_player_clear()
 	} else {
@@ -718,6 +766,39 @@ filtered_source_count :: proc() -> int {
 		count += 1
 	}
 	return count
+}
+
+source_index_at_point :: proc(point: Point, source_search, source_panel: UI_Rect) -> int {
+	source_content := source_content_rect(source_search, source_panel)
+	row := UI_Rect {
+		source_content.x,
+		source_content.y + source_content.h - 29 + ui.source_scroll,
+		source_content.w,
+		29,
+	}
+	for source, index in state.sources {
+		if len(ui.source_search) > 0 &&
+		   !strings.contains(source.title, ui.source_search) &&
+		   !strings.contains(source.video_id, ui.source_search) {continue}
+		if row.y >= source_content.y &&
+		   row.y + row.h <= source_content.y + source_content.h &&
+		   contains(row, point) {return index}
+		row.y -= 30
+	}
+	return -1
+}
+
+format_file_size :: proc(bytes: i64) -> string {
+	if bytes < 1000 { return fmt.tprintf("%d B", bytes) }
+	if bytes < 1_000_000 { return fmt.tprintf("%.1f KB", f64(bytes) / 1000) }
+	if bytes < 1_000_000_000 { return fmt.tprintf("%.1f MB", f64(bytes) / 1_000_000) }
+	return fmt.tprintf("%.2f GB", f64(bytes) / 1_000_000_000)
+}
+
+format_frame_rate :: proc(fps: f64) -> string {
+	whole_fps := int(fps)
+	if fps == f64(whole_fps) { return fmt.tprintf("%d fps", whole_fps) }
+	return fmt.tprintf("%.2f fps", fps)
 }
 
 active_segment_count :: proc() -> int {
@@ -1083,6 +1164,66 @@ fill_overlay_border :: proc(ctx: rawptr, rect: UI_Rect, color: [4]f64) {
 	fill_overlay_rect(ctx, UI_Rect{rect.x + rect.w - 1, rect.y, 1, rect.h}, color)
 }
 
+draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
+	if !ui.source_details_open || ui.source_details_index < 0 || ui.source_details_index >= len(state.sources) {return}
+	modal := source_details_rect()
+	close_button := source_details_close_rect(modal)
+	refetch_button := source_details_refetch_rect(modal)
+	source := &state.sources[ui.source_details_index]
+	metadata := source.metadata
+	metadata_ready := source.metadata_status != .Missing
+	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, [4]f64{0.008, 0.009, 0.009, 0.88})
+	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	fill_overlay_border(ctx, modal, [4]f64{0.31, 0.32, 0.30, 1})
+	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
+	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	fill_overlay_rect(ctx, UI_Rect{header.x, header.y, header.w, 1}, [4]f64{0.31, 0.32, 0.30, 1})
+	draw_text_in_rect(ctx, font, "SOURCE DETAILS / DOWNLOADED MEDIA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
+	draw_text_in_rect(ctx, font, source.title, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - 48, 28}, .Start, .Center, cyan)
+
+	pending_value := metadata_ready ? "UNAVAILABLE" : "LOADING..."
+	resolution := pending_value
+	if metadata.width > 0 && metadata.height > 0 {resolution = fmt.tprintf("%d × %d", metadata.width, metadata.height)}
+	frame_rate := pending_value
+	if metadata.fps > 0 {frame_rate = format_frame_rate(metadata.fps)}
+	file_size := pending_value
+	if metadata.filesize_approx > 0 {file_size = format_file_size(metadata.filesize_approx)}
+	labels := [9]string{"VIDEO ID", "DURATION", "RESOLUTION", "FRAME RATE", "VIDEO CODEC", "AUDIO CODEC", "CONTAINER", "FORMAT ID", "FILE SIZE"}
+	video_codec := metadata.vcodec
+	if len(video_codec) == 0 {video_codec = pending_value}
+	audio_codec := metadata.acodec
+	if len(audio_codec) == 0 {audio_codec = pending_value}
+	container := metadata.ext
+	if len(container) == 0 {container = pending_value}
+	format_id := metadata.format_id
+	if len(format_id) == 0 {format_id = pending_value}
+	values := [9]string{source.video_id, format_timestamp(source.duration), resolution, frame_rate, video_codec, audio_codec, container, format_id, file_size}
+	for label, row_index in labels {
+		row := source_details_row_rect(modal, row_index)
+		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, [4]f64{0.043, 0.046, 0.043, 1})}
+		draw_text_in_rect(ctx, font, label, UI_Rect{row.x + 10, row.y, 142, row.h}, .Start, .Center, muted)
+		value := values[row_index]
+		if len(value) == 0 {value = "UNAVAILABLE"}
+		value_rect := UI_Rect{row.x + 160, row.y, row.w - 170, row.h}
+		if row_index == 1 {
+			draw_timestamp_text_in_rect(ctx, font, value, value_rect, .Start, .Center, bright)
+		} else {
+			draw_text_in_rect(ctx, font, value, value_rect, .Start, .Center, bright)
+		}
+	}
+
+	close_color := [4]f64{0.052, 0.055, 0.052, 1}
+	if contains(close_button, ui.mouse) {close_color = [4]f64{0.09, 0.095, 0.09, 1}}
+	fill_overlay_rect(ctx, close_button, close_color)
+	fill_overlay_border(ctx, close_button, [4]f64{0.31, 0.32, 0.30, 1})
+	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
+	refetch_color := [4]f64{0.91, 0.31, 0.075, 1}
+	if contains(refetch_button, ui.mouse) {refetch_color = [4]f64{1.0, 0.42, 0.10, 1}}
+	fill_overlay_rect(ctx, refetch_button, refetch_color)
+	fill_overlay_border(ctx, refetch_button, [4]f64{1.0, 0.45, 0.12, 1})
+	draw_text_in_rect(ctx, font, "REFETCH AT BEST AVAILABLE QUALITY", refetch_button, .Center, .Center, [4]f64{0.08, 0.025, 0.01, 1})
+}
+
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
 		layout_rects()
@@ -1128,17 +1269,10 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	}
 	if ui.mode == .Create {
 		add_rect := source_add_button_rect(source_panel)
-		refetch_rect := source_refetch_button_rect(source_panel)
 		add_color := [4]f32{0.15, 0.061, 0.032, 1}
 		if contains(add_rect, ui.mouse) {add_color = [4]f32{0.23, 0.083, 0.035, 1}}
 		push_rect(vertices, add_rect, add_color)
 		push_border(vertices, add_rect, orange)
-		refetch_color := [4]f32{0.046, 0.050, 0.048, 1}
-		if state.active_source >= 0 && contains(refetch_rect, ui.mouse) {
-			refetch_color = [4]f32{0.075, 0.081, 0.076, 1}
-		}
-		push_rect(vertices, refetch_rect, refetch_color)
-		push_border(vertices, refetch_rect, state.active_source >= 0 ? cyan : border)
 	}
 
 	if ui.mode == .Create {
@@ -1324,24 +1458,14 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			10,
 		)
 		add_rect := source_add_button_rect(source_panel)
-		refetch_rect := source_refetch_button_rect(source_panel)
 		draw_text_in_rect(
 			ctx,
 			small_font,
 			fmt.tprintf("%03d", len(state.sources)),
-			UI_Rect{refetch_rect.x - 52, source_header.y, 42, source_header.h},
+			UI_Rect{add_rect.x - 52, source_header.y, 42, source_header.h},
 			.End,
 			.Center,
 			cyan,
-		)
-		draw_text_in_rect(
-			ctx,
-			small_font,
-			"REFETCH",
-			refetch_rect,
-			.Center,
-			.Center,
-			state.active_source >= 0 ? bright : muted,
 		)
 		draw_text_in_rect(ctx, small_font, "ADD", add_rect, .Center, .Center, bright)
 		draw_text_in_rect(
@@ -1923,6 +2047,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		10,
 	)
 	draw_text_in_rect(ctx, small_font, "60 HZ / ONLINE", footer, .End, .Center, cyan)
+	draw_source_details(ctx, small_font, bright, muted, cyan)
 
 	if ui.source_modal_open {
 		modal := source_modal_rect()
@@ -2167,6 +2292,12 @@ rebuild_accessibility :: proc() {
 		add_ax_element(array, element_class, "Add source", "AXButton", import_button, .Import)
 		return
 	}
+	if ui.source_details_open {
+		modal := source_details_rect()
+		add_ax_element(array, element_class, "Close source details", "AXButton", source_details_close_rect(modal), .Close_Source_Details)
+		add_ax_element(array, element_class, "Refetch at best available quality", "AXButton", source_details_refetch_rect(modal), .Refetch_Source_Details)
+		return
+	}
 	toggle_label := "Switch to Play mode"
 	if ui.mode == .Play {toggle_label = "Switch to Create mode"}
 	add_ax_element(
@@ -2186,16 +2317,6 @@ rebuild_accessibility :: proc() {
 			source_add_button_rect(source_panel),
 			.Open_Source_Modal,
 		)
-		if state.active_source >= 0 {
-			add_ax_element(
-				array,
-				element_class,
-				"Refetch selected source at best available quality",
-				"AXButton",
-				source_refetch_button_rect(source_panel),
-				.Refetch_Source,
-			)
-		}
 		add_ax_element(
 			array,
 			element_class,
@@ -2342,10 +2463,13 @@ on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 	case .Open_Source_Modal:
 		open_source_modal()
-	case .Refetch_Source:
-		on_refetch_source(nil, nil, nil)
 	case .Cancel_Source_Modal:
 		close_source_modal()
+	case .Close_Source_Details:
+		close_source_details()
+	case .Refetch_Source_Details:
+		button := source_details_refetch_rect(source_details_rect())
+		dispatch_click(Point{button.x + button.w / 2, button.y + button.h / 2})
 	case .URL:
 		ui.focus = .URL
 	case .Import:
@@ -2783,6 +2907,23 @@ dispatch_click :: proc(point: Point) {
 		ui_set_string(&ui.marked_text, "")
 		ui.has_marked_text = false
 	}
+	if ui.source_details_open {
+		modal := source_details_rect()
+		if contains(source_details_close_rect(modal), point) || !contains(modal, point) {close_source_details(); return}
+		if contains(source_details_refetch_rect(modal), point) {
+			source_index := ui.source_details_index
+			close_source_details()
+			if source_index >= 0 && source_index < len(state.sources) {
+				if state.active_source != source_index {
+					ui_event_tag = source_index
+					on_select_source(nil, nil, nil)
+				}
+				on_refetch_source(nil, nil, nil)
+			}
+			return
+		}
+		return
+	}
 	if ui.source_modal_open {
 		modal := source_modal_rect()
 		if contains(source_modal_input_rect(modal), point) {ui.focus = .URL; return}
@@ -2801,8 +2942,6 @@ dispatch_click :: proc(point: Point) {
 	ui.focus = .None
 	if ui.mode == .Create &&
 	   contains(source_add_button_rect(source_panel), point) {open_source_modal(); return}
-	if ui.mode == .Create && state.active_source >= 0 &&
-	   contains(source_refetch_button_rect(source_panel), point) {on_refetch_source(nil, nil, nil); return}
 	if ui.mode == .Create && state.player != nil {
 		if contains(source_volume_down_rect(player), point) {adjust_player_volume(-0.1); return}
 		if contains(source_volume_up_rect(player), point) {adjust_player_volume(0.1); return}
@@ -2810,28 +2949,13 @@ dispatch_click :: proc(point: Point) {
 	if contains(player, point) {on_toggle_playback(nil, nil, nil); return}
 
 	if ui.mode == .Create {
-		source_content := source_content_rect(source_search, source_panel)
-		row := UI_Rect {
-			source_content.x,
-			source_content.y + source_content.h - 29 + ui.source_scroll,
-			source_content.w,
-			29,
-		}
-		for source, index in state.sources {
-			if len(ui.source_search) > 0 &&
-			   !strings.contains(source.title, ui.source_search) &&
-			   !strings.contains(source.video_id, ui.source_search) {continue}
-			if row.y >= source_content.y &&
-			   row.y + row.h <= source_content.y + source_content.h &&
-			   contains(row, point) {
-				ui_event_tag = index
-				on_select_source(nil, nil, nil)
-				return
-			}
-			row.y -= 30
+		if source_index := source_index_at_point(point, source_search, source_panel); source_index >= 0 {
+			ui_event_tag = source_index
+			on_select_source(nil, nil, nil)
+			return
 		}
 		transcript_content := transcript_content_rect(transcript)
-		row = UI_Rect {
+		row := UI_Rect {
 			transcript_content.x,
 			transcript_content.y + transcript_content.h - 25 + ui.transcript_scroll,
 			transcript_content.w,
@@ -2891,7 +3015,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		window_point,
 		nil,
 	)
-	if !ui.source_modal_open &&
+	if !ui.source_modal_open && !ui.source_details_open &&
 	   contains(app_header_rect(), ui.mouse) &&
 	   !contains(mode_button_rect(), ui.mouse) {
 		if msg_uint(event, sel_registerName("clickCount")) >= 2 {
@@ -2902,6 +3026,20 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		return
 	}
 	dispatch_click(ui.mouse)
+	ui.needs_redraw = true
+}
+
+on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if ui.source_modal_open || ui.source_details_open || ui.mode != .Create { return }
+	window_point := msg_point(event, sel_registerName("locationInWindow"))
+	point := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
+	_, _, source_search, source_panel, _, _, _, _, _, _ := layout_rects()
+	source_index := source_index_at_point(point, source_search, source_panel)
+	if source_index < 0 { return }
+	ui.mouse = point
+	open_source_details(source_index)
 	ui.needs_redraw = true
 }
 
@@ -2919,7 +3057,7 @@ on_metal_mouse_moved :: proc "c" (self: Id, command: Sel, event: Id) {
 on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if ui.source_modal_open {return}
+	if ui.source_modal_open || ui.source_details_open {return}
 	delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(
@@ -3037,6 +3175,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	key := msg_uint(event, sel_registerName("keyCode"))
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
+	if ui.source_details_open && key == 53 {close_source_details(); return}
 	if is_paste_shortcut(key, msg_uint(event, sel_registerName("modifierFlags"))) {
 		on_metal_paste(self, sel_registerName("paste:"), nil)
 		return
@@ -3179,6 +3318,12 @@ register_delegate :: proc(app: Id) {
 	)
 	class_addMethod(
 		delegate_class,
+		sel_registerName("sourceMetadataFinished:"),
+		rawptr(on_source_metadata_finished),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
 		sel_registerName("metalFrame:"),
 		rawptr(on_metal_frame),
 		"v@:@",
@@ -3203,6 +3348,7 @@ register_metal_view_class :: proc() -> Id {
 		"B@:",
 	)
 	class_addMethod(class, sel_registerName("mouseDown:"), rawptr(on_metal_mouse_down), "v@:@")
+	class_addMethod(class, sel_registerName("rightMouseDown:"), rawptr(on_metal_right_mouse_down), "v@:@")
 	class_addMethod(class, sel_registerName("mouseMoved:"), rawptr(on_metal_mouse_moved), "v@:@")
 	class_addMethod(class, sel_registerName("mouseDragged:"), rawptr(on_metal_mouse_moved), "v@:@")
 	class_addMethod(class, sel_registerName("scrollWheel:"), rawptr(on_metal_scroll), "v@:@")
@@ -3396,5 +3542,6 @@ build_metal_window :: proc() {
 	msg_void_id(state.window, sel_registerName("makeKeyAndOrderFront:"), nil)
 	msg_void_i(app, sel_registerName("activateIgnoringOtherApps:"), 1)
 	validate_startup_helpers()
+	request_next_missing_source_metadata()
 	msg_void(app, sel_registerName("run"))
 }
