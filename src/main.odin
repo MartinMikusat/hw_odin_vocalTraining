@@ -46,6 +46,7 @@ Source_Video :: struct {
 	duration: f64,
 	metadata: Source_Context_Metadata,
 	metadata_status: Source_Metadata_Status,
+	media_available: bool,
 }
 
 Transcript_Segment :: struct {
@@ -120,6 +121,7 @@ Import_Job :: struct {
 	failed: int,
 	refreshed_exercises: int,
 	failed_exercise_refreshes: int,
+	missing_merged_media: int,
 }
 
 Export_Job :: struct {
@@ -335,6 +337,16 @@ helper_command :: proc(name: string) -> string {
 		candidate := embedded_helper_path(executable_path, name)
 		if os.exists(candidate) { return candidate }
 	}
+	return helper_path_from_search(name, string(getenv("PATH")))
+}
+
+helper_path_from_search :: proc(name, search_path: string) -> string {
+	remaining := search_path
+	for directory in strings.split_iterator(&remaining, ":") {
+		if len(directory) == 0 {continue}
+		candidate, join_error := filepath.join([]string{directory, name}, context.temp_allocator)
+		if join_error == nil && os.exists(candidate) {return candidate}
+	}
 	return name
 }
 
@@ -377,9 +389,11 @@ import_url :: proc(url: string) -> bool {
 	run := transmute(proc "c" (cstring) -> int)system_address
 	result := run(c_command)
 	if result != 0 { return false }
+	media_path := fmt.tprintf("%s/sources/%s.mp4", dir, video_id)
+	if !os.exists(media_path) {return false}
 	id_copy := strings.clone(video_id)
 	url_copy := strings.clone(url)
-	append(&state.sources, Source_Video{id=id_copy, video_id=strings.clone(video_id), title=strings.clone(video_id), url=url_copy, media_path=fmt.aprintf("%s/sources/%s.mp4", dir, video_id)})
+	append(&state.sources, Source_Video{id=id_copy, video_id=strings.clone(video_id), title=strings.clone(video_id), url=url_copy, media_path=strings.clone(media_path), media_available=true})
 	last_imported_source = len(state.sources)-1
 	if metadata, loaded := load_download_metadata(video_id); loaded {
 		delete(state.sources[len(state.sources)-1].title)
@@ -483,7 +497,10 @@ seek_seconds :: proc(seconds: f64) {
 
 load_source_player :: proc(index: int) -> bool {
 	if index < 0 || index >= len(state.sources) { return false }
-	path := state.sources[index].media_path
+	source := &state.sources[index]
+	source.media_available = os.exists(source.media_path)
+	if !source.media_available {return false}
+	path := source.media_path
 	if !metal_player_load(path) { return false }
 	state.active_source = index
 	state.has_start, state.has_end = false, false
@@ -625,6 +642,11 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	defer delete(c_command)
 	run := transmute(proc "c" (cstring) -> int)system_address
 	if run(c_command) != 0 { return false }
+	media_path := fmt.tprintf("%s/sources/%s.mp4", dir, video_id)
+	if !os.exists(media_path) {
+		job.missing_merged_media += 1
+		return false
+	}
 
 	existing := import_job_find_source(job, video_id)
 	source_id := video_id
@@ -634,7 +656,8 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 		video_id=strings.clone(video_id, allocator),
 		title=strings.clone(video_id, allocator),
 		url=strings.clone(url, allocator),
-		media_path=fmt.aprintf("%s/sources/%s.mp4", dir, video_id, allocator=allocator),
+		media_path=strings.clone(media_path, allocator),
+		media_available=true,
 	}
 	if metadata, loaded := load_download_metadata(video_id, allocator); loaded {
 		delete(source.title, allocator)
@@ -742,7 +765,9 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		refresh_sources()
 	}
 	if job.failed > 0 {
-		if len(job.replace_video_id) > 0 && last_imported_source >= 0 {
+		if job.missing_merged_media > 0 {
+			set_text(state.status, fmt.tprintf("Import failed: yt-dlp did not create the merged MP4. Check media helpers. Log: %s", diagnostic_log_path("yt-dlp")))
+		} else if len(job.replace_video_id) > 0 && last_imported_source >= 0 {
 			load_source_player(last_imported_source)
 			set_text(state.status, fmt.tprintf("Refetch failed. Log: %s", diagnostic_log_path("yt-dlp")))
 		} else {
@@ -838,13 +863,11 @@ on_source_metadata_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	request_next_missing_source_metadata()
 }
 
-on_refetch_source :: proc "c" (self: Id, command: Sel, sender: Id) {
-	context = runtime.default_context()
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+refetch_source :: proc(source_index: int) {
 	if import_job != nil { set_text(state.status, "An import is already running"); return }
-	if state.active_source < 0 || state.active_source >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
+	if source_index < 0 || source_index >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
 	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
-	source := &state.sources[state.active_source]
+	source := &state.sources[source_index]
 	job := import_job_create(source.url, source.video_id)
 	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
 	worker := thread.create(import_worker)
@@ -852,13 +875,19 @@ on_refetch_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	job.thread = worker
 	worker.data = job
 	import_job = job
-	last_imported_source = state.active_source
-	metal_player_clear()
+	last_imported_source = source_index
+	if state.active_source == source_index {metal_player_clear()}
 	os.make_directory(app_support_dir())
 	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
 	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
 	set_text(state.status, "Refetching the selected source at the best available quality...")
 	thread.start(worker)
+}
+
+on_refetch_source :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	refetch_source(state.active_source)
 }
 
 on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
@@ -1037,7 +1066,12 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 		ui.active_exercise = -1
 		set_text(state.status, fmt.tprintf("Loaded %s", state.sources[index].title))
 	} else {
-		set_text(state.status, "Unable to load the selected source")
+		source := &state.sources[index]
+		if !source.media_available {
+			set_text(state.status, "MEDIA MISSING / The merged MP4 was not created. Right-click this source and refetch it.")
+		} else {
+			set_text(state.status, "Unable to decode the selected source media")
+		}
 	}
 }
 

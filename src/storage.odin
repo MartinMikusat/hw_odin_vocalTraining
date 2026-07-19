@@ -221,6 +221,7 @@ load_legacy_library :: proc() {
 	for source in data.sources {
 		copy, copied := clone_source_video(source)
 		if !copied { return }
+		copy.media_available = os.exists(copy.media_path)
 		append(&sources, copy)
 	}
 	for hint in data.hints {
@@ -432,6 +433,7 @@ database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bo
 		source.metadata.ext, copied = sqlite_column_string(statement, 12); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
 		source.metadata.format_id, copied = sqlite_column_string(statement, 13); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
 		source.metadata.filesize_approx = sqlite3_column_int64(statement, 14)
+		source.media_available = os.exists(source.media_path)
 		append(&sources, source)
 	}
 	sqlite3_finalize(statement)

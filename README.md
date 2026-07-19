@@ -48,6 +48,10 @@ captions.
 The refetch operation also rebuilds each saved exercise from that source at the
 new resolution.
 
+The Source Register marks a source as **MISSING** when its merged MP4 file is
+not available. Right-click that source and refetch it. Inspect `yt-dlp.log` if
+the refetch fails.
+
 Select a source, load its captions, and click a timed transcript row to seek.
 Mark the start and end of a useful section, then commit the range as an
 exercise. Saved exercises appear in the exercise bank and play as standalone

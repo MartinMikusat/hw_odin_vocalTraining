@@ -1179,7 +1179,12 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
 	fill_overlay_rect(ctx, UI_Rect{header.x, header.y, header.w, 1}, [4]f64{0.31, 0.32, 0.30, 1})
 	draw_text_in_rect(ctx, font, "SOURCE DETAILS / DOWNLOADED MEDIA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
-	draw_text_in_rect(ctx, font, source.title, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - 48, 28}, .Start, .Center, cyan)
+	title_color := cyan
+	if !source.media_available {title_color = [4]f64{0.95, 0.16, 0.10, 1}}
+	draw_text_in_rect(ctx, font, source.title, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - (source.media_available ? 48 : 164), 28}, .Start, .Center, title_color)
+	if !source.media_available {
+		draw_text_in_rect(ctx, font, "MEDIA MISSING", UI_Rect{modal.x + modal.w - 146, modal.y + modal.h - 100, 122, 28}, .End, .Center, title_color)
+	}
 
 	pending_value := metadata_ready ? "UNAVAILABLE" : "LOADING..."
 	resolution := pending_value
@@ -1290,6 +1295,10 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			if row.y >= source_content.y && row.y + row.h <= source_content.y + source_content.h {
 				color := [4]f32{0.046, 0.050, 0.048, 0.96}
 				if contains(row, ui.mouse) {color = [4]f32{0.075, 0.081, 0.076, 1}}
+				if !source.media_available {
+					color = [4]f32{0.16, 0.035, 0.025, 1}
+					push_rect(vertices, UI_Rect{row.x, row.y, 3, row.h}, [4]f32{0.95, 0.12, 0.08, 1})
+				}
 				if index == state.active_source {
 					color = [4]f32{0.17, 0.070, 0.035, 1}
 					push_rect(vertices, UI_Rect{row.x, row.y, 3, row.h}, orange)
@@ -1411,6 +1420,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	dim := [4]f64{0.31, 0.33, 0.31, 1}
 	orange := [4]f64{0.98, 0.35, 0.09, 1}
 	cyan := [4]f64{0.27, 0.72, 0.73, 1}
+	danger := [4]f64{0.95, 0.16, 0.10, 1}
 
 	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
 		layout_rects()
@@ -1607,6 +1617,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			if row.y >= source_content.y && row.y + row.h <= source_content.y + source_content.h {
 				row_color := ink
 				if index == state.active_source {row_color = orange}
+				if !source.media_available {row_color = danger}
 				draw_text_in_rect(
 					ctx,
 					small_font,
@@ -1620,11 +1631,14 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 					ctx,
 					small_font,
 					source.title,
-					UI_Rect{row.x + 42, row.y, row.w - 48, row.h},
+					UI_Rect{row.x + 42, row.y, row.w - (source.media_available ? 48 : 112), row.h},
 					.Start,
 					.Center,
 					row_color,
 				)
+				if !source.media_available {
+					draw_text_in_rect(ctx, small_font, "MISSING", UI_Rect{row.x + row.w - 70, row.y, 62, row.h}, .End, .Center, danger)
+				}
 			}
 			row.y -= 30
 			visible_source_index += 1
@@ -2914,11 +2928,7 @@ dispatch_click :: proc(point: Point) {
 			source_index := ui.source_details_index
 			close_source_details()
 			if source_index >= 0 && source_index < len(state.sources) {
-				if state.active_source != source_index {
-					ui_event_tag = source_index
-					on_select_source(nil, nil, nil)
-				}
-				on_refetch_source(nil, nil, nil)
+				refetch_source(source_index)
 			}
 			return
 		}

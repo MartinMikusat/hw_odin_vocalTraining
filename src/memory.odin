@@ -132,7 +132,7 @@ transcript_generation_copy :: proc(segments: []Transcript_Segment) -> (Transcrip
 }
 
 clone_source_video :: proc(source: Source_Video, allocator := context.allocator) -> (Source_Video, bool) {
-	result := Source_Video{duration=source.duration, metadata_status=source.metadata_status}
+	result := Source_Video{duration=source.duration, metadata_status=source.metadata_status, media_available=source.media_available}
 	copied := false
 	defer if !copied { delete_source_video(&result, allocator) }
 	value, err := strings.clone(source.id, allocator); if err != nil { return {}, false }; result.id = value

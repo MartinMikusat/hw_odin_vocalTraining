@@ -233,6 +233,12 @@ embedded_helper_path_uses_app_resources_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+helper_path_search_returns_an_absolute_executable_path_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, helper_path_from_search("sh", "/missing:/bin"), "/bin/sh")
+	testing.expect_value(t, helper_path_from_search("not-a-helper", "/missing:/bin"), "not-a-helper")
+}
+
+@(test)
 youtube_command_uses_resolved_helpers_test :: proc(t: ^testing.T) {
 	command := youtube_download_command(
 		"https://youtu.be/abc",
