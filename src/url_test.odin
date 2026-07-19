@@ -119,10 +119,12 @@ metal_ui_backspace_removes_complete_utf8_character_test :: proc(t: ^testing.T) {
 @(test)
 terminal_layout_stays_partitioned_at_minimum_size_test :: proc(t: ^testing.T) {
 	old_width, old_height := ui.width, ui.height
-	defer { ui.width, ui.height = old_width, old_height }
+	old_mode, old_modal := ui.mode, ui.source_modal_open
+	defer { ui.width, ui.height = old_width, old_height; ui.mode, ui.source_modal_open = old_mode, old_modal }
 	ui.width, ui.height = 1100, 720
+	ui.mode, ui.source_modal_open = .Create, false
 	import_field, import_button, _, source_panel, player, transcript, _, exercise_panel, _, controls := layout_rects()
-	testing.expect(t, import_field.x+import_field.w < import_button.x)
+	testing.expect(t, import_field.w == 0 && import_button.w == 0)
 	testing.expect(t, source_panel.x+source_panel.w < player.x)
 	testing.expect(t, player.x+player.w < exercise_panel.x)
 	testing.expect(t, transcript.y+transcript.h < player.y)
@@ -131,6 +133,9 @@ terminal_layout_stays_partitioned_at_minimum_size_test :: proc(t: ^testing.T) {
 
 @(test)
 terminal_control_rail_fills_width_without_overlap_test :: proc(t: ^testing.T) {
+	old_mode := ui.mode
+	defer ui.mode = old_mode
+	ui.mode = .Create
 	controls := UI_Rect{18,42,1064,28}
 	previous := control_rect(controls, 0)
 	for index in 1..<8 {
@@ -177,8 +182,8 @@ metal_ui_content_regions_exclude_headers_and_fields_test :: proc(t: ^testing.T) 
 }
 
 @(test)
-metal_ui_typography_uses_two_to_one_scale_test :: proc(t: ^testing.T) {
-	testing.expect_value(t, TITLE_FONT_SIZE, SMALL_FONT_SIZE*2)
+metal_ui_titlebar_uses_compact_height_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, APP_HEADER_HEIGHT, 38.0)
 }
 
 @(test)
@@ -382,4 +387,45 @@ durable_model_clone_survives_source_arena_destruction_test :: proc(t: ^testing.T
 	defer delete_source_video(&copy)
 	testing.expect_value(t, copy.title, "Warmup")
 	testing.expect_value(t, copy.media_path, "/tmp/source.mp4")
+}
+
+@(test)
+mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
+	for slot in 0..<8 {
+		testing.expect_value(t, control_action_for_slot(.Create, slot), slot)
+		testing.expect_value(t, control_slot_for_action(.Create, slot), slot)
+	}
+	testing.expect_value(t, control_action_for_slot(.Play, 0), 3)
+	testing.expect_value(t, control_action_for_slot(.Play, 1), 4)
+	testing.expect_value(t, control_action_for_slot(.Play, 2), 7)
+	testing.expect_value(t, control_action_for_slot(.Play, 3), -1)
+	testing.expect_value(t, control_slot_for_action(.Play, 3), 0)
+	testing.expect_value(t, control_slot_for_action(.Play, 4), 1)
+	testing.expect_value(t, control_slot_for_action(.Play, 7), 2)
+	testing.expect_value(t, control_slot_for_action(.Play, 0), -1)
+}
+
+@(test)
+mode_button_stays_inside_the_header_test :: proc(t: ^testing.T) {
+	rect := mode_button_rect_for_size(1100, 720)
+	header := app_header_rect_for_size(1100, 720)
+	testing.expect(t, rect.x >= 18)
+	testing.expect(t, rect.x+rect.w <= 1100-18)
+	testing.expect(t, rect.y >= header.y)
+	testing.expect(t, rect.y+rect.h <= 720)
+	testing.expect(t, contains(header, Point{rect.x,rect.y}))
+	testing.expect(t, contains(header, Point{rect.x+rect.w,rect.y+rect.h}))
+}
+
+@(test)
+source_modal_is_centered_and_contains_its_controls_test :: proc(t: ^testing.T) {
+	modal := source_modal_rect_for_size(1100, 720)
+	input := source_modal_input_rect(modal)
+	cancel := source_modal_cancel_rect(modal)
+	confirm := source_modal_confirm_rect(modal)
+	testing.expect_value(t, modal.x+modal.w/2, 550.0)
+	testing.expect_value(t, modal.y+modal.h/2, 360.0)
+	testing.expect(t, input.x >= modal.x && input.x+input.w <= modal.x+modal.w)
+	testing.expect(t, cancel.y >= modal.y && cancel.y+cancel.h <= modal.y+modal.h)
+	testing.expect(t, confirm.x >= modal.x && confirm.x+confirm.w <= modal.x+modal.w)
 }

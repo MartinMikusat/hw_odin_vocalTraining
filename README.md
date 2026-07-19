@@ -23,11 +23,16 @@ authorized to download.
 
 ### Workflow
 
-Paste one or more YouTube URLs into the command field and press **Execute**.
-URLs are normalized by video ID, while timestamps supplied through `t`,
-`start`, or `youtu.be` URL forms become initial playhead hints. Import prefers
-an English caption track and otherwise accepts YouTube's original-language
-automatic captions.
+Use the mode control in the title strip to separate the two workflows. **Create**
+shows source ingest, the timed transcript, range markers, exercise naming, and
+export controls. **Play** shows the saved-exercise library, a larger practice
+monitor, and only playback controls.
+
+Press **Add** in the Source Register to open the ingest dialog, then paste one
+or more YouTube URLs with one URL per line. URLs are normalized by video ID,
+while timestamps supplied through `t`, `start`, or `youtu.be` URL forms become
+initial playhead hints. Import prefers an English caption track and otherwise
+accepts YouTube's original-language automatic captions.
 
 Select a source, load its captions, and click a timed transcript row to seek.
 Mark the start and end of a useful section, then commit the range as an
@@ -51,16 +56,12 @@ every visible control, while Metal renders the interface through one
 video, and Core Video maps decoded frames into Metal textures.
 
 The interface uses Berkeley Mono and a measured immediate-mode layout.
-Typography uses 10.5 points throughout the interface and 21 points for the
-`VOCAL TRAINING / SIGNAL WORKBENCH` title and `EXECUTE` action. Container text
-is shaped as a complete CoreText line, then positioned from its measured
+Typography uses 10.5 points throughout the interface, including the compact
+`VOCAL TRAINING / SIGNAL WORKBENCH` title. Container text is shaped as a
+complete CoreText line, then positioned from its measured
 advance and ascent/descent metrics. Measurement, alignment, truncation, and
 drawing reuse that same shaped line, preserving kerning, ligatures, fallback
 fonts, combining marks, bidirectional ordering, and complex-script shaping.
-
-The command field uses a segmented-border heading. Its top border stops eight
-points before the heading and resumes eight points after the declared heading
-width; the text origin, width, and border gap remain paired.
 
 ### Memory ownership
 

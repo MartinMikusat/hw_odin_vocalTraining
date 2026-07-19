@@ -598,6 +598,7 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
 	set_text(state.status, "Downloading video and YouTube captions...")
 	thread.start(worker)
+	close_source_modal()
 }
 
 on_set_start :: proc "c" (self: Id, command: Sel, sender: Id) {
@@ -752,6 +753,7 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if sender != nil { index = int(msg_uint(sender, sel_registerName("tag"))) }
 	if index < 0 || index >= len(state.sources) { return }
 	if load_source_player(index) {
+		ui.active_exercise = -1
 		set_text(state.status, fmt.tprintf("Loaded %s", state.sources[index].title))
 	} else {
 		set_text(state.status, "Unable to load the selected source")
@@ -771,6 +773,7 @@ on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
 		return
 	}
 	msg_void(state.player, sel_registerName("play"))
+	ui.active_exercise = index
 	set_text(state.status, fmt.tprintf("Playing %s", exercise.name))
 }
 
