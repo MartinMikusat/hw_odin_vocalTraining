@@ -31,8 +31,12 @@ monitor, and only playback controls.
 Press **Add** in the Source Register to open the ingest dialog, then paste one
 or more YouTube URLs with one URL per line. URLs are normalized by video ID,
 while timestamps supplied through `t`, `start`, or `youtu.be` URL forms become
-initial playhead hints. Import prefers an English caption track and otherwise
-accepts YouTube's original-language automatic captions.
+initial playhead hints. Import fetches the best available MP4 video and M4A
+audio streams and merges them without transcoding. Import prefers an English
+caption track and otherwise accepts YouTube's original-language automatic
+captions. Select an existing source and press **Refetch** to replace its media,
+metadata, and captions using the best streams currently available. Refetch also
+rebuilds every saved exercise derived from that source at the new resolution.
 
 Select a source, load its captions, and click a timed transcript row to seek.
 Mark the start and end of a useful section, then commit the range as an

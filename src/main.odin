@@ -94,16 +94,22 @@ Import_Job :: struct {
 	input: string,
 	sources: [dynamic]Source_Video,
 	hints: [dynamic]Import_Hint,
+	exercises: [dynamic]Exercise,
 	new_sources: [dynamic]Source_Video,
 	new_hints: [dynamic]Import_Hint,
 	snapshot_transcripts: Transcript_Generation,
 	transcripts: Transcript_Generation,
 	has_transcript_update: bool,
+	updated_source: Source_Video,
+	has_source_update: bool,
+	replace_video_id: string,
 	last_video_id: string,
 	pending_hint: f64,
 	has_pending_hint: bool,
 	accepted: int,
 	failed: int,
+	refreshed_exercises: int,
+	failed_exercise_refreshes: int,
 }
 
 Export_Job :: struct {
@@ -286,7 +292,7 @@ diagnostic_log_path :: proc(name: string) -> string {
 }
 
 youtube_download_command :: proc(url, output, log_path: string) -> string {
-	return fmt.tprintf("yt-dlp --no-playlist --write-info-json --write-subs --write-auto-subs --sub-langs 'en,.*-orig' --sub-format json3 -S ext:mp4:m4a --recode-video mp4 -o %s %s >> %s 2>&1", shell_quote(output), shell_quote(url), shell_quote(log_path))
+	return fmt.tprintf("yt-dlp --no-playlist --force-overwrites --write-info-json --write-subs --write-auto-subs --sub-langs 'en,.*-orig' --sub-format json3 -f 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b' -S 'res,vcodec:h264' --merge-output-format mp4 -o %s %s >> %s 2>&1", shell_quote(output), shell_quote(url), shell_quote(log_path))
 }
 
 clip_export_command :: proc(source_path, clip_path: string, start_seconds, end_seconds: f64) -> string {
@@ -437,7 +443,7 @@ import_job_destroy :: proc(job: ^Import_Job) {
 	free(job)
 }
 
-import_job_create :: proc(input: string) -> ^Import_Job {
+import_job_create :: proc(input: string, replace_video_id := "") -> ^Import_Job {
 	arena, ok := growing_arena_create()
 	if !ok { return nil }
 	job := new(Import_Job)
@@ -445,8 +451,10 @@ import_job_create :: proc(input: string) -> ^Import_Job {
 	job.completion_target = state.delegate_target
 	allocator := mem_virtual.arena_allocator(arena)
 	job.input = strings.clone(input, allocator)
+	job.replace_video_id = strings.clone(replace_video_id, allocator)
 	job.sources = make([dynamic]Source_Video, 0, len(state.sources), allocator)
 	job.hints = make([dynamic]Import_Hint, 0, len(state.hints), allocator)
+	job.exercises = make([dynamic]Exercise, 0, len(state.exercises), allocator)
 	job.new_sources = make([dynamic]Source_Video, allocator)
 	job.new_hints = make([dynamic]Import_Hint, allocator)
 	for source in state.sources {
@@ -458,6 +466,11 @@ import_job_create :: proc(input: string) -> ^Import_Job {
 		copy, copied := clone_import_hint(hint, allocator)
 		if !copied { import_job_destroy(job); return nil }
 		append(&job.hints, copy)
+	}
+	for exercise in state.exercises {
+		copy, copied := clone_exercise(exercise, allocator)
+		if !copied { import_job_destroy(job); return nil }
+		append(&job.exercises, copy)
 	}
 	job.snapshot_transcripts, ok = transcript_generation_copy(state.transcripts.segments[:])
 	if !ok { import_job_destroy(job); return nil }
@@ -489,8 +502,10 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	allocator := mem_virtual.arena_allocator(job.arena)
 	job.last_video_id = strings.clone(video_id, allocator)
 	if source := import_job_find_source(job, video_id); source != nil {
-		if seconds, has_time := parse_timestamp(url); has_time { import_job_add_hint(job, source.id, seconds) }
-		return true
+		if video_id != job.replace_video_id {
+			if seconds, has_time := parse_timestamp(url); has_time { import_job_add_hint(job, source.id, seconds) }
+			return true
+		}
 	}
 
 	dir := app_support_dir()
@@ -503,8 +518,11 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	run := transmute(proc "c" (cstring) -> int)system_address
 	if run(c_command) != 0 { return false }
 
+	existing := import_job_find_source(job, video_id)
+	source_id := video_id
+	if existing != nil { source_id = existing.id }
 	source := Source_Video{
-		id=strings.clone(video_id, allocator),
+		id=strings.clone(source_id, allocator),
 		video_id=strings.clone(video_id, allocator),
 		title=strings.clone(video_id, allocator),
 		url=strings.clone(url, allocator),
@@ -514,15 +532,30 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 		source.title = metadata.title
 		source.duration = metadata.duration
 	}
-	append(&job.new_sources, source)
+	if existing != nil {
+		job.updated_source = source
+		job.has_source_update = true
+	} else {
+		append(&job.new_sources, source)
+	}
 	if seconds, has_time := parse_timestamp(url); has_time { import_job_add_hint(job, source.id, seconds) }
 
 	previous := job.snapshot_transcripts.segments[:]
 	if job.has_transcript_update { previous = job.transcripts.segments[:] }
-	if next, _, loaded := build_transcript_generation(&job.new_sources[len(job.new_sources)-1], previous); loaded {
+	if next, _, loaded := build_transcript_generation(&source, previous); loaded {
 		transcript_generation_destroy(&job.transcripts)
 		job.transcripts = next
 		job.has_transcript_update = true
+	}
+	if existing != nil {
+		for exercise in job.exercises {
+			if exercise.source_id != source.id || len(exercise.clip_path) == 0 { continue }
+			command := clip_export_command(source.media_path, exercise.clip_path, exercise.start_seconds, exercise.end_seconds)
+			c_command := strings.clone_to_cstring(command)
+			result := run(c_command)
+			delete(c_command)
+			if result == 0 { job.refreshed_exercises += 1 } else { job.failed_exercise_refreshes += 1 }
+		}
 	}
 	return true
 }
@@ -551,6 +584,18 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		import_job_destroy(job)
 	}
 	if job.accepted > 0 {
+		if job.has_source_update {
+			for &source, index in state.sources {
+				if source.video_id != job.updated_source.video_id { continue }
+				copy, copied := clone_source_video(job.updated_source)
+				if copied {
+					delete_source_video(&source)
+					source = copy
+					last_imported_source = index
+				}
+				break
+			}
+		}
 		for source in job.new_sources {
 			copy, copied := clone_source_video(source)
 			if copied { append(&state.sources, copy) }
@@ -574,10 +619,44 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		refresh_sources()
 	}
 	if job.failed > 0 {
-		set_text(state.status, fmt.tprintf("Imported %d; %d failed. Log: %s", job.accepted, job.failed, diagnostic_log_path("yt-dlp")))
+		if len(job.replace_video_id) > 0 && last_imported_source >= 0 {
+			load_source_player(last_imported_source)
+			set_text(state.status, fmt.tprintf("Refetch failed. Log: %s", diagnostic_log_path("yt-dlp")))
+		} else {
+			set_text(state.status, fmt.tprintf("Imported %d; %d failed. Log: %s", job.accepted, job.failed, diagnostic_log_path("yt-dlp")))
+		}
+	} else if job.has_source_update {
+		if job.failed_exercise_refreshes > 0 {
+			set_text(state.status, fmt.tprintf("Refetched source; %d exercise rebuild(s) failed. Log: %s", job.failed_exercise_refreshes, diagnostic_log_path("ffmpeg")))
+		} else {
+			set_text(state.status, fmt.tprintf("Refetched source and rebuilt %d exercise(s) at the best available quality", job.refreshed_exercises))
+		}
 	} else {
 		set_text(state.status, fmt.tprintf("Imported %d source(s)", job.accepted))
 	}
+}
+
+on_refetch_source :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if import_job != nil { set_text(state.status, "An import is already running"); return }
+	if state.active_source < 0 || state.active_source >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
+	if !helper_available("yt-dlp") { set_text(state.status, "yt-dlp is missing; install it with: brew install yt-dlp"); return }
+	source := &state.sources[state.active_source]
+	job := import_job_create(source.url, source.video_id)
+	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
+	worker := thread.create(import_worker)
+	if worker == nil { import_job_destroy(job); set_text(state.status, "Unable to start import worker"); return }
+	job.thread = worker
+	worker.data = job
+	import_job = job
+	last_imported_source = state.active_source
+	metal_player_clear()
+	os.make_directory(app_support_dir())
+	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
+	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
+	set_text(state.status, "Refetching the selected source at the best available quality...")
+	thread.start(worker)
 }
 
 on_import :: proc "c" (self: Id, command: Sel, sender: Id) {

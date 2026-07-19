@@ -86,6 +86,11 @@ youtube_command_requests_timed_captions_test :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(command, "--write-subs"))
 	testing.expect(t, strings.contains(command, "--write-auto-subs"))
 	testing.expect(t, strings.contains(command, "--sub-format json3"))
+	testing.expect(t, strings.contains(command, "bv*[ext=mp4]+ba[ext=m4a]"))
+	testing.expect(t, strings.contains(command, "-S 'res,vcodec:h264'"))
+	testing.expect(t, strings.contains(command, "--merge-output-format mp4"))
+	testing.expect(t, strings.contains(command, "--force-overwrites"))
+	testing.expect(t, !strings.contains(command, "--recode-video"))
 	testing.expect(t, strings.contains(command, "'/tmp/source.%(ext)s'"))
 }
 
@@ -415,6 +420,18 @@ mode_button_stays_inside_the_header_test :: proc(t: ^testing.T) {
 	testing.expect(t, rect.y+rect.h <= 720)
 	testing.expect(t, contains(header, Point{rect.x,rect.y}))
 	testing.expect(t, contains(header, Point{rect.x+rect.w,rect.y+rect.h}))
+}
+
+@(test)
+source_header_actions_do_not_overlap_test :: proc(t: ^testing.T) {
+	panel := UI_Rect{12, 80, 350, 560}
+	add := source_add_button_rect(panel)
+	refetch := source_refetch_button_rect(panel)
+	testing.expect(t, refetch.x+refetch.w < add.x)
+	testing.expect_value(t, refetch.y, add.y)
+	testing.expect_value(t, refetch.h, add.h)
+	testing.expect(t, refetch.x >= panel.x)
+	testing.expect(t, add.x+add.w <= panel.x+panel.w)
 }
 
 @(test)

@@ -166,6 +166,7 @@ Text_Run :: struct {
 AX_Kind :: enum {
 	Mode_Toggle,
 	Open_Source_Modal,
+	Refetch_Source,
 	Cancel_Source_Modal,
 	URL,
 	Import,
@@ -420,6 +421,11 @@ source_add_button_rect :: proc(source_panel: UI_Rect) -> UI_Rect {
 		58,
 		23,
 	}
+}
+
+source_refetch_button_rect :: proc(source_panel: UI_Rect) -> UI_Rect {
+	add := source_add_button_rect(source_panel)
+	return UI_Rect{add.x - 76, add.y, 68, add.h}
 }
 
 source_modal_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
@@ -897,6 +903,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	border := [4]f32{0.218, 0.225, 0.210, 1}
 	rule := [4]f32{0.125, 0.132, 0.123, 1}
 	orange := [4]f32{0.91, 0.31, 0.075, 1}
+	cyan := [4]f32{0.27, 0.72, 0.73, 1}
 	push_rect(vertices, UI_Rect{0, 0, ui.width, ui.height}, chassis)
 	push_rect(vertices, app_header_rect(), [4]f32{0.018, 0.020, 0.019, 1})
 	push_rect(vertices, UI_Rect{0, ui.height - APP_HEADER_HEIGHT - 1, ui.width, 1}, border)
@@ -922,10 +929,17 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	}
 	if ui.mode == .Create {
 		add_rect := source_add_button_rect(source_panel)
+		refetch_rect := source_refetch_button_rect(source_panel)
 		add_color := [4]f32{0.15, 0.061, 0.032, 1}
 		if contains(add_rect, ui.mouse) {add_color = [4]f32{0.23, 0.083, 0.035, 1}}
 		push_rect(vertices, add_rect, add_color)
 		push_border(vertices, add_rect, orange)
+		refetch_color := [4]f32{0.046, 0.050, 0.048, 1}
+		if state.active_source >= 0 && contains(refetch_rect, ui.mouse) {
+			refetch_color = [4]f32{0.075, 0.081, 0.076, 1}
+		}
+		push_rect(vertices, refetch_rect, refetch_color)
+		push_border(vertices, refetch_rect, state.active_source >= 0 ? cyan : border)
 	}
 
 	if ui.mode == .Create {
@@ -1121,14 +1135,24 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			10,
 		)
 		add_rect := source_add_button_rect(source_panel)
+		refetch_rect := source_refetch_button_rect(source_panel)
 		draw_text_in_rect(
 			ctx,
 			small_font,
 			fmt.tprintf("%03d", len(state.sources)),
-			UI_Rect{add_rect.x - 52, source_header.y, 42, source_header.h},
+			UI_Rect{refetch_rect.x - 52, source_header.y, 42, source_header.h},
 			.End,
 			.Center,
 			cyan,
+		)
+		draw_text_in_rect(
+			ctx,
+			small_font,
+			"REFETCH",
+			refetch_rect,
+			.Center,
+			.Center,
+			state.active_source >= 0 ? bright : muted,
 		)
 		draw_text_in_rect(ctx, small_font, "ADD", add_rect, .Center, .Center, bright)
 		draw_text_in_rect(
@@ -1938,6 +1962,16 @@ rebuild_accessibility :: proc() {
 			source_add_button_rect(source_panel),
 			.Open_Source_Modal,
 		)
+		if state.active_source >= 0 {
+			add_ax_element(
+				array,
+				element_class,
+				"Refetch selected source at best available quality",
+				"AXButton",
+				source_refetch_button_rect(source_panel),
+				.Refetch_Source,
+			)
+		}
 		add_ax_element(
 			array,
 			element_class,
@@ -2065,6 +2099,8 @@ on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 	case .Open_Source_Modal:
 		open_source_modal()
+	case .Refetch_Source:
+		on_refetch_source(nil, nil, nil)
 	case .Cancel_Source_Modal:
 		close_source_modal()
 	case .URL:
@@ -2517,6 +2553,8 @@ dispatch_click :: proc(point: Point) {
 	ui.focus = .None
 	if ui.mode == .Create &&
 	   contains(source_add_button_rect(source_panel), point) {open_source_modal(); return}
+	if ui.mode == .Create && state.active_source >= 0 &&
+	   contains(source_refetch_button_rect(source_panel), point) {on_refetch_source(nil, nil, nil); return}
 	if contains(player, point) {on_toggle_playback(nil, nil, nil); return}
 
 	if ui.mode == .Create {
