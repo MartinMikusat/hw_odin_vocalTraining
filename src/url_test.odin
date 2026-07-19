@@ -467,6 +467,15 @@ control_backspace_routes_to_word_deletion_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+activity_spinner_advances_and_wraps_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, activity_spinner(0), "|")
+	testing.expect_value(t, activity_spinner(8), "/")
+	testing.expect_value(t, activity_spinner(16), "-")
+	testing.expect_value(t, activity_spinner(24), "\\")
+	testing.expect_value(t, activity_spinner(32), "|")
+}
+
+@(test)
 mode_button_stays_inside_the_header_test :: proc(t: ^testing.T) {
 	rect := mode_button_rect_for_size(1100, 720)
 	header := app_header_rect_for_size(1100, 720)

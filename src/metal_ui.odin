@@ -111,6 +111,7 @@ UI_State :: struct {
 	active_exercise:    int,
 	marked_text:        string,
 	has_marked_text:    bool,
+	activity_tick:      uint,
 	needs_redraw:       bool,
 }
 
@@ -591,6 +592,11 @@ is_paste_shortcut :: proc(key, modifiers: uint) -> bool {
 is_delete_word_shortcut :: proc(key, modifiers: uint) -> bool {
 	NSEventModifierFlagControl :: uint(1 << 18)
 	return key == 51 && modifiers & NSEventModifierFlagControl != 0
+}
+
+activity_spinner :: proc(tick: uint) -> string {
+	frames := [4]string{"|", "/", "-", "\\"}
+	return frames[(tick / 8) % len(frames)]
 }
 
 control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
@@ -1706,14 +1712,24 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		.Center,
 		state.has_start && state.has_end ? cyan : muted,
 	)
+	status_rect := UI_Rect{footer.x + 314, footer.y, max(0, footer.w - 500), footer.h}
+	status_text := fmt.tprintf("SYS / %s", ui.status)
+	status_color := muted
+	if import_job != nil || export_job != nil {
+		fill_overlay_rect(ctx, status_rect, [4]f64{0.12, 0.045, 0.018, 0.88})
+		fill_overlay_rect(ctx, UI_Rect{status_rect.x, status_rect.y, 3, status_rect.h}, orange)
+		status_text = fmt.tprintf("SYS / [%s] %s", activity_spinner(ui.activity_tick), ui.status)
+		status_color = bright
+	}
 	draw_text_in_rect(
 		ctx,
 		small_font,
-		fmt.tprintf("SYS / %s", ui.status),
-		UI_Rect{footer.x + 314, footer.y, max(0, footer.w - 500), footer.h},
+		status_text,
+		status_rect,
 		.Start,
 		.Center,
-		muted,
+		status_color,
+		10,
 	)
 	draw_text_in_rect(ctx, small_font, "60 HZ / ONLINE", footer, .End, .Center, cyan)
 
@@ -2897,6 +2913,12 @@ on_metal_accepts_first :: proc "c" (self: Id, command: Sel) -> bool {return true
 on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if import_job != nil || export_job != nil {
+		ui.activity_tick += 1
+		if ui.activity_tick % 8 == 0 {ui.needs_redraw = true}
+	} else {
+		ui.activity_tick = 0
+	}
 	if state.player != nil &&
 	   msg_f32(state.player, sel_registerName("rate")) > 0 {ui.needs_redraw = true}
 	frame := msg_rect(ui.view, sel_registerName("bounds"))
