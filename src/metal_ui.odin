@@ -399,7 +399,7 @@ contains :: proc(rect: UI_Rect, point: Point) -> bool {
 }
 
 mode_button_rect_for_size :: proc(width, height: f64) -> UI_Rect {
-	return UI_Rect{max(18, width - 122), height - 31, 104, 24}
+	return UI_Rect{max(18, width - 214), height - 31, 196, 24}
 }
 
 app_header_rect_for_size :: proc(width, height: f64) -> UI_Rect {
@@ -1096,19 +1096,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		86,
 	)
 	mode_rect := mode_button_rect()
-	mode_label := "MODE / BUILD EXERCISES"
-	mode_value := "CREATE"
-	if ui.mode == .Play {mode_label = "MODE / PRACTICE LIBRARY"; mode_value = "PLAY"}
-	draw_text_in_rect(
-		ctx,
-		small_font,
-		mode_label,
-		UI_Rect{mode_rect.x - 210, mode_rect.y, 196, mode_rect.h},
-		.End,
-		.Center,
-		muted,
-	)
-	draw_text_in_rect(ctx, small_font, mode_value, mode_rect, .Center, .Center, bright)
+	mode_text := "MODE / BUILD EXERCISES"
+	if ui.mode == .Play {mode_text = "MODE / PRACTICE LIBRARY"}
+	draw_text_in_rect(ctx, small_font, mode_text, mode_rect, .Center, .Center, bright)
 	source_header := UI_Rect {
 		source_panel.x,
 		source_panel.y + source_panel.h - 35,
