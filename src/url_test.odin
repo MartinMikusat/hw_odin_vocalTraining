@@ -294,6 +294,29 @@ metal_ui_titlebar_uses_compact_height_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+source_monitor_volume_controls_sit_left_of_timestamp_test :: proc(t: ^testing.T) {
+	player := UI_Rect{308, 306, 480, 310}
+	down := source_volume_down_rect(player)
+	value := source_volume_value_rect(player)
+	up := source_volume_up_rect(player)
+	timestamp := source_timestamp_rect(player)
+	testing.expect(t, down.x >= player.x)
+	testing.expect(t, down.x + down.w <= value.x)
+	testing.expect(t, value.x + value.w <= up.x)
+	testing.expect(t, up.x + up.w <= timestamp.x)
+	testing.expect(t, timestamp.x + timestamp.w <= player.x + player.w)
+}
+
+@(test)
+source_monitor_volume_clamps_and_rounds_percent_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, clamp_volume(-0.1), f32(0))
+	testing.expect_value(t, clamp_volume(0.55), f32(0.55))
+	testing.expect_value(t, clamp_volume(1.1), f32(1))
+	testing.expect_value(t, volume_percent(0.549), 55)
+	testing.expect_value(t, volume_percent(1.1), 100)
+}
+
+@(test)
 metal_ui_text_origin_uses_run_metrics_and_container_rect_test :: proc(t: ^testing.T) {
 	old_scale := ui.scale
 	defer { ui.scale = old_scale }

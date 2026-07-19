@@ -112,6 +112,7 @@ UI_State :: struct {
 	active_exercise:    int,
 	marked_text:        string,
 	has_marked_text:    bool,
+	player_volume:      f32,
 	activity_tick:      uint,
 	needs_redraw:       bool,
 }
@@ -183,6 +184,8 @@ AX_Kind :: enum {
 	Exercise_Search,
 	Exercise,
 	Exercise_Name,
+	Volume_Down,
+	Volume_Up,
 	Start,
 	End,
 	Save,
@@ -200,7 +203,7 @@ AX_Action :: struct {
 	seconds: f64,
 }
 
-ui: UI_State
+ui := UI_State{player_volume = 1}
 ui_event_tag: int
 ax_actions: [dynamic]AX_Action
 
@@ -252,6 +255,11 @@ msg_void_bool :: proc(receiver: Id, selector: Sel, value: bool) {
 
 msg_void_f64 :: proc(receiver: Id, selector: Sel, value: f64) {
 	p := transmute(proc "c" (_: Id, _: Sel, _: f64))send_address
+	p(receiver, selector, value)
+}
+
+msg_void_f32 :: proc(receiver: Id, selector: Sel, value: f32) {
+	p := transmute(proc "c" (_: Id, _: Sel, _: f32))send_address
 	p(receiver, selector, value)
 }
 
@@ -643,6 +651,41 @@ player_content_rect :: proc(player: UI_Rect) -> UI_Rect {
 		max(0, player.w - 2),
 		max(0, player.h - bottom_metadata_height - header_height - 1),
 	}
+}
+
+source_timestamp_rect :: proc(player: UI_Rect) -> UI_Rect {
+	return UI_Rect{player.x + player.w - 82, player.y, 72, 30}
+}
+
+source_volume_up_rect :: proc(player: UI_Rect) -> UI_Rect {
+	timestamp := source_timestamp_rect(player)
+	return UI_Rect{timestamp.x - 28, player.y + 3, 24, 24}
+}
+
+source_volume_value_rect :: proc(player: UI_Rect) -> UI_Rect {
+	up := source_volume_up_rect(player)
+	return UI_Rect{up.x - 66, player.y, 62, 30}
+}
+
+source_volume_down_rect :: proc(player: UI_Rect) -> UI_Rect {
+	value := source_volume_value_rect(player)
+	return UI_Rect{value.x - 28, player.y + 3, 24, 24}
+}
+
+clamp_volume :: proc(value: f32) -> f32 {
+	return min(max(value, 0), 1)
+}
+
+volume_percent :: proc(value: f32) -> int {
+	return int(clamp_volume(value) * 100 + 0.5)
+}
+
+adjust_player_volume :: proc(delta: f32) {
+	ui.player_volume = clamp_volume(ui.player_volume + delta)
+	if state.player != nil {
+		msg_void_f32(state.player, sel_registerName("setVolume:"), ui.player_volume)
+	}
+	ui.needs_redraw = true
 }
 
 exercise_content_rect :: proc(exercise_search, exercise_panel, exercise_name: UI_Rect) -> UI_Rect {
@@ -1073,6 +1116,15 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		if rect.w <= 0 || rect.h <= 0 {continue}
 		push_rect(vertices, rect, field)
 		push_border(vertices, rect, border)
+	}
+	if ui.mode == .Create && state.player != nil {
+		volume_buttons := [2]UI_Rect{source_volume_down_rect(player), source_volume_up_rect(player)}
+		for rect in volume_buttons {
+			button_color := field
+			if contains(rect, ui.mouse) {button_color = panel_alt}
+			push_rect(vertices, rect, button_color)
+			push_border(vertices, rect, border)
+		}
 	}
 	if ui.mode == .Create {
 		add_rect := source_add_button_rect(source_panel)
@@ -1506,26 +1558,49 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	} else if ui.mode == .Create {
 		source := &state.sources[state.active_source]
 		metadata := UI_Rect{player.x, player.y, player.w, 30}
+		volume_down := source_volume_down_rect(player)
 		draw_text_in_rect(
 			ctx,
 			small_font,
 			source.title,
-			UI_Rect{metadata.x, metadata.y, metadata.w - 150, metadata.h},
+			UI_Rect{metadata.x, metadata.y, max(0, volume_down.x - metadata.x - 8), metadata.h},
 			.Start,
 			.Center,
 			ink,
 			10,
+		)
+		volume_color := cyan
+		if ui.player_volume <= 0 {volume_color = dim}
+		draw_text_in_rect(ctx, small_font, "-", volume_down, .Center, .Center, volume_color)
+		draw_text_in_rect(
+			ctx,
+			small_font,
+			fmt.tprintf("VOL %d%%", volume_percent(ui.player_volume)),
+			source_volume_value_rect(player),
+			.Center,
+			.Center,
+			cyan,
+		)
+		volume_up_color := cyan
+		if ui.player_volume >= 1 {volume_up_color = dim}
+		draw_text_in_rect(
+			ctx,
+			small_font,
+			"+",
+			source_volume_up_rect(player),
+			.Center,
+			.Center,
+			volume_up_color,
 		)
 		if seconds, ok := current_seconds(); ok {
 			draw_timestamp_text_in_rect(
 				ctx,
 				small_font,
 				format_timestamp(seconds),
-				metadata,
+				source_timestamp_rect(player),
 				.End,
 				.Center,
 				cyan,
-				10,
 			)
 		}
 	} else if ui.active_exercise >= 0 && ui.active_exercise < len(state.exercises) {
@@ -2077,7 +2152,7 @@ rebuild_accessibility :: proc() {
 	array := msg_id(objc_getClass("NSMutableArray"), sel_registerName("array"))
 	ui.ax_children = msg_id(array, sel_registerName("retain"))
 	element_class := objc_getClass("VocalAccessibilityElement")
-	import_field, import_button, source_search, source_panel, _, transcript, exercise_search, exercise_panel, exercise_name, controls :=
+	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
 		layout_rects()
 	if ui.source_modal_open {
 		add_ax_element(array, element_class, "YouTube URLs", "AXTextField", import_field, .URL)
@@ -2214,6 +2289,25 @@ rebuild_accessibility :: proc() {
 			row.y -= 30
 		}
 	}
+	if ui.mode == .Create && state.player != nil {
+		percent := volume_percent(ui.player_volume)
+		add_ax_element(
+			array,
+			element_class,
+			fmt.tprintf("Decrease source volume, %d percent", percent),
+			"AXButton",
+			source_volume_down_rect(player),
+			.Volume_Down,
+		)
+		add_ax_element(
+			array,
+			element_class,
+			fmt.tprintf("Increase source volume, %d percent", percent),
+			"AXButton",
+			source_volume_up_rect(player),
+			.Volume_Up,
+		)
+	}
 	kinds := [8]AX_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data}
 	labels := [8]string {
 		"Set start",
@@ -2270,6 +2364,10 @@ on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 		on_play_exercise(nil, nil, nil)
 	case .Exercise_Name:
 		ui.focus = .Exercise_Name
+	case .Volume_Down:
+		adjust_player_volume(-0.1)
+	case .Volume_Up:
+		adjust_player_volume(0.1)
 	case .Start:
 		on_set_start(nil, nil, nil)
 	case .End:
@@ -2637,6 +2735,7 @@ metal_player_load :: proc(path: string) -> bool {
 		msg_void(output, sel_registerName("release"))
 		return false
 	}
+	msg_void_f32(player, sel_registerName("setVolume:"), ui.player_volume)
 
 	old_player := state.player
 	old_output := ui.video_output
@@ -2704,6 +2803,10 @@ dispatch_click :: proc(point: Point) {
 	   contains(source_add_button_rect(source_panel), point) {open_source_modal(); return}
 	if ui.mode == .Create && state.active_source >= 0 &&
 	   contains(source_refetch_button_rect(source_panel), point) {on_refetch_source(nil, nil, nil); return}
+	if ui.mode == .Create && state.player != nil {
+		if contains(source_volume_down_rect(player), point) {adjust_player_volume(-0.1); return}
+		if contains(source_volume_up_rect(player), point) {adjust_player_volume(0.1); return}
+	}
 	if contains(player, point) {on_toggle_playback(nil, nil, nil); return}
 
 	if ui.mode == .Create {

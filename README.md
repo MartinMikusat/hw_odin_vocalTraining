@@ -46,7 +46,8 @@ rebuilds every saved exercise derived from that source at the new resolution.
 Select a source, load its captions, and click a timed transcript row to seek.
 Mark the start and end of a useful section, then commit the range as an
 exercise. Saved exercises appear in the exercise bank and play as standalone
-clips when selected.
+clips when selected. The Source Monitor volume controls adjust playback in 10%
+steps and retain that level when another source is loaded during the session.
 
 When no text field has focus, press **Space** to toggle playback or **1–8** to
 activate the matching numbered transport control.
