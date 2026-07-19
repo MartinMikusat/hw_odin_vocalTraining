@@ -123,6 +123,9 @@ Import_Job :: struct {
 	has_pending_hint: bool,
 	accepted: int,
 	failed: int,
+	existing_sources: int,
+	updated_hints: int,
+	latest_updated_hint: f64,
 	refreshed_exercises: int,
 	failed_exercise_refreshes: int,
 	missing_merged_media: int,
@@ -248,6 +251,7 @@ nsstring :: proc(s: string) -> Id {
 
 set_text :: proc(control: Id, text: string) {
 	if control == state.status {
+		ui.status_success = false
 		ui_set_string(&ui.status, text)
 		ui.needs_redraw = true
 		return
@@ -258,6 +262,20 @@ set_text :: proc(control: Id, text: string) {
 		return
 	}
 	msg_void_id(control, sel_registerName("setStringValue:"), nsstring(text))
+}
+
+set_success_status :: proc(text: string) {
+	set_text(state.status, text)
+	ui.status_success = true
+}
+
+import_success_status :: proc(new_sources, existing_sources, updated_hints: int, latest_hint := -1.0) -> string {
+	if new_sources > 0 && updated_hints == 1 && latest_hint >= 0 {return fmt.tprintf("Imported %d source%s; added timestamp %s to an existing source", new_sources, new_sources == 1 ? "" : "s", format_timestamp(latest_hint))}
+	if new_sources > 0 && updated_hints > 0 {return fmt.tprintf("Imported %d source%s; added %d timestamps to existing sources", new_sources, new_sources == 1 ? "" : "s", updated_hints)}
+	if new_sources > 0 {return fmt.tprintf("Imported %d source%s", new_sources, new_sources == 1 ? "" : "s")}
+	if updated_hints == 1 && latest_hint >= 0 {return fmt.tprintf("Added timestamp %s to the existing source", format_timestamp(latest_hint))}
+	if updated_hints > 0 {return fmt.tprintf("Added %d timestamps to existing sources", updated_hints)}
+	return fmt.tprintf("%d source%s already in the register", existing_sources, existing_sources == 1 ? "" : "s")
 }
 
 field_text :: proc(control: Id) -> string {
@@ -571,6 +589,54 @@ source_initial_seconds :: proc(source_index: int) -> f64 {
 	return 0
 }
 
+source_hint_count :: proc(source_index: int) -> int {
+	if source_index < 0 || source_index >= len(state.sources) {return 0}
+	source_id := state.sources[source_index].id
+	count := 0
+	for hint in state.hints {if hint.source_id == source_id {count += 1}}
+	return count
+}
+
+sorted_hint_values :: proc(hints: []Import_Hint, source_id: string, allocator := context.allocator) -> [dynamic]f64 {
+	values := make([dynamic]f64, allocator)
+	for hint in hints {if hint.source_id == source_id {append(&values, hint.seconds)}}
+	for i in 1 ..< len(values) {
+		value := values[i]
+		j := i
+		for j > 0 && values[j - 1] > value {values[j] = values[j - 1]; j -= 1}
+		values[j] = value
+	}
+	return values
+}
+
+source_hint_values :: proc(source_index: int, allocator := context.allocator) -> [dynamic]f64 {
+	if source_index < 0 || source_index >= len(state.sources) {return make([dynamic]f64, allocator)}
+	return sorted_hint_values(state.hints[:], state.sources[source_index].id, allocator)
+}
+
+promote_source_hint :: proc(hints: []Import_Hint, source_id: string, seconds: f64) -> bool {
+	hint_index := -1
+	for hint, index in hints {
+		if hint.source_id == source_id && hint.seconds == seconds {hint_index = index; break}
+	}
+	if hint_index < 0 {return false}
+	selected := hints[hint_index]
+	for index in hint_index ..< len(hints) - 1 {hints[index] = hints[index + 1]}
+	hints[len(hints) - 1] = selected
+	return true
+}
+
+select_source_hint :: proc(source_index: int, seconds: f64) -> bool {
+	if source_index < 0 || source_index >= len(state.sources) {return false}
+	source_id := state.sources[source_index].id
+	if !promote_source_hint(state.hints[:], source_id, seconds) {return false}
+	if source_index == state.active_source && state.player != nil {seek_seconds(seconds)}
+	_ = save_library()
+	set_success_status(fmt.tprintf("Selected source timestamp %s", format_timestamp(seconds)))
+	ui.needs_redraw = true
+	return true
+}
+
 stop_source_playback :: proc() {
 	if state.player == nil {return}
 	msg_void(state.player, sel_registerName("pause"))
@@ -587,6 +653,7 @@ reset_source_playback :: proc() {
 
 load_source_player :: proc(index: int) -> bool {
 	if index < 0 || index >= len(state.sources) { return false }
+	ui.source_hint_menu_open = false
 	source := &state.sources[index]
 	state.active_source = index
 	source.media_available = os.exists(source.media_path)
@@ -714,11 +781,12 @@ import_job_has_hint :: proc(job: ^Import_Job, source_id: string, seconds: f64) -
 	return false
 }
 
-import_job_add_hint :: proc(job: ^Import_Job, source_id: string, seconds: f64) {
-	if import_job_has_hint(job, source_id, seconds) { return }
+import_job_add_hint :: proc(job: ^Import_Job, source_id: string, seconds: f64) -> bool {
+	if import_job_has_hint(job, source_id, seconds) { return false }
 	allocator := mem_virtual.arena_allocator(job.arena)
 	append(&job.new_hints, Import_Hint{source_id=strings.clone(source_id, allocator), seconds=seconds})
 	job.pending_hint, job.has_pending_hint = seconds, true
+	return true
 }
 
 import_job_cancel :: proc(job: ^Import_Job) {
@@ -834,7 +902,13 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	job.last_video_id = strings.clone(video_id, allocator)
 	if source := import_job_find_source(job, video_id); source != nil {
 		if video_id != job.replace_video_id {
-			if seconds, has_time := parse_timestamp(url); has_time { import_job_add_hint(job, source.id, seconds) }
+			job.existing_sources += 1
+			if seconds, has_time := parse_timestamp(url); has_time {
+				if import_job_add_hint(job, source.id, seconds) {
+					job.updated_hints += 1
+					job.latest_updated_hint = seconds
+				}
+			}
 			return true
 		}
 	}
@@ -897,7 +971,7 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	} else {
 		append(&job.new_sources, source)
 	}
-	if seconds, has_time := parse_timestamp(url); has_time { import_job_add_hint(job, source.id, seconds) }
+	if seconds, has_time := parse_timestamp(url); has_time {_ = import_job_add_hint(job, source.id, seconds)}
 
 	previous := job.snapshot_transcripts.segments[:]
 	if job.has_transcript_update { previous = job.transcripts.segments[:] }
@@ -997,10 +1071,12 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		if job.failed_exercise_refreshes > 0 {
 			set_text(state.status, fmt.tprintf("Refetched source; %d exercise rebuild(s) failed. Log: %s", job.failed_exercise_refreshes, diagnostic_log_path("ffmpeg")))
 		} else {
-			set_text(state.status, fmt.tprintf("Refetched source and rebuilt %d exercise(s)", job.refreshed_exercises))
+			set_success_status(fmt.tprintf("Refetched source and rebuilt %d exercise(s)", job.refreshed_exercises))
 		}
-	} else {
-		set_text(state.status, fmt.tprintf("Imported %d source(s)", job.accepted))
+	} else if len(job.new_sources) > 0 {
+		set_success_status(import_success_status(len(job.new_sources), job.existing_sources, job.updated_hints, job.latest_updated_hint))
+	} else if job.existing_sources > 0 {
+		set_success_status(import_success_status(0, job.existing_sources, job.updated_hints, job.latest_updated_hint))
 	}
 }
 
@@ -1408,6 +1484,7 @@ main :: proc() {
 	defer memory_destroy()
 	defer app_state_memory_destroy()
 	defer source_probe_results_clear()
+	defer source_probe_cache_clear()
 	defer database_close()
 	defer jobs_shutdown()
 	configure_helper_path()

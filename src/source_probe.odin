@@ -35,11 +35,27 @@ Source_Probe_Job :: struct {
 	thread: ^thread.Thread,
 	completion_target: Id,
 	input: string,
+	cached_results: [dynamic]Source_Probe_Result,
 	results: [dynamic]Source_Probe_Result,
 }
 
 source_probe_job: ^Source_Probe_Job
 source_probe_results: [dynamic]Source_Probe_Result
+source_probe_cache: [dynamic]Source_Probe_Result
+
+source_probe_result_clone :: proc(result: Source_Probe_Result) -> Source_Probe_Result {
+	copy := Source_Probe_Result{
+		url = strings.clone(result.url),
+		video_id = strings.clone(result.video_id),
+		title = strings.clone(result.title),
+		duration = result.duration,
+		selected_height = result.selected_height,
+		error = strings.clone(result.error),
+	}
+	copy.heights = make([dynamic]int, 0, len(result.heights))
+	append(&copy.heights, ..result.heights[:])
+	return copy
+}
 
 source_probe_result_destroy :: proc(result: ^Source_Probe_Result) {
 	delete(result.url)
@@ -56,9 +72,23 @@ source_probe_results_clear :: proc() {
 	source_probe_results = nil
 }
 
+source_probe_cache_clear :: proc() {
+	for &result in source_probe_cache {source_probe_result_destroy(&result)}
+	delete(source_probe_cache)
+	source_probe_cache = nil
+}
+
+source_probe_cache_store :: proc(result: Source_Probe_Result) {
+	if len(result.error) > 0 {return}
+	for cached in source_probe_cache {if cached.video_id == result.video_id {return}}
+	append(&source_probe_cache, source_probe_result_clone(result))
+}
+
 source_probe_job_destroy :: proc(job: ^Source_Probe_Job) {
 	if job == nil {return}
 	delete(job.input)
+	for &result in job.cached_results {source_probe_result_destroy(&result)}
+	delete(job.cached_results)
 	for &result in job.results {source_probe_result_destroy(&result)}
 	delete(job.results)
 	free(job)
@@ -122,7 +152,25 @@ source_probe_worker :: proc(t: ^thread.Thread) {
 	remaining := job.input
 	for raw in strings.split_lines_iterator(&remaining) {
 		url := strings.trim_space(raw)
-		if len(url) > 0 {append(&job.results, source_probe_one(url))}
+		if len(url) == 0 {continue}
+		video_id, valid := parse_video_id(url)
+		if valid {
+			duplicate := false
+			for result in job.results {
+				if result.video_id == video_id {duplicate = true; break}
+			}
+			if duplicate {continue}
+			cached := false
+			for result in job.cached_results {
+				if result.video_id == video_id {
+					append(&job.results, source_probe_result_clone(result))
+					cached = true
+					break
+				}
+			}
+			if cached {continue}
+		}
+		append(&job.results, source_probe_one(url))
 	}
 	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("sourceProbeFinished:"), nil, false)
 }
@@ -134,9 +182,11 @@ source_probe_request :: proc() {
 	job := new(Source_Probe_Job)
 	job.input = strings.clone(input)
 	job.completion_target = state.delegate_target
+	job.cached_results = make([dynamic]Source_Probe_Result)
+	for result in source_probe_cache {append(&job.cached_results, source_probe_result_clone(result))}
 	job.results = make([dynamic]Source_Probe_Result)
 	worker := thread.create(source_probe_worker)
-	if worker == nil {delete(job.input); delete(job.results); free(job); return}
+	if worker == nil {source_probe_job_destroy(job); return}
 	job.thread = worker
 	worker.data = job
 	source_probe_job = job
@@ -151,6 +201,7 @@ on_source_probe_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if job == nil {return}
 	thread.join(job.thread)
 	thread.destroy(job.thread)
+	for result in job.results {source_probe_cache_store(result)}
 	source_probe_results_clear()
 	source_probe_results = job.results
 	job.results = nil
@@ -175,17 +226,22 @@ source_probe_selected_height :: proc(video_id: string) -> int {
 }
 
 source_probe_ready :: proc(input: string) -> bool {
-	count := 0
+	video_ids: [dynamic]string
+	defer delete(video_ids)
 	remaining := input
 	for raw in strings.split_lines_iterator(&remaining) {
 		url := strings.trim_space(raw)
 		if len(url) == 0 {continue}
-		count += 1
+		video_id, valid := parse_video_id(url)
+		if !valid {return false}
 		matched := false
 		for result in source_probe_results {
-			if result.url == url && len(result.error) == 0 {matched = true; break}
+			if result.video_id == video_id && len(result.error) == 0 {matched = true; break}
 		}
 		if !matched {return false}
+		known := false
+		for known_id in video_ids {if known_id == video_id {known = true; break}}
+		if !known {append(&video_ids, video_id)}
 	}
-	return count > 0 && count == len(source_probe_results)
+	return len(video_ids) > 0 && len(video_ids) == len(source_probe_results)
 }

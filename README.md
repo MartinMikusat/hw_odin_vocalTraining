@@ -69,6 +69,9 @@ clips when selected. The Source Monitor volume controls adjust playback in 10%
 steps and retain that level when another source is loaded during the session.
 Its transport can play, pause, stop at zero, reset to the imported URL
 timestamp, and scrub across the complete source.
+If a source has multiple imported timestamps, the Reset control becomes a
+timestamp selector. Selecting a value seeks there and saves it as the source's
+active timestamp.
 The speed controls adjust playback from `0.1x` to `2.0x` in `0.1x` steps.
 
 When no text field has focus, press **Space** to toggle playback or **1–8** to

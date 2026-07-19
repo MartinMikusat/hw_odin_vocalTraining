@@ -78,6 +78,18 @@ UI_Mode :: enum {
 	Play,
 }
 
+Source_Hint_Control :: enum {
+	None,
+	Reset,
+	Menu,
+}
+
+source_hint_control :: proc(hint_count: int) -> Source_Hint_Control {
+	if hint_count <= 0 {return .None}
+	if hint_count == 1 {return .Reset}
+	return .Menu
+}
+
 UI_State :: struct {
 	view:               Id,
 	layer:              Id,
@@ -114,6 +126,7 @@ UI_State :: struct {
 	exercise_search:    string,
 	exercise_name:      string,
 	status:             string,
+	status_success:     bool,
 	source_scroll:      f64,
 	transcript_scroll:  f64,
 	exercise_scroll:    f64,
@@ -123,6 +136,7 @@ UI_State :: struct {
 	player_volume:      f32,
 	playback_rate:      f32,
 	source_scrubbing:   bool,
+	source_hint_menu_open: bool,
 	activity_tick:      uint,
 	frame_tick:         uint,
 	url_probe_due_tick: uint,
@@ -205,6 +219,8 @@ AX_Kind :: enum {
 	Source_Play_Pause,
 	Source_Stop,
 	Source_Reset,
+	Source_Hint_Menu,
+	Source_Hint,
 	Start,
 	End,
 	Save,
@@ -504,8 +520,25 @@ source_modal_rect :: proc() -> UI_Rect {
 	return source_modal_rect_for_size(ui.width, ui.height)
 }
 
+source_modal_input_line_count :: proc(input: string) -> int {
+	if len(input) == 0 {return 1}
+	count := 1
+	for character in input {
+		if character == '\n' {
+			count += 1
+			if count == 10 {break}
+		}
+	}
+	return count
+}
+
+source_modal_input_rect_for_text :: proc(modal: UI_Rect, input: string) -> UI_Rect {
+	height := 32.0 + f64(source_modal_input_line_count(input) - 1) * 23
+	return UI_Rect{modal.x + 24, modal.y + modal.h - 180 - height, modal.w - 48, height}
+}
+
 source_modal_input_rect :: proc(modal: UI_Rect) -> UI_Rect {
-	return UI_Rect{modal.x + 24, modal.y + modal.h - 238, modal.w - 48, 58}
+	return source_modal_input_rect_for_text(modal, ui.url_input)
 }
 
 source_probe_row_rect :: proc(modal: UI_Rect, index: int) -> UI_Rect {
@@ -616,6 +649,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
 	ui.source_scrubbing = false
+	ui.source_hint_menu_open = false
 	if mode == .Play {
 		metal_player_clear()
 	} else {
@@ -802,7 +836,12 @@ source_stop_rect :: proc(player: UI_Rect) -> UI_Rect {
 
 source_reset_rect :: proc(player: UI_Rect) -> UI_Rect {
 	stop := source_stop_rect(player)
-	return UI_Rect{stop.x + stop.w + 6, stop.y, 58, stop.h}
+	return UI_Rect{stop.x + stop.w + 6, stop.y, 92, stop.h}
+}
+
+source_hint_option_rect :: proc(player: UI_Rect, option_index, option_count: int) -> UI_Rect {
+	button := source_reset_rect(player)
+	return UI_Rect{button.x, button.y + button.h + 4 + f64(option_count - option_index - 1) * 28, button.w, 27}
 }
 
 source_speed_down_rect :: proc(player: UI_Rect) -> UI_Rect {
@@ -1417,8 +1456,15 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			push_rect(vertices, rect, button_color)
 			push_border(vertices, rect, border)
 		}
-		transport_buttons := [3]UI_Rect{source_play_pause_rect(player), source_stop_rect(player), source_reset_rect(player)}
+		transport_buttons := [2]UI_Rect{source_play_pause_rect(player), source_stop_rect(player)}
 		for rect in transport_buttons {
+			button_color := field
+			if contains(rect, ui.mouse) {button_color = panel_alt}
+			push_rect(vertices, rect, button_color)
+			push_border(vertices, rect, border)
+		}
+		if source_hint_control(source_hint_count(state.active_source)) != .None {
+			rect := source_reset_rect(player)
 			button_color := field
 			if contains(rect, ui.mouse) {button_color = panel_alt}
 			push_rect(vertices, rect, button_color)
@@ -1584,6 +1630,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	muted := [4]f64{0.47, 0.49, 0.46, 1}
 	dim := [4]f64{0.31, 0.33, 0.31, 1}
 	orange := [4]f64{0.98, 0.35, 0.09, 1}
+	success := [4]f64{0.37, 0.78, 0.43, 1}
 	cyan := [4]f64{0.27, 0.72, 0.73, 1}
 	danger := [4]f64{0.95, 0.16, 0.10, 1}
 
@@ -1864,7 +1911,13 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		playing := msg_f32(state.player, sel_registerName("rate")) > 0
 		draw_text_in_rect(ctx, small_font, playing ? "PAUSE" : "PLAY", source_play_pause_rect(player), .Center, .Center, playing ? orange : cyan)
 		draw_text_in_rect(ctx, small_font, "STOP", source_stop_rect(player), .Center, .Center, muted)
-		draw_text_in_rect(ctx, small_font, "RESET", source_reset_rect(player), .Center, .Center, muted)
+		hint_count := source_hint_count(state.active_source)
+		hint_control := source_hint_control(hint_count)
+		if hint_control == .Reset {
+			draw_text_in_rect(ctx, small_font, "RESET", source_reset_rect(player), .Center, .Center, muted)
+		} else if hint_control == .Menu {
+			draw_timestamp_text_in_rect(ctx, small_font, format_timestamp(source_initial_seconds(state.active_source)), source_reset_rect(player), .Center, .Center, cyan)
+		}
 		speed_down_color := cyan
 		if ui.playback_rate <= 0.1 {speed_down_color = dim}
 		draw_text_in_rect(ctx, small_font, "-", source_speed_down_rect(player), .Center, .Center, speed_down_color)
@@ -1906,6 +1959,16 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				.Center,
 				cyan,
 			)
+		}
+		if ui.source_hint_menu_open && hint_control == .Menu {
+			values := source_hint_values(state.active_source, context.temp_allocator)
+			selected := source_initial_seconds(state.active_source)
+			for seconds, option_index in values {
+				option := source_hint_option_rect(player, option_index, len(values))
+				fill_overlay_rect(ctx, option, [4]f64{0.028, 0.030, 0.029, 1})
+				fill_overlay_border(ctx, option, seconds == selected ? cyan : [4]f64{0.25, 0.26, 0.24, 1})
+				draw_timestamp_text_in_rect(ctx, small_font, format_timestamp(seconds), option, .Center, .Center, seconds == selected ? cyan : bright)
+			}
 		}
 	} else if ui.active_exercise >= 0 && ui.active_exercise < len(state.exercises) {
 		exercise := &state.exercises[ui.active_exercise]
@@ -2210,7 +2273,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	status_rect := UI_Rect{footer.x + 314, footer.y, max(0, footer.w - 500), footer.h}
 	if import_job != nil {status_rect.w = max(0, import_cancel_rect().x - status_rect.x - 6)}
 	status_text := fmt.tprintf("SYS / %s", ui.status)
-	status_color := muted
+	status_color := ui.status_success ? success : muted
 	if import_job != nil || export_job != nil {
 		fill_overlay_rect(ctx, status_rect, [4]f64{0.12, 0.045, 0.018, 0.88})
 		fill_overlay_rect(ctx, UI_Rect{status_rect.x, status_rect.y, 3, status_rect.h}, orange)
@@ -2308,9 +2371,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			)
 		} else {
 			line_y := input.y + input.h - 30
-			line_count := 0
-			for line in strings.split_lines(ui.url_input) {
-				if line_count >= 3 {break}
+			lines := strings.split_lines(ui.url_input)
+			first_line := max(0, len(lines) - 10)
+			for line in lines[first_line:] {
 				draw_text_in_rect(
 					ctx,
 					small_font,
@@ -2321,10 +2384,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 					ink,
 				)
 				line_y -= 23
-				line_count += 1
 			}
 		}
-		if source_probe_job != nil {
+		if source_probe_job != nil && len(source_probe_results) == 0 {
 			draw_text_in_rect(ctx, small_font, fmt.tprintf("[%s] CHECKING METADATA AND FORMATS", activity_spinner(ui.activity_tick)), source_probe_row_rect(modal, 0), .Start, .Center, muted, 10)
 		} else {
 			for result, result_index in source_probe_results {
@@ -2378,7 +2440,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			},
 			.Start,
 			.Center,
-			muted,
+			ui.status_success ? success : muted,
 		)
 	}
 	return pixels
@@ -2625,7 +2687,19 @@ rebuild_accessibility :: proc() {
 		playing := msg_f32(state.player, sel_registerName("rate")) > 0
 		add_ax_element(array, element_class, playing ? "Pause source" : "Play source", "AXButton", source_play_pause_rect(player), .Source_Play_Pause)
 		add_ax_element(array, element_class, "Stop source and return to zero", "AXButton", source_stop_rect(player), .Source_Stop)
-		add_ax_element(array, element_class, "Return to the imported source timestamp", "AXButton", source_reset_rect(player), .Source_Reset)
+		hint_count := source_hint_count(state.active_source)
+		hint_control := source_hint_control(hint_count)
+		if hint_control == .Reset {
+			add_ax_element(array, element_class, "Return to the imported source timestamp", "AXButton", source_reset_rect(player), .Source_Reset)
+		} else if hint_control == .Menu {
+			add_ax_element(array, element_class, fmt.tprintf("Source timestamp %s", format_timestamp(source_initial_seconds(state.active_source))), "AXButton", source_reset_rect(player), .Source_Hint_Menu)
+			if ui.source_hint_menu_open {
+				values := source_hint_values(state.active_source, context.temp_allocator)
+				for seconds, option_index in values {
+					add_ax_element(array, element_class, format_timestamp(seconds), "AXButton", source_hint_option_rect(player, option_index, len(values)), .Source_Hint, 0, seconds)
+				}
+			}
+		}
 		add_ax_element(array, element_class, "Decrease source playback speed", "AXButton", source_speed_down_rect(player), .Speed_Down)
 		add_ax_element(array, element_class, "Increase source playback speed", "AXButton", source_speed_up_rect(player), .Speed_Up)
 		percent := volume_percent(ui.player_volume)
@@ -2719,6 +2793,11 @@ on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 		stop_source_playback()
 	case .Source_Reset:
 		reset_source_playback()
+	case .Source_Hint_Menu:
+		ui.source_hint_menu_open = !ui.source_hint_menu_open
+	case .Source_Hint:
+		ui.source_hint_menu_open = false
+		_ = select_source_hint(state.active_source, action.seconds)
 	case .Start:
 		on_set_start(nil, nil, nil)
 	case .End:
@@ -3138,6 +3217,7 @@ metal_audio_load :: proc(url: Id) -> (engine, player, pitch, file: Id, ok: bool)
 
 metal_player_clear :: proc() {
 	ui.source_scrubbing = false
+	ui.source_hint_menu_open = false
 	metal_player_clear_texture()
 	player := state.player
 	output := ui.video_output
@@ -3297,6 +3377,19 @@ dispatch_click :: proc(point: Point) {
 	if ui.mode == .Create &&
 	   contains(source_add_button_rect(source_panel), point) {open_source_modal(); return}
 	if ui.mode == .Create && state.player != nil {
+		hint_count := source_hint_count(state.active_source)
+		hint_control := source_hint_control(hint_count)
+		if ui.source_hint_menu_open {
+			values := source_hint_values(state.active_source, context.temp_allocator)
+			for seconds, option_index in values {
+				if contains(source_hint_option_rect(player, option_index, len(values)), point) {
+					ui.source_hint_menu_open = false
+					_ = select_source_hint(state.active_source, seconds)
+					return
+				}
+			}
+			if !contains(source_reset_rect(player), point) {ui.source_hint_menu_open = false}
+		}
 		if contains(source_timeline_rect(player), point) {
 			ui.source_scrubbing = true
 			seek_source_timeline(point, player)
@@ -3304,7 +3397,8 @@ dispatch_click :: proc(point: Point) {
 		}
 		if contains(source_play_pause_rect(player), point) {on_toggle_playback(nil, nil, nil); return}
 		if contains(source_stop_rect(player), point) {stop_source_playback(); return}
-		if contains(source_reset_rect(player), point) {reset_source_playback(); return}
+		if hint_control == .Reset && contains(source_reset_rect(player), point) {reset_source_playback(); return}
+		if hint_control == .Menu && contains(source_reset_rect(player), point) {ui.source_hint_menu_open = !ui.source_hint_menu_open; ui.needs_redraw = true; return}
 		if contains(source_speed_down_rect(player), point) {adjust_playback_rate(-0.1); return}
 		if contains(source_speed_up_rect(player), point) {adjust_playback_rate(0.1); return}
 		if contains(source_volume_down_rect(player), point) {adjust_player_volume(-0.1); return}

@@ -716,11 +716,112 @@ source_probe_lists_unique_available_heights_and_defaults_to_1080p_test :: proc(t
 }
 
 @(test)
+source_probe_ready_accepts_duplicate_video_urls_with_distinct_timestamps_test :: proc(t: ^testing.T) {
+	old_results := source_probe_results
+	defer {source_probe_results = old_results}
+	source_probe_results = make([dynamic]Source_Probe_Result)
+	defer source_probe_results_clear()
+	append(&source_probe_results, Source_Probe_Result{video_id=strings.clone("KfnxccMdi-A")})
+	input := "https://youtu.be/KfnxccMdi-A?t=321\nhttps://youtu.be/KfnxccMdi-A?t=449"
+	testing.expect(t, source_probe_ready(input))
+}
+
+@(test)
+source_probe_cache_uses_video_id_across_timestamp_urls_test :: proc(t: ^testing.T) {
+	old_cache := source_probe_cache
+	defer {source_probe_cache = old_cache}
+	source_probe_cache = make([dynamic]Source_Probe_Result)
+	defer source_probe_cache_clear()
+	result := Source_Probe_Result{
+		url = "https://youtu.be/KfnxccMdi-A?t=321",
+		video_id = "KfnxccMdi-A",
+		title = "Exercise",
+		selected_height = 1080,
+	}
+	result.heights = make([dynamic]int)
+	defer delete(result.heights)
+	append(&result.heights, 720, 1080)
+	source_probe_cache_store(result)
+	testing.expect_value(t, len(source_probe_cache), 1)
+	copy := source_probe_result_clone(source_probe_cache[0])
+	defer source_probe_result_destroy(&copy)
+	testing.expect_value(t, copy.video_id, "KfnxccMdi-A")
+	testing.expect_value(t, copy.selected_height, 1080)
+	testing.expect_value(t, len(copy.heights), 2)
+}
+
+@(test)
+source_modal_input_expands_for_three_lines_test :: proc(t: ^testing.T) {
+	modal := UI_Rect{100, 100, 980, 680}
+	input := source_modal_input_rect_for_text(modal, "one\ntwo\nthree")
+	row := UI_Rect{modal.x + 24, input.y - 70, modal.w - 48, 62}
+	testing.expect_value(t, input.h, 78.0)
+	testing.expect(t, row.y + row.h < input.y)
+}
+
+@(test)
+source_modal_input_expands_when_enter_creates_an_empty_line_test :: proc(t: ^testing.T) {
+	modal := UI_Rect{100, 100, 980, 680}
+	testing.expect_value(t, source_modal_input_rect_for_text(modal, "one\n").h, 55.0)
+}
+
+@(test)
+source_modal_input_shows_ten_lines_before_scrolling_test :: proc(t: ^testing.T) {
+	modal := UI_Rect{100, 100, 980, 680}
+	ten_lines_height := source_modal_input_rect_for_text(modal, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10").h
+	testing.expect_value(t, ten_lines_height, 239.0)
+	testing.expect_value(t, source_modal_input_rect_for_text(modal, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11").h, ten_lines_height)
+}
+
+@(test)
 download_format_selector_applies_the_selected_height_to_every_fallback_test :: proc(t: ^testing.T) {
 	selector := download_format_selector(1440)
 	testing.expect_value(t, strings.count(selector, "height<=1440"), 2)
 	testing.expect_value(t, strings.count(selector, "vcodec^=avc1"), 2)
 	testing.expect(t, strings.contains(selector, "ba[ext=m4a]"))
+}
+
+@(test)
+existing_source_timestamp_reports_a_position_update_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, import_success_status(0, 1, 1, 321), "Added timestamp 00:05:21 to the existing source")
+	testing.expect_value(t, import_success_status(0, 1, 0), "1 source already in the register")
+	testing.expect_value(t, import_success_status(2, 1, 1, 90), "Imported 2 sources; added timestamp 00:01:30 to an existing source")
+}
+
+@(test)
+source_hint_values_sort_and_selection_promotes_the_chosen_value_test :: proc(t: ^testing.T) {
+	hints := []Import_Hint{{source_id="a", seconds=90}, {source_id="b", seconds=20}, {source_id="a", seconds=15}, {source_id="a", seconds=45}}
+	values := sorted_hint_values(hints, "a")
+	defer delete(values)
+	testing.expect_value(t, len(values), 3)
+	testing.expect_value(t, values[0], 15.0)
+	testing.expect_value(t, values[1], 45.0)
+	testing.expect_value(t, values[2], 90.0)
+	testing.expect(t, promote_source_hint(hints, "a", 45))
+	testing.expect_value(t, hints[len(hints) - 1].source_id, "a")
+	testing.expect_value(t, hints[len(hints) - 1].seconds, 45.0)
+	testing.expect(t, !promote_source_hint(hints, "a", 999))
+}
+
+@(test)
+source_hint_menu_places_every_timestamp_in_a_distinct_row_above_the_control_test :: proc(t: ^testing.T) {
+	player := UI_Rect{308, 306, 480, 310}
+	button := source_reset_rect(player)
+	count := 5
+	previous := source_hint_option_rect(player, 0, count)
+	testing.expect(t, previous.y > button.y + button.h)
+	for index in 1 ..< count {
+		current := source_hint_option_rect(player, index, count)
+		testing.expect(t, current.y + current.h < previous.y)
+		previous = current
+	}
+}
+
+@(test)
+source_hint_control_changes_from_none_to_reset_to_menu_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, source_hint_control(0), Source_Hint_Control.None)
+	testing.expect_value(t, source_hint_control(1), Source_Hint_Control.Reset)
+	testing.expect_value(t, source_hint_control(2), Source_Hint_Control.Menu)
 }
 
 @(test)
