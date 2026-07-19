@@ -122,6 +122,46 @@ metal_ui_backspace_removes_complete_utf8_character_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+metal_ui_word_backspace_removes_trailing_space_and_word_test :: proc(t: ^testing.T) {
+	value := strings.clone("Vocal warmup   ")
+	defer delete(value)
+	remove_last_word(&value)
+	testing.expect_value(t, value, "Vocal ")
+	remove_last_word(&value)
+	testing.expect_value(t, value, "")
+	remove_last_word(&value)
+	testing.expect_value(t, value, "")
+}
+
+@(test)
+metal_ui_word_backspace_preserves_utf8_boundaries_test :: proc(t: ^testing.T) {
+	value := strings.clone("Vocal cvičenie")
+	defer delete(value)
+	remove_last_word(&value)
+	testing.expect_value(t, value, "Vocal ")
+}
+
+@(test)
+metal_ui_word_backspace_uses_punctuation_boundaries_test :: proc(t: ^testing.T) {
+	value := strings.clone("vocal-training.app/exercises")
+	defer delete(value)
+	remove_last_word(&value)
+	testing.expect_value(t, value, "vocal-training.app/")
+	remove_last_word(&value)
+	testing.expect_value(t, value, "vocal-training.")
+	remove_last_word(&value)
+	testing.expect_value(t, value, "vocal-")
+}
+
+@(test)
+metal_ui_word_backspace_keeps_underscore_inside_word_test :: proc(t: ^testing.T) {
+	value := strings.clone("vocal_training")
+	defer delete(value)
+	remove_last_word(&value)
+	testing.expect_value(t, value, "")
+}
+
+@(test)
 terminal_layout_stays_partitioned_at_minimum_size_test :: proc(t: ^testing.T) {
 	old_width, old_height := ui.width, ui.height
 	old_mode, old_modal := ui.mode, ui.source_modal_open
@@ -408,6 +448,22 @@ mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, control_slot_for_action(.Play, 4), 1)
 	testing.expect_value(t, control_slot_for_action(.Play, 7), 2)
 	testing.expect_value(t, control_slot_for_action(.Play, 0), -1)
+}
+
+@(test)
+command_v_routes_to_paste_test :: proc(t: ^testing.T) {
+	NSEventModifierFlagCommand :: uint(1 << 20)
+	testing.expect(t, is_paste_shortcut(9, NSEventModifierFlagCommand))
+	testing.expect(t, !is_paste_shortcut(9, 0))
+	testing.expect(t, !is_paste_shortcut(8, NSEventModifierFlagCommand))
+}
+
+@(test)
+control_backspace_routes_to_word_deletion_test :: proc(t: ^testing.T) {
+	NSEventModifierFlagControl :: uint(1 << 18)
+	testing.expect(t, is_delete_word_shortcut(51, NSEventModifierFlagControl))
+	testing.expect(t, !is_delete_word_shortcut(51, 0))
+	testing.expect(t, !is_delete_word_shortcut(117, NSEventModifierFlagControl))
 }
 
 @(test)

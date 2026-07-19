@@ -375,6 +375,23 @@ remove_last_character :: proc(target: ^string) {
 	ui_set_string(target, target^[:index])
 }
 
+is_word_delimiter :: proc(value: u8) -> bool {
+	if value >= 0x80 {return false}
+	return !(
+		value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9' ||
+		value == '_'
+	)
+}
+
+remove_last_word :: proc(target: ^string) {
+	index := len(target^)
+	for index > 0 && is_word_delimiter(target^[index - 1]) {index -= 1}
+	for index > 0 && !is_word_delimiter(target^[index - 1]) {index -= 1}
+	ui_set_string(target, target^[:index])
+}
+
 focused_text :: proc() -> ^string {
 	#partial switch ui.focus {
 	case .URL:
@@ -564,6 +581,16 @@ control_slot_for_action :: proc(mode: UI_Mode, action: int) -> int {
 		return 2
 	}
 	return -1
+}
+
+is_paste_shortcut :: proc(key, modifiers: uint) -> bool {
+	NSEventModifierFlagCommand :: uint(1 << 20)
+	return key == 9 && modifiers & NSEventModifierFlagCommand != 0
+}
+
+is_delete_word_shortcut :: proc(key, modifiers: uint) -> bool {
+	NSEventModifierFlagControl :: uint(1 << 18)
+	return key == 51 && modifiers & NSEventModifierFlagControl != 0
 }
 
 control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
@@ -2742,6 +2769,8 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 	target := focused_text()
 	if selector == sel_registerName("deleteBackward:") {
 		if target != nil {remove_last_character(target)}
+	} else if selector == sel_registerName("deleteWordBackward:") {
+		if target != nil {remove_last_word(target)}
 	} else if selector == sel_registerName("paste:") {
 		on_metal_paste(self, selector, nil)
 	} else if selector == sel_registerName("insertNewline:") {
@@ -2773,6 +2802,17 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	key := msg_uint(event, sel_registerName("keyCode"))
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
+	if is_paste_shortcut(key, msg_uint(event, sel_registerName("modifierFlags"))) {
+		on_metal_paste(self, sel_registerName("paste:"), nil)
+		return
+	}
+	if target := focused_text();
+	   target != nil &&
+	   is_delete_word_shortcut(key, msg_uint(event, sel_registerName("modifierFlags"))) {
+		remove_last_word(target)
+		ui.needs_redraw = true
+		return
+	}
 	if ui.focus == .None {
 		if key == 49 {on_toggle_playback(nil, nil, nil); return}
 		key_codes := [8]uint{18, 19, 20, 21, 23, 22, 26, 28}
