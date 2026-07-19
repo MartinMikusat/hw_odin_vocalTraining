@@ -37,19 +37,26 @@ monitor, and only playback controls.
 Press **Add** in the Source Register to open the ingest dialog, then paste one
 or more YouTube URLs with one URL per line. URLs are normalized by video ID,
 while timestamps supplied through `t`, `start`, or `youtu.be` URL forms become
-initial playhead hints. Import fetches the best available MP4 video and M4A
-audio streams and merges them without transcoding. Import prefers an English
+initial playhead hints. The dialog checks each URL in the background and shows
+its title, duration, and available video resolutions. Select a resolution for
+each video before import. The default is the best available resolution at or
+below 1080p, or the lowest available resolution when all options are higher.
+Import fetches the selected MP4 video and M4A audio streams and
+merges them without transcoding. Import prefers an English
 caption track and otherwise accepts YouTube's original-language automatic
 captions. Right-click a source to open the Source Details dialog. It shows the
 duration, resolution, frame rate, codecs, container, format ID, and local file
 size. The app loads missing file metadata in the background after startup.
-Select **Refetch at Best Available Quality** to replace its media, metadata, and
-captions.
+Select **Refetch / Select Quality** to replace its media, metadata, and
+captions. Refetch checks the source again and opens the same per-video quality
+selector before it downloads replacement media.
 The refetch operation also rebuilds each saved exercise from that source at the
 new resolution.
 During a download, the footer shows its completion, current stream size,
 transfer speed, and remaining time. Select **Stop** to terminate yt-dlp and
 leave the source library unchanged.
+The app downloads into staging files. It verifies H.264 video and AAC audio,
+decodes one second of both tracks, and then replaces the active source files.
 
 The Source Register marks a source as **MISSING** when its merged MP4 file is
 not available. Right-click that source and refetch it. Inspect `yt-dlp.log` if

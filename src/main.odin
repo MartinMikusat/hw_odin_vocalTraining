@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:encoding/json"
 import "core:os"
 import os2 "core:os/os2"
 import "core:path/filepath"
@@ -110,6 +111,7 @@ Import_Job :: struct {
 	exercises: [dynamic]Exercise,
 	new_sources: [dynamic]Source_Video,
 	new_hints: [dynamic]Import_Hint,
+	qualities: [dynamic]Import_Quality,
 	snapshot_transcripts: Transcript_Generation,
 	transcripts: Transcript_Generation,
 	has_transcript_update: bool,
@@ -124,10 +126,16 @@ Import_Job :: struct {
 	refreshed_exercises: int,
 	failed_exercise_refreshes: int,
 	missing_merged_media: int,
+	invalid_merged_media: int,
 	process_mutex: sync.Mutex,
 	process: os2.Process,
 	has_process: bool,
 	cancelled: bool,
+}
+
+Import_Quality :: struct {
+	video_id: string,
+	height: int,
 }
 
 Export_Job :: struct {
@@ -580,11 +588,15 @@ reset_source_playback :: proc() {
 load_source_player :: proc(index: int) -> bool {
 	if index < 0 || index >= len(state.sources) { return false }
 	source := &state.sources[index]
-	source.media_available = os.exists(source.media_path)
-	if !source.media_available {return false}
-	path := source.media_path
-	if !metal_player_load(path) { return false }
 	state.active_source = index
+	source.media_available = os.exists(source.media_path)
+	if !source.media_available || !media_file_validate(source.media_path) {
+		metal_player_clear()
+		refresh_transcript()
+		return false
+	}
+	path := source.media_path
+	if !metal_player_load(path) {metal_player_clear(); return false}
 	state.has_start, state.has_end = false, false
 	set_text(state.exercise_name_input, "")
 	if state.has_pending_hint {
@@ -662,6 +674,14 @@ import_job_create :: proc(input: string, replace_video_id := "") -> ^Import_Job 
 	job.exercises = make([dynamic]Exercise, 0, len(state.exercises), allocator)
 	job.new_sources = make([dynamic]Source_Video, allocator)
 	job.new_hints = make([dynamic]Import_Hint, allocator)
+	job.qualities = make([dynamic]Import_Quality, allocator)
+	if len(replace_video_id) == 0 {
+		for result in source_probe_results {
+			if result.selected_height > 0 {
+				append(&job.qualities, Import_Quality{strings.clone(result.video_id, allocator), result.selected_height})
+			}
+		}
+	}
 	for source in state.sources {
 		copy, copied := clone_source_video(source, allocator)
 		if !copied { import_job_destroy(job); return nil }
@@ -716,17 +736,77 @@ import_job_is_cancelled :: proc(job: ^Import_Job) -> bool {
 	return cancelled
 }
 
-import_job_run_download :: proc(job: ^Import_Job, url, output: string) -> bool {
+download_format_selector :: proc(maximum_height: int) -> string {
+	if maximum_height <= 0 {return "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4][vcodec^=avc1]"}
+	return fmt.tprintf("bv*[height<=%d][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=%d][ext=mp4][vcodec^=avc1]", maximum_height, maximum_height)
+}
+
+import_job_selected_height :: proc(job: ^Import_Job, video_id: string) -> int {
+	for quality in job.qualities {if quality.video_id == video_id {return quality.height}}
+	return 0
+}
+
+staged_source_cleanup :: proc(directory, video_id: string) {
+	handle, open_error := os.open(directory)
+	if open_error != nil {return}
+	defer os.close(handle)
+	entries, read_error := os.read_dir(handle, -1, context.temp_allocator)
+	if read_error != nil {return}
+	prefix := fmt.tprintf("%s.download.", video_id)
+	for entry in entries {
+		if strings.has_prefix(entry.name, prefix) {_ = os.remove(fmt.tprintf("%s/%s", directory, entry.name))}
+	}
+}
+
+staged_source_validate :: proc(directory, video_id: string) -> bool {
+	media_path := fmt.tprintf("%s/%s.download.mp4", directory, video_id)
+	info_path := fmt.tprintf("%s/%s.download.info.json", directory, video_id)
+	bytes, read_ok := os.read_entire_file(info_path, context.temp_allocator)
+	if !read_ok {return false}
+	metadata: YTDLP_Metadata
+	if parse_error := json.unmarshal(bytes, &metadata, .JSON, context.temp_allocator); parse_error != nil {return false}
+	video_ok := strings.has_prefix(metadata.vcodec, "avc1") || strings.has_prefix(metadata.vcodec, "h264")
+	audio_ok := strings.has_prefix(metadata.acodec, "mp4a") || strings.has_prefix(metadata.acodec, "aac")
+	if metadata.width <= 0 || metadata.height <= 0 || !video_ok || !audio_ok {return false}
+	return media_file_validate(media_path)
+}
+
+media_file_validate :: proc(media_path: string) -> bool {
+	command := [14]string{helper_command("ffmpeg"), "-v", "info", "-i", media_path, "-map", "0:v:0", "-map", "0:a:0", "-t", "1", "-f", "null", "-"}
+	process_state, stdout, stderr, process_error := os2.process_exec({command=command[:]}, context.temp_allocator)
+	_ = stdout
+	streams_ok := strings.contains(string(stderr), "Video: h264") && strings.contains(string(stderr), "Audio: aac")
+	return process_error == nil && process_state.success && streams_ok
+}
+
+staged_source_commit :: proc(directory, video_id: string) -> bool {
+	handle, open_error := os.open(directory)
+	if open_error != nil {return false}
+	defer os.close(handle)
+	entries, read_error := os.read_dir(handle, -1, context.temp_allocator)
+	if read_error != nil {return false}
+	prefix := fmt.tprintf("%s.download.", video_id)
+	media_name := fmt.tprintf("%s.download.mp4", video_id)
+	for entry in entries {
+		if !strings.has_prefix(entry.name, prefix) || entry.name == media_name {continue}
+		suffix := entry.name[len(prefix):]
+		if !os.rename(fmt.tprintf("%s/%s", directory, entry.name), fmt.tprintf("%s/%s.%s", directory, video_id, suffix)) {return false}
+	}
+	return os.rename(fmt.tprintf("%s/%s", directory, media_name), fmt.tprintf("%s/%s.mp4", directory, video_id))
+}
+
+import_job_run_download :: proc(job: ^Import_Job, url, output: string, maximum_height := 0) -> bool {
 	progress_file, progress_error := os2.open(import_progress_path(), {.Write, .Create, .Trunc, .Inheritable})
 	if progress_error != nil {return false}
 	defer os2.close(progress_file)
 	log_file, log_error := os2.open(diagnostic_log_path("yt-dlp"), {.Write, .Create, .Append, .Inheritable})
 	if log_error != nil {return false}
 	defer os2.close(log_file)
+	format_selector := download_format_selector(maximum_height)
 	command := [24]string{
 		helper_command("yt-dlp"), "--no-playlist", "--force-overwrites", "--write-info-json",
 		"--write-subs", "--write-auto-subs", "--sub-langs", "en,.*-orig", "--sub-format", "json3",
-		"--ffmpeg-location", helper_command("ffmpeg"), "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+		"--ffmpeg-location", helper_command("ffmpeg"), "-f", format_selector,
 		"-S", "res,vcodec:h264", "--merge-output-format", "mp4", "--newline",
 		"--progress-template", "download:VT_PROGRESS|%(progress._percent_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
 		"-o", output, url,
@@ -762,8 +842,18 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	dir := app_support_dir()
 	os.make_directory(dir)
 	os.make_directory(fmt.tprintf("%s/sources", dir))
-	output := fmt.tprintf("%s/sources/%s.%%(ext)s", dir, video_id)
-	if !import_job_run_download(job, url, output) {return false}
+	source_directory := fmt.tprintf("%s/sources", dir)
+	staged_source_cleanup(source_directory, video_id)
+	output := fmt.tprintf("%s/%s.download.%%(ext)s", source_directory, video_id)
+	if !import_job_run_download(job, url, output, import_job_selected_height(job, video_id)) {
+		staged_source_cleanup(source_directory, video_id)
+		return false
+	}
+	if !staged_source_validate(source_directory, video_id) || !staged_source_commit(source_directory, video_id) {
+		job.invalid_merged_media += 1
+		staged_source_cleanup(source_directory, video_id)
+		return false
+	}
 	run := transmute(proc "c" (cstring) -> int)system_address
 	media_path := fmt.tprintf("%s/sources/%s.mp4", dir, video_id)
 	if !os.exists(media_path) {
@@ -893,7 +983,9 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		refresh_sources()
 	}
 	if job.failed > 0 {
-		if job.missing_merged_media > 0 {
+		if job.invalid_merged_media > 0 {
+			set_text(state.status, "Download failed validation: the staged MP4 did not contain compatible H.264 video and AAC audio. The previous source file was preserved.")
+		} else if job.missing_merged_media > 0 {
 			set_text(state.status, fmt.tprintf("Import failed: yt-dlp did not create the merged MP4. Check media helpers. Log: %s", diagnostic_log_path("yt-dlp")))
 		} else if len(job.replace_video_id) > 0 && last_imported_source >= 0 {
 			load_source_player(last_imported_source)
@@ -905,7 +997,7 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		if job.failed_exercise_refreshes > 0 {
 			set_text(state.status, fmt.tprintf("Refetched source; %d exercise rebuild(s) failed. Log: %s", job.failed_exercise_refreshes, diagnostic_log_path("ffmpeg")))
 		} else {
-			set_text(state.status, fmt.tprintf("Refetched source and rebuilt %d exercise(s) at the best available quality", job.refreshed_exercises))
+			set_text(state.status, fmt.tprintf("Refetched source and rebuilt %d exercise(s)", job.refreshed_exercises))
 		}
 	} else {
 		set_text(state.status, fmt.tprintf("Imported %d source(s)", job.accepted))
@@ -991,13 +1083,17 @@ on_source_metadata_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	request_next_missing_source_metadata()
 }
 
-refetch_source :: proc(source_index: int) {
+refetch_source :: proc(source_index: int, maximum_height := 0) {
 	if import_job != nil { set_text(state.status, "An import is already running"); return }
 	if source_index < 0 || source_index >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
 	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
 	source := &state.sources[source_index]
 	job := import_job_create(source.url, source.video_id)
 	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
+	if maximum_height > 0 {
+		allocator := mem_virtual.arena_allocator(job.arena)
+		append(&job.qualities, Import_Quality{strings.clone(source.video_id, allocator), maximum_height})
+	}
 	worker := thread.create(import_worker)
 	if worker == nil { import_job_destroy(job); set_text(state.status, "Unable to start import worker"); return }
 	job.thread = worker
@@ -1008,7 +1104,11 @@ refetch_source :: proc(source_index: int) {
 	os.make_directory(app_support_dir())
 	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
 	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
-	set_text(state.status, "Refetching the selected source at the best available quality...")
+	if maximum_height > 0 {
+		set_text(state.status, fmt.tprintf("Refetching the selected source at up to %dp...", maximum_height))
+	} else {
+		set_text(state.status, "Refetching the selected source at the best available quality...")
+	}
 	thread.start(worker)
 }
 
@@ -1025,6 +1125,21 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
 	input := strings.trim_space(field_text(state.url_input))
 	if len(input) == 0 { set_text(state.status, "Paste at least one YouTube URL"); return }
+	if source_probe_job != nil {set_text(state.status, "Wait for the metadata check to finish"); return}
+	if !source_probe_ready(input) {
+		set_text(state.status, "Check the URL metadata and select an available quality first")
+		source_probe_request()
+		return
+	}
+	if ui.source_modal_refetch_index >= 0 {
+		source_index := ui.source_modal_refetch_index
+		if source_index >= 0 && source_index < len(state.sources) {
+			height := source_probe_selected_height(state.sources[source_index].video_id)
+			close_source_modal()
+			refetch_source(source_index, height)
+		}
+		return
+	}
 	job := import_job_create(input)
 	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
 	worker := thread.create(import_worker)
@@ -1206,7 +1321,7 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 		if !source.media_available {
 			set_text(state.status, "MEDIA MISSING / The merged MP4 was not created. Right-click this source and refetch it.")
 		} else {
-			set_text(state.status, "Unable to decode the selected source media")
+			set_text(state.status, "VIDEO INVALID / The MP4 does not contain decodable H.264 video and AAC audio. Right-click this source and refetch it.")
 		}
 	}
 }
@@ -1249,6 +1364,15 @@ on_open_data_folder :: proc "c" (self: Id, command: Sel, sender: Id) {
 }
 
 jobs_shutdown :: proc() {
+	if source_probe_job != nil {
+		if source_probe_job.thread != nil {
+			thread.join(source_probe_job.thread)
+			thread.destroy(source_probe_job.thread)
+			source_probe_job.thread = nil
+		}
+		source_probe_job_destroy(source_probe_job)
+		source_probe_job = nil
+	}
 	if source_metadata_job != nil {
 		if source_metadata_job.thread != nil {
 			thread.join(source_metadata_job.thread)
@@ -1283,6 +1407,7 @@ main :: proc() {
 	if !memory_init() { fmt.eprintln("Unable to initialize memory arenas"); return }
 	defer memory_destroy()
 	defer app_state_memory_destroy()
+	defer source_probe_results_clear()
 	defer database_close()
 	defer jobs_shutdown()
 	configure_helper_path()

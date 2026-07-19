@@ -106,6 +106,7 @@ UI_State :: struct {
 	focus:              UI_Focus,
 	mode:               UI_Mode,
 	source_modal_open:  bool,
+	source_modal_refetch_index: int,
 	source_details_open: bool,
 	source_details_index: int,
 	url_input:          string,
@@ -123,6 +124,9 @@ UI_State :: struct {
 	playback_rate:      f32,
 	source_scrubbing:   bool,
 	activity_tick:      uint,
+	frame_tick:         uint,
+	url_probe_due_tick: uint,
+	url_probe_pending:  bool,
 	needs_redraw:       bool,
 }
 
@@ -218,7 +222,7 @@ AX_Action :: struct {
 	seconds: f64,
 }
 
-ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1}
+ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1}
 ui_event_tag: int
 ax_actions: [dynamic]AX_Action
 
@@ -491,8 +495,8 @@ source_add_button_rect :: proc(source_panel: UI_Rect) -> UI_Rect {
 }
 
 source_modal_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
-	width := min(max(520, view_width * 0.46), 720)
-	height := min(max(330, view_height * 0.48), 410)
+	width := min(max(720, view_width * 0.72), 980)
+	height := min(max(520, view_height * 0.72), 680)
 	return UI_Rect{(view_width - width) / 2, (view_height - height) / 2, width, height}
 }
 
@@ -501,7 +505,16 @@ source_modal_rect :: proc() -> UI_Rect {
 }
 
 source_modal_input_rect :: proc(modal: UI_Rect) -> UI_Rect {
-	return UI_Rect{modal.x + 24, modal.y + 116, modal.w - 48, 82}
+	return UI_Rect{modal.x + 24, modal.y + modal.h - 238, modal.w - 48, 58}
+}
+
+source_probe_row_rect :: proc(modal: UI_Rect, index: int) -> UI_Rect {
+	input := source_modal_input_rect(modal)
+	return UI_Rect{modal.x + 24, input.y - 70 - f64(index) * 68, modal.w - 48, 62}
+}
+
+source_probe_quality_rect :: proc(row: UI_Rect, option_index: int) -> UI_Rect {
+	return UI_Rect{row.x + 390 + f64(option_index) * 66, row.y + 8, 60, 24}
 }
 
 source_modal_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
@@ -562,20 +575,40 @@ open_source_details :: proc(source_index: int) {
 
 open_source_modal :: proc() {
 	if ui.source_details_open {close_source_details()}
+	ui.source_modal_refetch_index = -1
 	ui.source_modal_open = true
 	ui.focus = .URL
 	if state.window != nil && ui.view != nil {
 		msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
 	}
 	ui.needs_redraw = true
+	if len(strings.trim_space(ui.url_input)) > 0 && len(source_probe_results) == 0 {schedule_source_probe(1)}
+}
+
+open_refetch_source_modal :: proc(source_index: int) {
+	if source_index < 0 || source_index >= len(state.sources) {return}
+	if ui.source_details_open {close_source_details()}
+	ui.source_modal_refetch_index = source_index
+	ui.source_modal_open = true
+	ui.focus = .None
+	ui_set_string(&ui.url_input, state.sources[source_index].url)
+	source_probe_results_clear()
+	schedule_source_probe(1)
+	ui.needs_redraw = true
 }
 
 close_source_modal :: proc() {
 	ui.source_modal_open = false
+	ui.source_modal_refetch_index = -1
 	ui.focus = .None
 	ui.has_marked_text = false
 	ui_set_string(&ui.marked_text, "")
 	ui.needs_redraw = true
+}
+
+schedule_source_probe :: proc(delay_frames: uint) {
+	ui.url_probe_pending = true
+	ui.url_probe_due_tick = ui.frame_tick + delay_frames
 }
 
 set_ui_mode :: proc(mode: UI_Mode) {
@@ -1332,7 +1365,7 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	if contains(refetch_button, ui.mouse) {refetch_color = [4]f64{1.0, 0.42, 0.10, 1}}
 	fill_overlay_rect(ctx, refetch_button, refetch_color)
 	fill_overlay_border(ctx, refetch_button, [4]f64{1.0, 0.45, 0.12, 1})
-	draw_text_in_rect(ctx, font, "REFETCH AT BEST AVAILABLE QUALITY", refetch_button, .Center, .Center, [4]f64{0.08, 0.025, 0.01, 1})
+	draw_text_in_rect(ctx, font, "REFETCH / SELECT QUALITY", refetch_button, .Center, .Center, [4]f64{0.08, 0.025, 0.01, 1})
 }
 
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
@@ -2228,7 +2261,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"ADD SOURCE / YOUTUBE INGEST",
+			ui.source_modal_refetch_index >= 0 ? "REFETCH SOURCE / SELECT QUALITY" : "ADD SOURCE / YOUTUBE INGEST",
 			UI_Rect{modal.x + 20, modal.y + modal.h - 50, modal.w - 40, 50},
 			.Start,
 			.Center,
@@ -2262,7 +2295,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			cyan,
 		)
 		fill_overlay_rect(ctx, input, [4]f64{0.020, 0.022, 0.021, 1})
-		fill_overlay_border(ctx, input, ui.focus == .URL ? orange : [4]f64{0.31, 0.32, 0.30, 1})
+		fill_overlay_border(ctx, input, ui.focus == .URL && ui.source_modal_refetch_index < 0 ? orange : [4]f64{0.31, 0.32, 0.30, 1})
 		if len(ui.url_input) == 0 {
 			draw_text_in_rect(
 				ctx,
@@ -2291,6 +2324,30 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				line_count += 1
 			}
 		}
+		if source_probe_job != nil {
+			draw_text_in_rect(ctx, small_font, fmt.tprintf("[%s] CHECKING METADATA AND FORMATS", activity_spinner(ui.activity_tick)), source_probe_row_rect(modal, 0), .Start, .Center, muted, 10)
+		} else {
+			for result, result_index in source_probe_results {
+				if result_index >= 5 {break}
+				row := source_probe_row_rect(modal, result_index)
+				fill_overlay_rect(ctx, row, [4]f64{0.028, 0.030, 0.029, 1})
+				fill_overlay_border(ctx, row, [4]f64{0.20, 0.21, 0.20, 1})
+				if len(result.error) > 0 {
+					draw_text_in_rect(ctx, small_font, fmt.tprintf("%s / %s", result.video_id, result.error), UI_Rect{row.x + 10, row.y, row.w - 20, row.h}, .Start, .Center, orange, 10)
+					continue
+				}
+				draw_text_in_rect(ctx, small_font, result.title, UI_Rect{row.x + 10, row.y + 30, 370, 24}, .Start, .Center, bright, 10)
+				draw_text_in_rect(ctx, small_font, fmt.tprintf("%s / %s", result.video_id, format_timestamp(result.duration)), UI_Rect{row.x + 10, row.y + 6, 370, 22}, .Start, .Center, muted, 10)
+				for height, option_index in result.heights {
+					quality := source_probe_quality_rect(row, option_index)
+					if quality.x + quality.w > row.x + row.w - 8 {break}
+					selected := height == result.selected_height
+					fill_overlay_rect(ctx, quality, selected ? [4]f64{0.08, 0.18, 0.18, 1} : [4]f64{0.035, 0.038, 0.036, 1})
+					fill_overlay_border(ctx, quality, selected ? cyan : [4]f64{0.25, 0.26, 0.24, 1})
+					draw_text_in_rect(ctx, small_font, fmt.tprintf("%dp", height), quality, .Center, .Center, selected ? cyan : muted)
+				}
+			}
+		}
 		cancel_color := [4]f64{0.052, 0.055, 0.052, 1}
 		if contains(cancel, ui.mouse) {cancel_color = [4]f64{0.09, 0.095, 0.09, 1}}
 		fill_overlay_rect(ctx, cancel, cancel_color)
@@ -2303,7 +2360,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"ADD SOURCE",
+			ui.source_modal_refetch_index >= 0 ? "REFETCH" : "ADD SOURCE",
 			confirm,
 			.Center,
 			.Center,
@@ -2449,7 +2506,7 @@ rebuild_accessibility :: proc() {
 	if ui.source_details_open {
 		modal := source_details_rect()
 		add_ax_element(array, element_class, "Close source details", "AXButton", source_details_close_rect(modal), .Close_Source_Details)
-		add_ax_element(array, element_class, "Refetch at best available quality", "AXButton", source_details_refetch_rect(modal), .Refetch_Source_Details)
+		add_ax_element(array, element_class, "Refetch and select quality", "AXButton", source_details_refetch_rect(modal), .Refetch_Source_Details)
 		return
 	}
 	toggle_label := "Switch to Play mode"
@@ -3202,9 +3259,8 @@ dispatch_click :: proc(point: Point) {
 		if contains(source_details_close_rect(modal), point) || !contains(modal, point) {close_source_details(); return}
 		if contains(source_details_refetch_rect(modal), point) {
 			source_index := ui.source_details_index
-			close_source_details()
 			if source_index >= 0 && source_index < len(state.sources) {
-				refetch_source(source_index)
+				open_refetch_source_modal(source_index)
 			}
 			return
 		}
@@ -3212,7 +3268,19 @@ dispatch_click :: proc(point: Point) {
 	}
 	if ui.source_modal_open {
 		modal := source_modal_rect()
-		if contains(source_modal_input_rect(modal), point) {ui.focus = .URL; return}
+		if contains(source_modal_input_rect(modal), point) {
+			if ui.source_modal_refetch_index < 0 {ui.focus = .URL}
+			return
+		}
+		for &result, result_index in source_probe_results {
+			if result_index >= 5 {break}
+			row := source_probe_row_rect(modal, result_index)
+			for height, option_index in result.heights {
+				quality := source_probe_quality_rect(row, option_index)
+				if quality.x + quality.w > row.x + row.w - 8 {break}
+				if contains(quality, point) {result.selected_height = height; ui.needs_redraw = true; return}
+			}
+		}
 		if contains(source_modal_cancel_rect(modal), point) {close_source_modal(); return}
 		if contains(source_modal_confirm_rect(modal), point) {on_import(nil, nil, nil); return}
 		if !contains(modal, point) {close_source_modal()}
@@ -3428,6 +3496,7 @@ on_metal_insert_text :: proc "c" (self: Id, command: Sel, value: Id, replacement
 	}
 	utf8 := msg_id(value, sel_registerName("UTF8String"))
 	if utf8 != nil {append_text(target, string(cstring(utf8)))}
+	if target == &ui.url_input {schedule_source_probe(30)}
 	ui_set_string(&ui.marked_text, "")
 	ui.has_marked_text = false
 	ui.needs_redraw = true
@@ -3449,6 +3518,7 @@ on_metal_paste :: proc "c" (self: Id, command: Sel, sender: Id) {
 	utf8 := msg_id(value, sel_registerName("UTF8String"))
 	if utf8 == nil {return}
 	append_text(target, string(cstring(utf8)))
+	if target == &ui.url_input {schedule_source_probe(1)}
 	ui.needs_redraw = true
 }
 
@@ -3457,14 +3527,14 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	target := focused_text()
 	if selector == sel_registerName("deleteBackward:") {
-		if target != nil {remove_last_character(target)}
+		if target != nil {remove_last_character(target); if target == &ui.url_input {schedule_source_probe(30)}}
 	} else if selector == sel_registerName("deleteWordBackward:") {
-		if target != nil {remove_last_word(target)}
+		if target != nil {remove_last_word(target); if target == &ui.url_input {schedule_source_probe(30)}}
 	} else if selector == sel_registerName("paste:") {
 		on_metal_paste(self, selector, nil)
 	} else if selector == sel_registerName("insertNewline:") {
 		if ui.focus ==
-		   .URL {append_text(&ui.url_input, "\n")} else if ui.focus == .Source_Search || ui.focus == .Exercise_Search {ui.focus = .None} else if ui.focus == .Exercise_Name {ui.focus = .None}
+		   .URL {append_text(&ui.url_input, "\n"); schedule_source_probe(1)} else if ui.focus == .Source_Search || ui.focus == .Exercise_Search {ui.focus = .None} else if ui.focus == .Exercise_Name {ui.focus = .None}
 	} else if selector == sel_registerName("insertTab:") {
 		if ui.source_modal_open {
 			ui.focus = .URL
@@ -3587,7 +3657,12 @@ on_metal_accepts_first :: proc "c" (self: Id, command: Sel) -> bool {return true
 on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if import_job != nil || export_job != nil {
+	ui.frame_tick += 1
+	if ui.url_probe_pending && ui.frame_tick >= ui.url_probe_due_tick {
+		ui.url_probe_pending = false
+		source_probe_request()
+	}
+	if import_job != nil || export_job != nil || source_probe_job != nil {
 		ui.activity_tick += 1
 		if ui.activity_tick % 8 == 0 {
 			if import_job != nil {refresh_import_progress()}
@@ -3639,6 +3714,12 @@ register_delegate :: proc(app: Id) {
 		delegate_class,
 		sel_registerName("sourceMetadataFinished:"),
 		rawptr(on_source_metadata_finished),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
+		sel_registerName("sourceProbeFinished:"),
+		rawptr(on_source_probe_finished),
 		"v@:@",
 	)
 	class_addMethod(

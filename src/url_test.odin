@@ -704,6 +704,26 @@ download_progress_uses_latest_complete_progress_line_test :: proc(t: ^testing.T)
 }
 
 @(test)
+source_probe_lists_unique_available_heights_and_defaults_to_1080p_test :: proc(t: ^testing.T) {
+	formats := []Source_Probe_Format_JSON{{height=2160, vcodec="avc1", ext="mp4"}, {height=1080, vcodec="avc1", ext="mp4"}, {height=1080, vcodec="vp9", ext="webm"}, {height=720, vcodec="avc1", ext="mp4"}, {height=0, vcodec="none", ext="m4a"}}
+	heights := source_probe_heights(formats)
+	defer delete(heights)
+	testing.expect_value(t, len(heights), 3)
+	testing.expect_value(t, heights[0], 720)
+	testing.expect_value(t, heights[1], 1080)
+	testing.expect_value(t, heights[2], 2160)
+	testing.expect_value(t, source_probe_default_height(heights[:]), 1080)
+}
+
+@(test)
+download_format_selector_applies_the_selected_height_to_every_fallback_test :: proc(t: ^testing.T) {
+	selector := download_format_selector(1440)
+	testing.expect_value(t, strings.count(selector, "height<=1440"), 2)
+	testing.expect_value(t, strings.count(selector, "vcodec^=avc1"), 2)
+	testing.expect(t, strings.contains(selector, "ba[ext=m4a]"))
+}
+
+@(test)
 mode_button_stays_inside_the_header_test :: proc(t: ^testing.T) {
 	rect := mode_button_rect_for_size(1100, 720)
 	header := app_header_rect_for_size(1100, 720)
