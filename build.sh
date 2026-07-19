@@ -34,7 +34,7 @@ TEMP="$ROOT/build/temp/$MODE"
 mkdir -p "$TEMP"
 cd "$TEMP"
 odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
-  -extra-linker-flags:"-framework AppKit -framework Foundation -framework AVFoundation -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
+  -extra-linker-flags:"-framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 
 if [ "$MODE" != "release" ]; then

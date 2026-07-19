@@ -494,7 +494,7 @@ valid_exercise_range :: proc(start, end, source_duration: f64) -> bool {
 	return start >= 0 && end > start && (source_duration <= 0 || end <= source_duration)
 }
 
-seek_seconds :: proc(seconds: f64) {
+seek_video_seconds :: proc(seconds: f64) {
 	if state.player == nil { return }
 	t := CMTime{value=i64(seconds*600), timescale=600, flags=1}
 	tolerance := CMTime{value=10, timescale=600, flags=1}
@@ -505,6 +505,13 @@ seek_seconds :: proc(seconds: f64) {
 		tolerance,
 		tolerance,
 	)
+}
+
+seek_seconds :: proc(seconds: f64) {
+	if state.player == nil { return }
+	resume := msg_f32(state.player, sel_registerName("rate")) > 0
+	seek_video_seconds(seconds)
+	metal_audio_seek(seconds, resume)
 }
 
 source_initial_seconds :: proc(source_index: int) -> f64 {
@@ -519,6 +526,7 @@ source_initial_seconds :: proc(source_index: int) -> f64 {
 stop_source_playback :: proc() {
 	if state.player == nil {return}
 	msg_void(state.player, sel_registerName("pause"))
+	metal_audio_pause()
 	seek_seconds(0)
 	ui.needs_redraw = true
 }
@@ -988,13 +996,19 @@ on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 on_play :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if state.player != nil { msg_void(state.player, sel_registerName("play")) }
+	if state.player != nil {
+		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
+		metal_audio_play()
+	}
 }
 
 on_pause :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if state.player != nil { msg_void(state.player, sel_registerName("pause")) }
+	if state.player != nil {
+		msg_void(state.player, sel_registerName("pause"))
+		metal_audio_pause()
+	}
 }
 
 on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
@@ -1003,8 +1017,10 @@ on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
 	if state.player == nil { return }
 	if msg_f32(state.player, sel_registerName("rate")) > 0 {
 		msg_void(state.player, sel_registerName("pause"))
+		metal_audio_pause()
 	} else {
-		msg_void(state.player, sel_registerName("play"))
+		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
+		metal_audio_play()
 	}
 }
 

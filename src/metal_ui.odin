@@ -90,6 +90,11 @@ UI_State :: struct {
 	text_height:        uint,
 	texture_cache:      rawptr,
 	video_output:       Id,
+	audio_engine:       Id,
+	audio_player:       Id,
+	audio_pitch:        Id,
+	audio_file:         Id,
+	audio_start_frame:  i64,
 	last_video_texture: Id,
 	last_video_width:   uint,
 	last_video_height:  uint,
@@ -115,6 +120,7 @@ UI_State :: struct {
 	marked_text:        string,
 	has_marked_text:    bool,
 	player_volume:      f32,
+	playback_rate:      f32,
 	source_scrubbing:   bool,
 	activity_tick:      uint,
 	needs_redraw:       bool,
@@ -190,6 +196,8 @@ AX_Kind :: enum {
 	Exercise_Name,
 	Volume_Down,
 	Volume_Up,
+	Speed_Down,
+	Speed_Up,
 	Source_Play_Pause,
 	Source_Stop,
 	Source_Reset,
@@ -210,7 +218,7 @@ AX_Action :: struct {
 	seconds: f64,
 }
 
-ui := UI_State{player_volume = 1, source_details_index = -1}
+ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1}
 ui_event_tag: int
 ax_actions: [dynamic]AX_Action
 
@@ -268,6 +276,26 @@ msg_void_f64 :: proc(receiver: Id, selector: Sel, value: f64) {
 msg_void_f32 :: proc(receiver: Id, selector: Sel, value: f32) {
 	p := transmute(proc "c" (_: Id, _: Sel, _: f32))send_address
 	p(receiver, selector, value)
+}
+
+msg_bool_error :: proc(receiver: Id, selector: Sel, error: ^Id) -> bool {
+	p := transmute(proc "c" (_: Id, _: Sel, _: ^Id) -> bool)send_address
+	return p(receiver, selector, error)
+}
+
+msg_i64 :: proc(receiver: Id, selector: Sel) -> i64 {
+	p := transmute(proc "c" (_: Id, _: Sel) -> i64)send_address
+	return p(receiver, selector)
+}
+
+msg_void_id_id_id :: proc(receiver: Id, selector: Sel, a, b, c: Id) {
+	p := transmute(proc "c" (_: Id, _: Sel, _: Id, _: Id, _: Id))send_address
+	p(receiver, selector, a, b, c)
+}
+
+msg_void_id_i64_u32_id_id :: proc(receiver: Id, selector: Sel, file: Id, frame: i64, count: u32, time, completion: Id) {
+	p := transmute(proc "c" (_: Id, _: Sel, _: Id, _: i64, _: u32, _: Id, _: Id))send_address
+	p(receiver, selector, file, frame, count, time, completion)
 }
 
 msg_point :: proc(receiver: Id, selector: Sel) -> Point {
@@ -697,7 +725,7 @@ transcript_content_rect :: proc(transcript: UI_Rect) -> UI_Rect {
 
 player_content_rect :: proc(player: UI_Rect) -> UI_Rect {
 	bottom_metadata_height := 30.0
-	if ui.mode == .Create {bottom_metadata_height = 64}
+	if ui.mode == .Create {bottom_metadata_height = 94}
 	header_height := 35.0
 	return UI_Rect {
 		player.x + 1,
@@ -740,8 +768,22 @@ source_reset_rect :: proc(player: UI_Rect) -> UI_Rect {
 	return UI_Rect{stop.x + stop.w + 6, stop.y, 58, stop.h}
 }
 
+source_speed_down_rect :: proc(player: UI_Rect) -> UI_Rect {
+	return UI_Rect{player.x + 10, player.y + 35, 24, 24}
+}
+
+source_speed_value_rect :: proc(player: UI_Rect) -> UI_Rect {
+	down := source_speed_down_rect(player)
+	return UI_Rect{down.x + down.w + 4, player.y + 32, 76, 30}
+}
+
+source_speed_up_rect :: proc(player: UI_Rect) -> UI_Rect {
+	value := source_speed_value_rect(player)
+	return UI_Rect{value.x + value.w + 4, player.y + 35, 24, 24}
+}
+
 source_timeline_rect :: proc(player: UI_Rect) -> UI_Rect {
-	return UI_Rect{player.x + 10, player.y + 36, max(0, player.w - 20), 18}
+	return UI_Rect{player.x + 10, player.y + 68, max(0, player.w - 20), 18}
 }
 
 source_timeline_seconds :: proc(point: Point, player: UI_Rect) -> f64 {
@@ -772,8 +814,26 @@ volume_percent :: proc(value: f32) -> int {
 
 adjust_player_volume :: proc(delta: f32) {
 	ui.player_volume = clamp_volume(ui.player_volume + delta)
-	if state.player != nil {
-		msg_void_f32(state.player, sel_registerName("setVolume:"), ui.player_volume)
+	if ui.audio_player != nil {
+		msg_void_f32(ui.audio_player, sel_registerName("setVolume:"), ui.player_volume)
+	}
+	ui.needs_redraw = true
+}
+
+clamp_playback_rate :: proc(value: f32) -> f32 {
+	return min(max(value, 0.1), 2)
+}
+
+adjust_playback_rate :: proc(delta: f32) {
+	audio_seconds, has_audio_time := metal_audio_current_seconds()
+	value := clamp_playback_rate(ui.playback_rate + delta)
+	ui.playback_rate = f32(int(value * 10 + 0.5)) / 10
+	if ui.audio_pitch != nil {
+		msg_void_f32(ui.audio_pitch, sel_registerName("setRate:"), ui.playback_rate)
+	}
+	if state.player != nil && msg_f32(state.player, sel_registerName("rate")) > 0 {
+		if has_audio_time {seek_video_seconds(audio_seconds)}
+		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
 	}
 	ui.needs_redraw = true
 }
@@ -1313,6 +1373,13 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			push_rect(vertices, rect, button_color)
 			push_border(vertices, rect, border)
 		}
+		speed_buttons := [2]UI_Rect{source_speed_down_rect(player), source_speed_up_rect(player)}
+		for rect in speed_buttons {
+			button_color := field
+			if contains(rect, ui.mouse) {button_color = panel_alt}
+			push_rect(vertices, rect, button_color)
+			push_border(vertices, rect, border)
+		}
 		transport_buttons := [3]UI_Rect{source_play_pause_rect(player), source_stop_rect(player), source_reset_rect(player)}
 		for rect in transport_buttons {
 			button_color := field
@@ -1761,6 +1828,13 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(ctx, small_font, playing ? "PAUSE" : "PLAY", source_play_pause_rect(player), .Center, .Center, playing ? orange : cyan)
 		draw_text_in_rect(ctx, small_font, "STOP", source_stop_rect(player), .Center, .Center, muted)
 		draw_text_in_rect(ctx, small_font, "RESET", source_reset_rect(player), .Center, .Center, muted)
+		speed_down_color := cyan
+		if ui.playback_rate <= 0.1 {speed_down_color = dim}
+		draw_text_in_rect(ctx, small_font, "-", source_speed_down_rect(player), .Center, .Center, speed_down_color)
+		draw_text_in_rect(ctx, small_font, fmt.tprintf("SPEED %.1fx", ui.playback_rate), source_speed_value_rect(player), .Center, .Center, cyan)
+		speed_up_color := cyan
+		if ui.playback_rate >= 2 {speed_up_color = dim}
+		draw_text_in_rect(ctx, small_font, "+", source_speed_up_rect(player), .Center, .Center, speed_up_color)
 		volume_color := cyan
 		if ui.player_volume <= 0 {volume_color = dim}
 		draw_text_in_rect(ctx, small_font, "-", volume_down, .Center, .Center, volume_color)
@@ -2484,6 +2558,8 @@ rebuild_accessibility :: proc() {
 		add_ax_element(array, element_class, playing ? "Pause source" : "Play source", "AXButton", source_play_pause_rect(player), .Source_Play_Pause)
 		add_ax_element(array, element_class, "Stop source and return to zero", "AXButton", source_stop_rect(player), .Source_Stop)
 		add_ax_element(array, element_class, "Return to the imported source timestamp", "AXButton", source_reset_rect(player), .Source_Reset)
+		add_ax_element(array, element_class, "Decrease source playback speed", "AXButton", source_speed_down_rect(player), .Speed_Down)
+		add_ax_element(array, element_class, "Increase source playback speed", "AXButton", source_speed_up_rect(player), .Speed_Up)
 		percent := volume_percent(ui.player_volume)
 		add_ax_element(
 			array,
@@ -2565,6 +2641,10 @@ on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 		adjust_player_volume(-0.1)
 	case .Volume_Up:
 		adjust_player_volume(0.1)
+	case .Speed_Down:
+		adjust_playback_rate(-0.1)
+	case .Speed_Up:
+		adjust_playback_rate(0.1)
 	case .Source_Play_Pause:
 		on_toggle_playback(nil, nil, nil)
 	case .Source_Stop:
@@ -2891,13 +2971,115 @@ metal_player_clear_texture :: proc() {
 	}
 }
 
+metal_audio_pause :: proc() {
+	if ui.audio_player != nil {msg_void(ui.audio_player, sel_registerName("pause"))}
+}
+
+metal_audio_play :: proc() {
+	if ui.audio_player != nil {msg_void(ui.audio_player, sel_registerName("play"))}
+}
+
+audio_source_seconds :: proc(start_frame, rendered_frames: i64, sample_rate: f64) -> (f64, bool) {
+	if start_frame < 0 || rendered_frames < 0 || sample_rate <= 0 {return 0, false}
+	return f64(start_frame + rendered_frames) / sample_rate, true
+}
+
+metal_audio_current_seconds :: proc() -> (f64, bool) {
+	if ui.audio_player == nil || ui.audio_file == nil {return 0, false}
+	render_time := msg_id(ui.audio_player, sel_registerName("lastRenderTime"))
+	if render_time == nil {return 0, false}
+	player_time := msg_id_id(ui.audio_player, sel_registerName("playerTimeForNodeTime:"), render_time)
+	if player_time == nil {return 0, false}
+	format := msg_id(ui.audio_file, sel_registerName("processingFormat"))
+	return audio_source_seconds(
+		ui.audio_start_frame,
+		msg_i64(player_time, sel_registerName("sampleTime")),
+		msg_f64(format, sel_registerName("sampleRate")),
+	)
+}
+
+audio_frame_range :: proc(seconds, sample_rate: f64, length: i64) -> (start: i64, count: u32) {
+	if sample_rate <= 0 || length <= 0 {return 0, 0}
+	start = min(max(i64(seconds * sample_rate), 0), length)
+	remaining := length - start
+	if remaining <= 0 {return start, 0}
+	return start, u32(min(remaining, i64(0xffffffff)))
+}
+
+metal_audio_seek :: proc(seconds: f64, resume: bool) {
+	if ui.audio_player == nil || ui.audio_file == nil {return}
+	msg_void(ui.audio_player, sel_registerName("stop"))
+	format := msg_id(ui.audio_file, sel_registerName("processingFormat"))
+	sample_rate := msg_f64(format, sel_registerName("sampleRate"))
+	length := msg_i64(ui.audio_file, sel_registerName("length"))
+	start, frame_count := audio_frame_range(seconds, sample_rate, length)
+	if frame_count == 0 {return}
+	ui.audio_start_frame = start
+	msg_void_id_i64_u32_id_id(
+		ui.audio_player,
+		sel_registerName("scheduleSegment:startingFrame:frameCount:atTime:completionHandler:"),
+		ui.audio_file,
+		start,
+		frame_count,
+		nil,
+		nil,
+	)
+	if resume {metal_audio_play()}
+}
+
+metal_audio_release :: proc(engine, player, pitch, file: Id) {
+	if player != nil {msg_void(player, sel_registerName("stop"))}
+	if engine != nil {msg_void(engine, sel_registerName("stop"))}
+	if file != nil {msg_void(file, sel_registerName("release"))}
+	if pitch != nil {msg_void(pitch, sel_registerName("release"))}
+	if player != nil {msg_void(player, sel_registerName("release"))}
+	if engine != nil {msg_void(engine, sel_registerName("release"))}
+}
+
+metal_audio_load :: proc(url: Id) -> (engine, player, pitch, file: Id, ok: bool) {
+	error: Id
+	file = msg_id_id_error_2(
+		msg_id(objc_getClass("AVAudioFile"), sel_registerName("alloc")),
+		sel_registerName("initForReading:error:"),
+		url,
+		&error,
+	)
+	if file == nil {return nil, nil, nil, nil, false}
+	engine = msg_id(objc_getClass("AVAudioEngine"), sel_registerName("new"))
+	player = msg_id(objc_getClass("AVAudioPlayerNode"), sel_registerName("new"))
+	pitch = msg_id(objc_getClass("AVAudioUnitTimePitch"), sel_registerName("new"))
+	if engine == nil || player == nil || pitch == nil {
+		metal_audio_release(engine, player, pitch, file)
+		return nil, nil, nil, nil, false
+	}
+	msg_void_id(engine, sel_registerName("attachNode:"), player)
+	msg_void_id(engine, sel_registerName("attachNode:"), pitch)
+	format := msg_id(file, sel_registerName("processingFormat"))
+	mixer := msg_id(engine, sel_registerName("mainMixerNode"))
+	msg_void_id_id_id(engine, sel_registerName("connect:to:format:"), player, pitch, format)
+	msg_void_id_id_id(engine, sel_registerName("connect:to:format:"), pitch, mixer, format)
+	msg_void_f32(player, sel_registerName("setVolume:"), ui.player_volume)
+	msg_void_f32(pitch, sel_registerName("setRate:"), ui.playback_rate)
+	msg_void(engine, sel_registerName("prepare"))
+	if !msg_bool_error(engine, sel_registerName("startAndReturnError:"), &error) {
+		metal_audio_release(engine, player, pitch, file)
+		return nil, nil, nil, nil, false
+	}
+	return engine, player, pitch, file, true
+}
+
 metal_player_clear :: proc() {
 	ui.source_scrubbing = false
 	metal_player_clear_texture()
 	player := state.player
 	output := ui.video_output
+	audio_engine, audio_player := ui.audio_engine, ui.audio_player
+	audio_pitch, audio_file := ui.audio_pitch, ui.audio_file
 	state.player = nil
 	ui.video_output = nil
+	ui.audio_engine, ui.audio_player = nil, nil
+	ui.audio_pitch, ui.audio_file = nil, nil
+	ui.audio_start_frame = 0
 	if player != nil {
 		msg_void(player, sel_registerName("pause"))
 		msg_void(player, sel_registerName("release"))
@@ -2905,6 +3087,7 @@ metal_player_clear :: proc() {
 	if output != nil {
 		msg_void(output, sel_registerName("release"))
 	}
+	metal_audio_release(audio_engine, audio_player, audio_pitch, audio_file)
 }
 
 metal_player_load :: proc(path: string) -> bool {
@@ -2939,12 +3122,22 @@ metal_player_load :: proc(path: string) -> bool {
 		msg_void(output, sel_registerName("release"))
 		return false
 	}
-	msg_void_f32(player, sel_registerName("setVolume:"), ui.player_volume)
+	msg_void_bool(player, sel_registerName("setMuted:"), true)
+	audio_engine, audio_player, audio_pitch, audio_file, audio_ok := metal_audio_load(url)
+	if !audio_ok {
+		msg_void(player, sel_registerName("release"))
+		msg_void(output, sel_registerName("release"))
+		return false
+	}
 
 	old_player := state.player
 	old_output := ui.video_output
+	old_audio_engine, old_audio_player := ui.audio_engine, ui.audio_player
+	old_audio_pitch, old_audio_file := ui.audio_pitch, ui.audio_file
 	state.player = player
 	ui.video_output = output
+	ui.audio_engine, ui.audio_player = audio_engine, audio_player
+	ui.audio_pitch, ui.audio_file = audio_pitch, audio_file
 	metal_player_clear_texture()
 	if old_player != nil {
 		msg_void(old_player, sel_registerName("pause"))
@@ -2953,6 +3146,7 @@ metal_player_load :: proc(path: string) -> bool {
 	if old_output != nil {
 		msg_void(old_output, sel_registerName("release"))
 	}
+	metal_audio_release(old_audio_engine, old_audio_player, old_audio_pitch, old_audio_file)
 	ui.needs_redraw = true
 	return true
 }
@@ -3027,6 +3221,8 @@ dispatch_click :: proc(point: Point) {
 		if contains(source_play_pause_rect(player), point) {on_toggle_playback(nil, nil, nil); return}
 		if contains(source_stop_rect(player), point) {stop_source_playback(); return}
 		if contains(source_reset_rect(player), point) {reset_source_playback(); return}
+		if contains(source_speed_down_rect(player), point) {adjust_playback_rate(-0.1); return}
+		if contains(source_speed_up_rect(player), point) {adjust_playback_rate(0.1); return}
 		if contains(source_volume_down_rect(player), point) {adjust_player_volume(-0.1); return}
 		if contains(source_volume_up_rect(player), point) {adjust_player_volume(0.1); return}
 	}

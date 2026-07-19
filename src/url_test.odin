@@ -419,6 +419,35 @@ source_monitor_volume_clamps_and_rounds_percent_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+source_monitor_playback_rate_clamps_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, clamp_playback_rate(0), f32(0.1))
+	testing.expect_value(t, clamp_playback_rate(1.1), f32(1.1))
+	testing.expect_value(t, clamp_playback_rate(2.1), f32(2))
+}
+
+@(test)
+audio_frame_range_maps_and_clamps_source_time_test :: proc(t: ^testing.T) {
+	start, count := audio_frame_range(1.5, 48_000, 480_000)
+	testing.expect_value(t, start, i64(72_000))
+	testing.expect_value(t, count, u32(408_000))
+	start, count = audio_frame_range(-1, 48_000, 480_000)
+	testing.expect_value(t, start, i64(0))
+	testing.expect_value(t, count, u32(480_000))
+	start, count = audio_frame_range(20, 48_000, 480_000)
+	testing.expect_value(t, start, i64(480_000))
+	testing.expect_value(t, count, u32(0))
+}
+
+@(test)
+audio_source_seconds_combines_schedule_offset_and_rendered_frames_test :: proc(t: ^testing.T) {
+	seconds, ok := audio_source_seconds(48_000, 24_000, 48_000)
+	testing.expect(t, ok)
+	testing.expect_value(t, seconds, 1.5)
+	_, ok = audio_source_seconds(0, -1, 48_000)
+	testing.expect(t, !ok)
+}
+
+@(test)
 metal_ui_text_origin_uses_run_metrics_and_container_rect_test :: proc(t: ^testing.T) {
 	old_scale := ui.scale
 	defer { ui.scale = old_scale }
@@ -543,6 +572,7 @@ metal_player_survives_autorelease_pool_drain_and_replacement_test :: proc(t: ^te
 	testing.expect(t, objc_handle != nil)
 	testing.expect(t, os.dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", os.RTLD_NOW) != nil)
 	testing.expect(t, os.dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", os.RTLD_NOW) != nil)
+	testing.expect(t, os.dlopen("/System/Library/Frameworks/AVFAudio.framework/AVFAudio", os.RTLD_NOW) != nil)
 	previous_send := send_address
 	send_address = os.dlsym(objc_handle, "objc_msgSend")
 	testing.expect(t, send_address != nil)
@@ -554,14 +584,16 @@ metal_player_survives_autorelease_pool_drain_and_replacement_test :: proc(t: ^te
 	testing.expect(t, app != nil)
 
 	first_pool := msg_id(objc_getClass("NSAutoreleasePool"), sel_registerName("new"))
-	testing.expect(t, metal_player_load("/tmp/vocal-training-player-lifetime-one.mp4"))
+	testing.expect(t, metal_player_load("/System/Library/Sounds/Glass.aiff"))
+	metal_audio_seek(0, false)
 	first_player := state.player
 	msg_void(first_pool, sel_registerName("drain"))
 	testing.expect(t, first_player != nil)
 	testing.expect(t, msg_f32(first_player, sel_registerName("rate")) >= 0)
 
 	second_pool := msg_id(objc_getClass("NSAutoreleasePool"), sel_registerName("new"))
-	testing.expect(t, metal_player_load("/tmp/vocal-training-player-lifetime-two.mp4"))
+	testing.expect(t, metal_player_load("/System/Library/Sounds/Ping.aiff"))
+	metal_audio_seek(0, false)
 	second_player := state.player
 	msg_void(second_pool, sel_registerName("drain"))
 	testing.expect(t, second_player != nil)
@@ -721,7 +753,7 @@ source_timeline_maps_and_clamps_pointer_position_test :: proc(t: ^testing.T) {
 @(test)
 source_transport_and_timeline_stay_inside_player_test :: proc(t: ^testing.T) {
 	player := UI_Rect{300, 100, 580, 360}
-	controls := [4]UI_Rect{source_play_pause_rect(player), source_stop_rect(player), source_reset_rect(player), source_timeline_rect(player)}
+	controls := [7]UI_Rect{source_play_pause_rect(player), source_stop_rect(player), source_reset_rect(player), source_speed_down_rect(player), source_speed_value_rect(player), source_speed_up_rect(player), source_timeline_rect(player)}
 	for rect in controls {
 		testing.expect(t, rect.x >= player.x && rect.x+rect.w <= player.x+player.w)
 		testing.expect(t, rect.y >= player.y && rect.y+rect.h <= player.y+player.h)

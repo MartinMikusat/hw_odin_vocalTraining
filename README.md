@@ -59,6 +59,7 @@ clips when selected. The Source Monitor volume controls adjust playback in 10%
 steps and retain that level when another source is loaded during the session.
 Its transport can play, pause, stop at zero, reset to the imported URL
 timestamp, and scrub across the complete source.
+The speed controls adjust playback from `0.1x` to `2.0x` in `0.1x` steps.
 
 When no text field has focus, press **Space** to toggle playback or **1–8** to
 activate the matching numbered transport control.
@@ -73,8 +74,9 @@ directory in Finder.
 
 A thin AppKit shell creates the window and forwards input. Odin calculates
 every visible control, while Metal renders the interface through one
-`CAMetalLayer`. CoreText rasterizes the text overlay, AVFoundation decodes
-video, and Core Video maps decoded frames into Metal textures.
+`CAMetalLayer`. AVPlayer decodes muted video, and Core Video maps its frames
+into Metal textures. AVAudioEngine routes audio through a time-pitch unit, so
+speed changes preserve vocal pitch without restarting the audio stream.
 
 The interface uses Berkeley Mono and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface, including the compact
