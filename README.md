@@ -66,8 +66,8 @@ video, and Core Video maps decoded frames into Metal textures.
 
 The interface uses Berkeley Mono and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface, including the compact
-`VOCAL TRAINING / SIGNAL WORKBENCH` title. Container text is shaped as a
-complete CoreText line, then positioned from its measured
+`VOCAL TRAINING` title. Container text is shaped as a complete CoreText line,
+then positioned from its measured
 advance and ascent/descent metrics. Measurement, alignment, truncation, and
 drawing reuse that same shaped line, preserving kerning, ligatures, fallback
 fonts, combining marks, bidirectional ordering, and complex-script shaping.

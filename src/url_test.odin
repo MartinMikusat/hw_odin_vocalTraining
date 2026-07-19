@@ -27,6 +27,35 @@ parse_short_youtube_url_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+timestamp_format_uses_hours_minutes_and_seconds_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, format_timestamp(0), "00:00:00")
+	testing.expect_value(t, format_timestamp(65.9), "00:01:05")
+	testing.expect_value(t, format_timestamp(3661), "01:01:01")
+}
+
+@(test)
+timestamp_fade_ranges_cover_only_leading_zero_fields_test :: proc(t: ^testing.T) {
+	hours_and_minutes := timestamp_fade_ranges("00:00:03")
+	testing.expect_value(t, hours_and_minutes.count, 1)
+	testing.expect_value(t, hours_and_minutes.values[0], CF_Range{0, 6})
+
+	hours := timestamp_fade_ranges("00:03:04")
+	testing.expect_value(t, hours.count, 1)
+	testing.expect_value(t, hours.values[0], CF_Range{0, 3})
+
+	no_fade := timestamp_fade_ranges("03:00:04")
+	testing.expect_value(t, no_fade.count, 0)
+}
+
+@(test)
+timestamp_fade_ranges_use_utf16_offsets_for_embedded_timestamps_test :: proc(t: ^testing.T) {
+	ranges := timestamp_fade_ranges("RANGE 00:00:03 → 00:04:05")
+	testing.expect_value(t, ranges.count, 2)
+	testing.expect_value(t, ranges.values[0], CF_Range{6, 6})
+	testing.expect_value(t, ranges.values[1], CF_Range{17, 3})
+}
+
+@(test)
 youtube_json3_caption_mapping_test :: proc(t: ^testing.T) {
 	fixture := `{"events":[{"tStartMs":1250,"dDurationMs":750,"segs":[{"utf8":"Warm "},{"utf8":"up"}]}]}`
 	captions: YouTube_Captions

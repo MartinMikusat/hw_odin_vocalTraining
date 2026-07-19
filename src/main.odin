@@ -253,6 +253,15 @@ timestamp_seconds :: proc(value: string) -> (f64, bool) {
 	return total+number, found
 }
 
+format_timestamp :: proc(seconds: f64) -> string {
+	whole_seconds := int(seconds)
+	if whole_seconds < 0 { whole_seconds = 0 }
+	hours := whole_seconds / 3600
+	minutes := whole_seconds % 3600 / 60
+	remaining_seconds := whole_seconds % 60
+	return fmt.tprintf("%02d:%02d:%02d", hours, minutes, remaining_seconds)
+}
+
 parse_video_id :: proc(url: string) -> (string, bool) {
 	if i := strings.index(url, "youtu.be/"); i >= 0 {
 		v := url[i+len("youtu.be/"):]
@@ -766,7 +775,7 @@ on_set_start :: proc "c" (self: Id, command: Sel, sender: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if seconds, ok := current_seconds(); ok {
 		state.range_start, state.has_start = seconds, true
-		set_text(state.status, fmt.tprintf("Start: %.2f seconds", seconds))
+		set_text(state.status, fmt.tprintf("Start: %s", format_timestamp(seconds)))
 	} else { set_text(state.status, "No active source player") }
 }
 
@@ -775,7 +784,7 @@ on_set_end :: proc "c" (self: Id, command: Sel, sender: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if seconds, ok := current_seconds(); ok {
 		state.range_end, state.has_end = seconds, true
-		set_text(state.status, fmt.tprintf("Range: %.2f - %.2f seconds", state.range_start, seconds))
+		set_text(state.status, fmt.tprintf("Range: %s - %s", format_timestamp(state.range_start), format_timestamp(seconds)))
 	} else { set_text(state.status, "No active source player") }
 }
 
@@ -895,7 +904,7 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			return
 		}
 		msg_void(state.player, sel_registerName("play"))
-		set_text(state.status, fmt.tprintf("Previewing %.2f seconds", job.exercise.end_seconds-job.exercise.start_seconds))
+		set_text(state.status, fmt.tprintf("Previewing %s", format_timestamp(job.exercise.end_seconds-job.exercise.start_seconds)))
 		return
 	}
 	exercise, copied := clone_exercise(job.exercise)
@@ -903,7 +912,7 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	append(&state.exercises, exercise)
 	save_library()
 	refresh_exercises()
-	set_text(state.status, fmt.tprintf("Saved %s (%.2f seconds)", job.exercise.name, job.exercise.end_seconds-job.exercise.start_seconds))
+	set_text(state.status, fmt.tprintf("Saved %s (%s)", job.exercise.name, format_timestamp(job.exercise.end_seconds-job.exercise.start_seconds)))
 }
 
 on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {

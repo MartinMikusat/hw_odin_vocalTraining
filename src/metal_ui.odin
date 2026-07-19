@@ -31,6 +31,7 @@ foreign core_text {
 	CTLineCreateWithAttributedString :: proc "c" (string: rawptr) -> rawptr ---
 	CTLineCreateTruncatedLine :: proc "c" (line: rawptr, width: f64, truncation_type: u32, token: rawptr) -> rawptr ---
 	CTLineGetTypographicBounds :: proc "c" (line: rawptr, ascent, descent, leading: ^f64) -> f64 ---
+	CTLineGetOffsetForStringIndex :: proc "c" (line: rawptr, index: int, secondary_offset: ^f64) -> f64 ---
 	CTLineGetGlyphRuns :: proc "c" (line: rawptr) -> rawptr ---
 	CTLineDraw :: proc "c" (line, ctx: rawptr) ---
 	CTRunGetGlyphCount :: proc "c" (run: rawptr) -> int ---
@@ -162,6 +163,11 @@ Text_Run :: struct {
 	ascent:  f64,
 	descent: f64,
 	leading: f64,
+}
+
+Timestamp_Fade_Ranges :: struct {
+	values: [8]CF_Range,
+	count:  int,
 }
 
 AX_Kind :: enum {
@@ -908,6 +914,114 @@ draw_text_in_rect :: proc(
 	delete_text_run(&truncated)
 }
 
+utf16_index_for_byte_offset :: proc(text: string, byte_offset: int) -> int {
+	byte_index, utf16_index := 0, 0
+	for byte_index < byte_offset {
+		first := text[byte_index]
+		byte_count, utf16_count := 1, 1
+		if first & 0xf8 == 0xf0 {
+			byte_count, utf16_count = 4, 2
+		} else if first & 0xf0 == 0xe0 {
+			byte_count = 3
+		} else if first & 0xe0 == 0xc0 {
+			byte_count = 2
+		}
+		byte_index += byte_count
+		utf16_index += utf16_count
+	}
+	return utf16_index
+}
+
+timestamp_fade_ranges :: proc(text: string) -> Timestamp_Fade_Ranges {
+	ranges: Timestamp_Fade_Ranges
+	index := 0
+	for index + 8 <= len(text) && ranges.count < len(ranges.values) {
+		is_timestamp :=
+			text[index] >= '0' && text[index] <= '9' &&
+			text[index + 1] >= '0' && text[index + 1] <= '9' &&
+			text[index + 2] == ':' &&
+			text[index + 3] >= '0' && text[index + 3] <= '9' &&
+			text[index + 4] >= '0' && text[index + 4] <= '9' &&
+			text[index + 5] == ':' &&
+			text[index + 6] >= '0' && text[index + 6] <= '9' &&
+			text[index + 7] >= '0' && text[index + 7] <= '9'
+		if !is_timestamp { index += 1; continue }
+
+		fade_bytes := 0
+		if text[index:index + 2] == "00" {
+			fade_bytes = 3
+			if text[index + 3:index + 5] == "00" { fade_bytes = 6 }
+		}
+		if fade_bytes > 0 {
+			start := utf16_index_for_byte_offset(text, index)
+			end := utf16_index_for_byte_offset(text, index + fade_bytes)
+			ranges.values[ranges.count] = CF_Range{start, end - start}
+			ranges.count += 1
+		}
+		index += 8
+	}
+	return ranges
+}
+
+draw_timestamp_text_in_rect :: proc(
+	ctx, font: rawptr,
+	text: string,
+	rect: UI_Rect,
+	horizontal, vertical: Text_Align,
+	color: [4]f64,
+	inset: f64 = 0,
+) {
+	if ctx == nil || rect.w <= 0 || rect.h <= 0 || len(text) == 0 { return }
+	run := make_text_run(font, text)
+	defer delete_text_run(&run)
+	available_width := max(0, (rect.w - inset * 2) * ui.scale)
+	draw_run := run
+	truncated: Text_Run
+	if run.advance > available_width {
+		truncated = truncated_text_run(run, font, available_width)
+		if truncated.line == nil { return }
+		draw_run = truncated
+	}
+	defer delete_text_run(&truncated)
+
+	CGContextSaveGState(ctx)
+	defer CGContextRestoreGState(ctx)
+	CGContextClipToRect(
+		ctx,
+		Rect{Point{rect.x * ui.scale, rect.y * ui.scale}, Size{rect.w * ui.scale, rect.h * ui.scale}},
+	)
+	origin := text_origin(rect, draw_run, horizontal, vertical, inset)
+	ranges := timestamp_fade_ranges(text)
+	if ranges.count == 0 {
+		draw_text_run(ctx, draw_run, origin, color)
+		return
+	}
+
+	faded_color := color
+	faded_color[3] *= 0.5
+	draw_text_run(ctx, draw_run, origin, faded_color)
+	normal_start := 0
+	text_length := utf16_index_for_byte_offset(text, len(text))
+	for range_index in 0 ..< ranges.count + 1 {
+		normal_end := text_length
+		if range_index < ranges.count { normal_end = ranges.values[range_index].location }
+		if normal_end > normal_start {
+			start_x := origin.x + CTLineGetOffsetForStringIndex(draw_run.line, normal_start, nil)
+			end_x := origin.x + CTLineGetOffsetForStringIndex(draw_run.line, normal_end, nil)
+			CGContextSaveGState(ctx)
+			CGContextClipToRect(
+				ctx,
+				Rect{Point{start_x, origin.y - draw_run.descent}, Size{max(0, end_x - start_x), draw_run.ascent + draw_run.descent + draw_run.leading}},
+			)
+			draw_text_run(ctx, draw_run, origin, color)
+			CGContextRestoreGState(ctx)
+		}
+		if range_index < ranges.count {
+			normal_start = ranges.values[range_index].location + ranges.values[range_index].length
+		}
+	}
+}
+
 fill_overlay_rect :: proc(ctx: rawptr, rect: UI_Rect, color: [4]f64) {
 	CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], color[3])
 	CGContextFillRect(
@@ -1121,7 +1235,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	draw_text_in_rect(
 		ctx,
 		small_font,
-		"VOCAL TRAINING / SIGNAL WORKBENCH",
+		"VOCAL TRAINING",
 		title_rect,
 		.Start,
 		.Center,
@@ -1254,7 +1368,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	draw_text_in_rect(
 		ctx,
 		small_font,
-		signal_active ? "SIGNAL LOCK" : "NO SIGNAL",
+		signal_active ? "MEDIA READY" : "NO MEDIA",
 		player_header,
 		.End,
 		.Center,
@@ -1403,10 +1517,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			10,
 		)
 		if seconds, ok := current_seconds(); ok {
-			draw_text_in_rect(
+			draw_timestamp_text_in_rect(
 				ctx,
 				small_font,
-				fmt.tprintf("T+%07.2f", seconds),
+				format_timestamp(seconds),
 				metadata,
 				.End,
 				.Center,
@@ -1427,10 +1541,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			ink,
 			10,
 		)
-		draw_text_in_rect(
+		draw_timestamp_text_in_rect(
 			ctx,
 			small_font,
-			fmt.tprintf("%06.2f SEC", exercise.end_seconds - exercise.start_seconds),
+			format_timestamp(exercise.end_seconds - exercise.start_seconds),
 			metadata,
 			.End,
 			.Center,
@@ -1501,10 +1615,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 						.Center,
 						muted,
 					)
-					draw_text_in_rect(
+					draw_timestamp_text_in_rect(
 						ctx,
 						small_font,
-						fmt.tprintf("%07.2f", segment.start_seconds),
+						format_timestamp(segment.start_seconds),
 						UI_Rect{row.x + 52, row.y, 68, row.h},
 						.Start,
 						.Center,
@@ -1525,10 +1639,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			}
 		}
 		if len(state.transcripts.segments) == 0 {
-			draw_text_in_rect(
+			draw_timestamp_text_in_rect(
 				ctx,
 				small_font,
-				"0000  NO TIMECODE DATA / LOAD CAPTIONS",
+				"00:00:00  NO TIMECODE DATA / LOAD CAPTIONS",
 				UI_Rect {
 					transcript_content.x,
 					transcript_content.y + transcript_content.h - 25,
@@ -1564,10 +1678,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			.Center,
 			muted,
 		)
-		draw_text_in_rect(
+		draw_timestamp_text_in_rect(
 			ctx,
 			small_font,
-			state.has_start ? fmt.tprintf("IN    %07.2f SEC", state.range_start) : "IN    --:--:--",
+			state.has_start ? fmt.tprintf("IN    %s", format_timestamp(state.range_start)) : "IN    --:--:--",
 			UI_Rect {
 				output_content.x + 8,
 				output_content.y + output_content.h - 78,
@@ -1578,10 +1692,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			.Center,
 			state.has_start ? cyan : dim,
 		)
-		draw_text_in_rect(
+		draw_timestamp_text_in_rect(
 			ctx,
 			small_font,
-			state.has_end ? fmt.tprintf("OUT   %07.2f SEC", state.range_end) : "OUT   --:--:--",
+			state.has_end ? fmt.tprintf("OUT   %s", format_timestamp(state.range_end)) : "OUT   --:--:--",
 			UI_Rect {
 				output_content.x + 8,
 				output_content.y + output_content.h - 106,
@@ -1698,12 +1812,14 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 
 	range_text := "RANGE --:--:-- → --:--:--"
 	if state.has_start || state.has_end {
-		range_text = fmt.tprintf("RANGE %07.2f → %07.2f", state.range_start, state.range_end)
+		start_text := state.has_start ? format_timestamp(state.range_start) : "--:--:--"
+		end_text := state.has_end ? format_timestamp(state.range_end) : "--:--:--"
+		range_text = fmt.tprintf("RANGE %s → %s", start_text, end_text)
 	}
 	if ui.mode ==
 	   .Play {range_text = fmt.tprintf("LIBRARY / %03d EXERCISES", len(state.exercises))}
 	footer := UI_Rect{18, 0, ui.width - 36, 30}
-	draw_text_in_rect(
+	draw_timestamp_text_in_rect(
 		ctx,
 		small_font,
 		range_text,
@@ -1721,7 +1837,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		status_text = fmt.tprintf("SYS / [%s] %s", activity_spinner(ui.activity_tick), ui.status)
 		status_color = bright
 	}
-	draw_text_in_rect(
+	draw_timestamp_text_in_rect(
 		ctx,
 		small_font,
 		status_text,
@@ -2042,7 +2158,7 @@ rebuild_accessibility :: proc() {
 				if segment.source_id != source_id {continue}
 				if row.y >= transcript_content.y &&
 				   row.y + row.h <= transcript_content.y + transcript_content.h {
-					label := fmt.tprintf("%.1f seconds, %s", segment.start_seconds, segment.text)
+					label := fmt.tprintf("%s, %s", format_timestamp(segment.start_seconds), segment.text)
 					add_ax_element(
 						array,
 						element_class,
