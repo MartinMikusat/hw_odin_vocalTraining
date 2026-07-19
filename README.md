@@ -117,6 +117,29 @@ The same binary supports scripted imports for diagnostics:
 build/VocalTraining.app/Contents/MacOS/VocalTraining --import 'https://youtu.be/VIDEO_ID?t=SECONDS'
 ```
 
+### Release TODO
+
+The current release build is suitable for local development, but it is not yet
+a self-contained build for non-technical users. Complete these items before
+external distribution:
+
+- Package pinned standalone `yt-dlp` and relocatable Apple Silicon `ffmpeg`
+  executables under `Contents/Resources/helpers/`. Ship helper updates through
+  new app releases; do not install Homebrew, mutate the user's global `PATH`, or
+  download executables on first launch.
+- Build the bundled FFmpeg configuration without the current GPL `libx264`
+  dependency, switch clip encoding to `h264_videotoolbox`, and include the
+  required FFmpeg license notice, build configuration, and corresponding source
+  location with the release.
+- Add a packaging pipeline that signs each helper and then the app with a
+  Developer ID Application certificate and hardened runtime, submits the
+  archive for notarization, and staples the accepted ticket. No valid signing
+  identity is currently installed on the development machine.
+- Verify the quarantined artifact on a clean Apple Silicon Mac: Gatekeeper
+  accepts a normal double-click launch, startup helper validation passes,
+  import and clip export complete without Homebrew, and the final app size and
+  embedded helper versions are recorded.
+
 ### Reload loop
 
 Run the dependency-free watcher during development:
