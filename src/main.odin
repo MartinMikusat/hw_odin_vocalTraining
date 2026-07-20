@@ -10,6 +10,7 @@ import "core:thread"
 import "core:sync"
 import "base:runtime"
 import mem_virtual "core:mem/virtual"
+import match_sorter "match_sorter:."
 
 Id  :: rawptr
 Sel :: rawptr
@@ -17,10 +18,12 @@ Sel :: rawptr
 foreign import objc "system:objc"
 foreign objc {
 	objc_getClass           :: proc "c" (name: cstring) -> Id ---
+	objc_getProtocol        :: proc "c" (name: cstring) -> Id ---
 	sel_registerName        :: proc "c" (name: cstring) -> Sel ---
 	objc_allocateClassPair  :: proc "c" (superclass: Id, name: cstring, extra: uint) -> Id ---
 	objc_registerClassPair  :: proc "c" (cls: Id) ---
 	class_addMethod         :: proc "c" (cls: Id, name: Sel, imp: rawptr, types: cstring) -> bool ---
+	class_addProtocol       :: proc "c" (cls: Id, protocol: Id) -> bool ---
 }
 
 foreign import libc "system:System.framework"
@@ -677,7 +680,7 @@ load_source_player :: proc(index: int) -> bool {
 }
 
 refresh_transcript :: proc() {
-	ui.transcript_scroll = 0
+	invalidate_transcript_matches()
 	ui.needs_redraw = true
 }
 
@@ -1482,6 +1485,11 @@ jobs_shutdown :: proc() {
 main :: proc() {
 	if !memory_init() { fmt.eprintln("Unable to initialize memory arenas"); return }
 	defer memory_destroy()
+	if error := match_sorter.search_context_init(&transcript_search_context); error != nil {
+		fmt.eprintln("Unable to initialize transcript search")
+		return
+	}
+	defer match_sorter.search_context_destroy(&transcript_search_context)
 	defer app_state_memory_destroy()
 	defer source_probe_results_clear()
 	defer source_probe_cache_clear()

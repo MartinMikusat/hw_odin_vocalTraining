@@ -4,6 +4,8 @@ import "base:runtime"
 import "core:fmt"
 import mem_virtual "core:mem/virtual"
 import "core:strings"
+import CF "core:sys/darwin/CoreFoundation"
+import match_sorter "match_sorter:."
 
 foreign import metal "system:Metal.framework"
 foreign metal {
@@ -43,7 +45,7 @@ foreign core_text {
 foreign import core_foundation "system:CoreFoundation.framework"
 foreign core_foundation {
 	CFStringCreateWithCString :: proc "c" (allocator: rawptr, text: cstring, encoding: u32) -> rawptr ---
-	CFStringCreateWithBytes :: proc "c" (allocator: rawptr, bytes: [^]u8, count: int, encoding: u32, external: bool) -> rawptr ---
+	CFStringCreateWithBytes :: proc "c" (allocator: CF.TypeRef, bytes: [^]u8, count: CF.Index, encoding: CF.StringEncoding, external: b8) -> CF.String ---
 	CFStringGetLength :: proc "c" (string: rawptr) -> int ---
 	CFAttributedStringCreateMutable :: proc "c" (allocator: rawptr, max_length: int) -> rawptr ---
 	CFAttributedStringReplaceString :: proc "c" (string: rawptr, range: CF_Range, replacement: rawptr) ---
@@ -69,6 +71,7 @@ UI_Focus :: enum {
 	None,
 	URL,
 	Source_Search,
+	Transcript_Search,
 	Exercise_Search,
 	Exercise_Name,
 }
@@ -123,12 +126,15 @@ UI_State :: struct {
 	source_details_index: int,
 	url_input:          string,
 	source_search:      string,
+	transcript_search:  string,
 	exercise_search:    string,
 	exercise_name:      string,
 	status:             string,
 	status_success:     bool,
 	source_scroll:      f64,
 	transcript_scroll:  f64,
+	transcript_matches: [dynamic]int,
+	transcript_matches_dirty: bool,
 	exercise_scroll:    f64,
 	active_exercise:    int,
 	marked_text:        string,
@@ -207,6 +213,7 @@ AX_Kind :: enum {
 	URL,
 	Import,
 	Source_Search,
+	Transcript_Search,
 	Source,
 	Transcript,
 	Exercise_Search,
@@ -281,6 +288,11 @@ assert_foreign :: proc(value: rawptr, message: string) {
 msg_bool :: proc(receiver: Id, selector: Sel) -> bool {
 	p := transmute(proc "c" (_: Id, _: Sel) -> bool)send_address
 	return p(receiver, selector)
+}
+
+msg_bool_sel :: proc(receiver: Id, selector, value: Sel) -> bool {
+	p := transmute(proc "c" (_: Id, _: Sel, _: Sel) -> bool)send_address
+	return p(receiver, selector, value)
 }
 
 msg_void_bool :: proc(receiver: Id, selector: Sel, value: bool) {
@@ -468,12 +480,27 @@ focused_text :: proc() -> ^string {
 		return &ui.url_input
 	case .Source_Search:
 		return &ui.source_search
+	case .Transcript_Search:
+		return &ui.transcript_search
 	case .Exercise_Search:
 		return &ui.exercise_search
 	case .Exercise_Name:
 		return &ui.exercise_name
 	}
 	return nil
+}
+
+focused_text_changed :: proc(target: ^string) {
+	if target == &ui.url_input {schedule_source_probe(30)}
+	if target == &ui.transcript_search {invalidate_transcript_matches()}
+}
+
+focus_text_input :: proc(focus: UI_Focus) {
+	ui.focus = focus
+	if state.window != nil && ui.view != nil {
+		msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
+	}
+	ui.needs_redraw = true
 }
 
 contains :: proc(rect: UI_Rect, point: Point) -> bool {
@@ -747,13 +774,43 @@ control_slot_for_action :: proc(mode: UI_Mode, action: int) -> int {
 }
 
 is_paste_shortcut :: proc(key, modifiers: uint) -> bool {
-	NSEventModifierFlagCommand :: uint(1 << 20)
 	return key == 9 && modifiers & NSEventModifierFlagCommand != 0
 }
 
 is_delete_word_shortcut :: proc(key, modifiers: uint) -> bool {
-	NSEventModifierFlagControl :: uint(1 << 18)
 	return key == 51 && modifiers & NSEventModifierFlagControl != 0
+}
+
+NSEventModifierFlagControl :: uint(1 << 18)
+NSEventModifierFlagCommand :: uint(1 << 20)
+
+Text_Input_Key_Disposition :: enum {
+	Delete_Word,
+	Interpret,
+}
+
+/**
+ * dispose_focused_text_key chooses how a focused field handles a key event.
+ * Motivation: keep Command shortcuts and IME inside AppKit's interpretKeyEvents
+ * path instead of reading NSEvent.characters in keyDown.
+ */
+dispose_focused_text_key :: proc(key, modifiers: uint) -> Text_Input_Key_Disposition {
+	if is_delete_word_shortcut(key, modifiers) {return .Delete_Word}
+	return .Interpret
+}
+
+/**
+ * text_event_is_insertable accepts only ordinary printable characters.
+ * Motivation: function keys arrive as U+F700..U+F8FF through insertText and
+ * must not become replacement glyphs in the focused field.
+ */
+text_event_is_insertable :: proc(text: string) -> bool {
+	if len(text) == 0 {return false}
+	for ch in text {
+		if ch < 32 || ch == 127 {return false}
+		if ch >= 0xF700 && ch <= 0xF8FF {return false}
+	}
+	return true
 }
 
 activity_spinner :: proc(tick: uint) -> string {
@@ -786,12 +843,17 @@ source_content_rect :: proc(source_search, source_panel: UI_Rect) -> UI_Rect {
 }
 
 transcript_content_rect :: proc(transcript: UI_Rect) -> UI_Rect {
+	search := transcript_search_rect(transcript)
 	return UI_Rect {
 		transcript.x + 6,
 		transcript.y + 8,
 		transcript.w - 12,
-		max(0, transcript.h - 50),
+		max(0, search.y - transcript.y - 16),
 	}
+}
+
+transcript_search_rect :: proc(transcript: UI_Rect) -> UI_Rect {
+	return UI_Rect{transcript.x + 8, transcript.y + transcript.h - 70, transcript.w - 16, 28}
 }
 
 player_content_rect :: proc(player: UI_Rect) -> UI_Rect {
@@ -938,12 +1000,19 @@ bounded_scroll :: proc(
 filtered_source_count :: proc() -> int {
 	count := 0
 	for source in state.sources {
-		if len(ui.source_search) > 0 &&
-		   !strings.contains(source.title, ui.source_search) &&
-		   !strings.contains(source.video_id, ui.source_search) {continue}
+		if !source_matches_search(source, ui.source_search) {continue}
 		count += 1
 	}
 	return count
+}
+
+source_matches_search :: proc(source: Source_Video, query: string) -> bool {
+	if len(query) == 0 {return true}
+	lower_query := strings.to_lower(query, context.temp_allocator)
+	lower_title := strings.to_lower(source.title, context.temp_allocator)
+	if strings.contains(lower_title, lower_query) {return true}
+	lower_video_id := strings.to_lower(source.video_id, context.temp_allocator)
+	return strings.contains(lower_video_id, lower_query)
 }
 
 source_index_at_point :: proc(point: Point, source_search, source_panel: UI_Rect) -> int {
@@ -955,9 +1024,7 @@ source_index_at_point :: proc(point: Point, source_search, source_panel: UI_Rect
 		29,
 	}
 	for source, index in state.sources {
-		if len(ui.source_search) > 0 &&
-		   !strings.contains(source.title, ui.source_search) &&
-		   !strings.contains(source.video_id, ui.source_search) {continue}
+		if !source_matches_search(source, ui.source_search) {continue}
 		if row.y >= source_content.y &&
 		   row.y + row.h <= source_content.y + source_content.h &&
 		   contains(row, point) {return index}
@@ -979,14 +1046,69 @@ format_frame_rate :: proc(fps: f64) -> string {
 	return fmt.tprintf("%.2f fps", fps)
 }
 
-active_segment_count :: proc() -> int {
-	if state.active_source < 0 {return 0}
-	count := 0
-	source_id := state.sources[state.active_source].id
-	for segment in state.transcripts.segments {
-		if segment.source_id == source_id {count += 1}
+transcript_search_context: match_sorter.Search_Context
+
+transcript_text_value :: proc(segment: ^Transcript_Segment) -> match_sorter.Extracted_Values {
+	return match_sorter.single_value(segment.text)
+}
+
+transcript_ranked_indices :: proc(
+	search: ^match_sorter.Search_Context,
+	segments: []Transcript_Segment,
+	source_id, query: string,
+	allocator := context.allocator,
+) -> []int {
+	active := make([dynamic]Transcript_Segment, context.temp_allocator)
+	global_indices := make([dynamic]int, context.temp_allocator)
+	for segment, index in segments {
+		if segment.source_id != source_id {continue}
+		append(&active, segment)
+		append(&global_indices, index)
 	}
-	return count
+	if len(query) == 0 {
+		result := make([]int, len(global_indices), allocator)
+		copy(result, global_indices[:])
+		return result
+	}
+	previous_temp := context.temp_allocator
+	defer context.temp_allocator = previous_temp
+	keys := []match_sorter.Typed_Key(Transcript_Segment){{getter=transcript_text_value}}
+	ranked := match_sorter.match_indices(
+		search,
+		active[:],
+		query,
+		match_sorter.Typed_Options(Transcript_Segment){keys=keys},
+		context.temp_allocator,
+	)
+	result := make([]int, len(ranked), allocator)
+	for active_index, result_index in ranked {result[result_index] = global_indices[active_index]}
+	return result
+}
+
+invalidate_transcript_matches :: proc(reset_scroll := true) {
+	ui.transcript_matches_dirty = true
+	if reset_scroll {ui.transcript_scroll = 0}
+}
+
+ensure_transcript_matches :: proc() {
+	if !ui.transcript_matches_dirty {return}
+	clear(&ui.transcript_matches)
+	if state.active_source >= 0 && state.active_source < len(state.sources) {
+		indices := transcript_ranked_indices(
+			&transcript_search_context,
+			state.transcripts.segments[:],
+			state.sources[state.active_source].id,
+			ui.transcript_search,
+			context.temp_allocator,
+		)
+		append(&ui.transcript_matches, ..indices)
+	}
+	ui.transcript_matches_dirty = false
+}
+
+active_segment_count :: proc() -> int {
+	ensure_transcript_matches()
+	return len(ui.transcript_matches)
 }
 
 filtered_exercise_count :: proc() -> int {
@@ -1071,7 +1193,7 @@ make_text_run :: proc(font: rawptr, text: string) -> Text_Run {
 	if len(text) == 0 {return run}
 	assert_foreign(font, "make_text_run requires a valid CTFont")
 	bytes := transmute([]u8)text
-	string_ref := CFStringCreateWithBytes(nil, raw_data(bytes), len(bytes), 0x08000100, false)
+	string_ref := rawptr(CFStringCreateWithBytes(CF.TypeRef(nil), raw_data(bytes), CF.Index(len(bytes)), CF.StringEncoding(0x08000100), false))
 	if string_ref == nil {return run}
 	defer CFRelease(string_ref)
 	attributed := CFAttributedStringCreateMutable(nil, 0)
@@ -1441,6 +1563,11 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		push_rect(vertices, rect, field)
 		push_border(vertices, rect, border)
 	}
+	if ui.mode == .Create {
+		search := transcript_search_rect(transcript)
+		push_rect(vertices, search, field)
+		push_border(vertices, search, border)
+	}
 	if ui.mode == .Create && state.player != nil {
 		volume_buttons := [2]UI_Rect{source_volume_down_rect(player), source_volume_up_rect(player)}
 		for rect in volume_buttons {
@@ -1500,9 +1627,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			29,
 		}
 		for source, index in state.sources {
-			if len(ui.source_search) > 0 &&
-			   !strings.contains(source.title, ui.source_search) &&
-			   !strings.contains(source.video_id, ui.source_search) {continue}
+			if !source_matches_search(source, ui.source_search) {continue}
 			if row.y >= source_content.y && row.y + row.h <= source_content.y + source_content.h {
 				color := [4]f32{0.046, 0.050, 0.048, 0.96}
 				if contains(row, ui.mouse) {color = [4]f32{0.075, 0.081, 0.076, 1}}
@@ -1527,19 +1652,17 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			transcript_content.w,
 			25,
 		}
-		if state.active_source >= 0 {
-			source_id := state.sources[state.active_source].id
-			for segment in state.transcripts.segments {
-				if segment.source_id != source_id {continue}
-				if row.y >= transcript_content.y &&
-				   row.y + row.h <= transcript_content.y + transcript_content.h {
-					color := [4]f32{0.043, 0.047, 0.045, 0.96}
-					if contains(row, ui.mouse) {color = [4]f32{0.071, 0.078, 0.073, 1}}
-					push_rect(vertices, row, color)
-					push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
-				}
-				row.y -= 26
+		ensure_transcript_matches()
+		for segment_index in ui.transcript_matches {
+			segment := state.transcripts.segments[segment_index]
+			if row.y >= transcript_content.y &&
+			   row.y + row.h <= transcript_content.y + transcript_content.h {
+				color := [4]f32{0.043, 0.047, 0.045, 0.96}
+				if contains(row, ui.mouse) {color = [4]f32{0.071, 0.078, 0.073, 1}}
+				push_rect(vertices, row, color)
+				push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
 			}
+			row.y -= 26
 		}
 	}
 
@@ -1588,6 +1711,8 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		focus_rect = {}
 	case .Source_Search:
 		focus_rect = source_search
+	case .Transcript_Search:
+		focus_rect = transcript_search_rect(transcript)
 	case .Exercise_Search:
 		focus_rect = exercise_search
 	case .Exercise_Name:
@@ -1669,6 +1794,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		35,
 	}
 	if ui.mode == .Create {
+		ensure_transcript_matches()
 		draw_text_in_rect(
 			ctx,
 			small_font,
@@ -1713,7 +1839,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			fmt.tprintf("%04d SEGMENTS", len(state.transcripts.segments)),
+			len(ui.transcript_search) > 0 ? fmt.tprintf("%04d MATCHES", len(ui.transcript_matches)) : fmt.tprintf("%04d SEGMENTS", len(ui.transcript_matches)),
 			transcript_header,
 			.End,
 			.Center,
@@ -1778,6 +1904,18 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		source_text := ui.source_search
 		if len(source_text) == 0 {source_text = "/ filter source register"}
 		draw_text_in_rect(ctx, small_font, source_text, source_search, .Start, .Center, dim, 8)
+		transcript_search_text := ui.transcript_search
+		if len(transcript_search_text) == 0 {transcript_search_text = "/ search timed transcript"}
+		draw_text_in_rect(
+			ctx,
+			small_font,
+			transcript_search_text,
+			transcript_search_rect(transcript),
+			.Start,
+			.Center,
+			len(ui.transcript_search) > 0 ? ink : dim,
+			8,
+		)
 		exercise_name_text := ui.exercise_name
 		if len(exercise_name_text) == 0 {exercise_name_text = "NAME / optional designation"}
 		draw_text_in_rect(
@@ -1823,9 +1961,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		}
 		visible_source_index := 1
 		for source, index in state.sources {
-			if len(ui.source_search) > 0 &&
-			   !strings.contains(source.title, ui.source_search) &&
-			   !strings.contains(source.video_id, ui.source_search) {continue}
+			if !source_matches_search(source, ui.source_search) {continue}
 			if row.y >= source_content.y && row.y + row.h <= source_content.y + source_content.h {
 				row_color := ink
 				if index == state.active_source {row_color = orange}
@@ -2041,17 +2177,15 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			transcript_content.w,
 			25,
 		}
-		if state.active_source >= 0 {
-			source_id := state.sources[state.active_source].id
-			segment_index := 1
-			for segment in state.transcripts.segments {
-				if segment.source_id != source_id {continue}
-				if row.y >= transcript_content.y &&
+		ensure_transcript_matches()
+		for transcript_index, result_index in ui.transcript_matches {
+			segment := state.transcripts.segments[transcript_index]
+			if row.y >= transcript_content.y &&
 				   row.y + row.h <= transcript_content.y + transcript_content.h {
 					draw_text_in_rect(
 						ctx,
 						small_font,
-						fmt.tprintf("%03d", segment_index),
+						fmt.tprintf("%03d", result_index + 1),
 						UI_Rect{row.x + 8, row.y, 36, row.h},
 						.Start,
 						.Center,
@@ -2076,15 +2210,13 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 						ink,
 					)
 				}
-				row.y -= 26
-				segment_index += 1
-			}
+			row.y -= 26
 		}
-		if len(state.transcripts.segments) == 0 {
+		if len(ui.transcript_matches) == 0 {
 			draw_timestamp_text_in_rect(
 				ctx,
 				small_font,
-				"00:00:00  NO TIMECODE DATA / LOAD CAPTIONS",
+				len(ui.transcript_search) > 0 ? "00:00:00  NO TRANSCRIPT MATCHES" : "00:00:00  NO TIMECODE DATA / LOAD CAPTIONS",
 				UI_Rect {
 					transcript_content.x,
 					transcript_content.y + transcript_content.h - 25,
@@ -2598,6 +2730,7 @@ rebuild_accessibility :: proc() {
 			source_search,
 			.Source_Search,
 		)
+		add_ax_element(array, element_class, "Search timed transcript", "AXTextField", transcript_search_rect(transcript), .Transcript_Search)
 		source_content := source_content_rect(source_search, source_panel)
 		row := UI_Rect {
 			source_content.x,
@@ -2606,9 +2739,7 @@ rebuild_accessibility :: proc() {
 			29,
 		}
 		for source, index in state.sources {
-			if len(ui.source_search) > 0 &&
-			   !strings.contains(source.title, ui.source_search) &&
-			   !strings.contains(source.video_id, ui.source_search) {continue}
+			if !source_matches_search(source, ui.source_search) {continue}
 			if row.y >= source_content.y && row.y + row.h <= source_content.y + source_content.h {
 				add_ax_element(array, element_class, source.title, "AXButton", row, .Source, index)
 			}
@@ -2621,11 +2752,10 @@ rebuild_accessibility :: proc() {
 			transcript_content.w,
 			25,
 		}
-		if state.active_source >= 0 {
-			source_id := state.sources[state.active_source].id
-			for segment in state.transcripts.segments {
-				if segment.source_id != source_id {continue}
-				if row.y >= transcript_content.y &&
+		ensure_transcript_matches()
+		for segment_index in ui.transcript_matches {
+			segment := state.transcripts.segments[segment_index]
+			if row.y >= transcript_content.y &&
 				   row.y + row.h <= transcript_content.y + transcript_content.h {
 					label := fmt.tprintf("%s, %s", format_timestamp(segment.start_seconds), segment.text)
 					add_ax_element(
@@ -2638,8 +2768,7 @@ rebuild_accessibility :: proc() {
 						seconds = segment.start_seconds,
 					)
 				}
-				row.y -= 26
-			}
+			row.y -= 26
 		}
 		add_ax_element(
 			array,
@@ -2762,23 +2891,25 @@ on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 		button := source_details_refetch_rect(source_details_rect())
 		dispatch_click(Point{button.x + button.w / 2, button.y + button.h / 2})
 	case .URL:
-		ui.focus = .URL
+		focus_text_input(.URL)
 	case .Import:
 		on_import(nil, nil, nil)
 	case .Source_Search:
-		ui.focus = .Source_Search
+		focus_text_input(.Source_Search)
+	case .Transcript_Search:
+		focus_text_input(.Transcript_Search)
 	case .Source:
 		ui_event_tag = action.index
 		on_select_source(nil, nil, nil)
 	case .Transcript:
 		seek_seconds(action.seconds)
 	case .Exercise_Search:
-		ui.focus = .Exercise_Search
+		focus_text_input(.Exercise_Search)
 	case .Exercise:
 		ui_event_tag = action.index
 		on_play_exercise(nil, nil, nil)
 	case .Exercise_Name:
-		ui.focus = .Exercise_Name
+		focus_text_input(.Exercise_Name)
 	case .Volume_Down:
 		adjust_player_volume(-0.1)
 	case .Volume_Up:
@@ -2829,6 +2960,8 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 		return nsstring(ui.url_input)
 	case .Source_Search:
 		return nsstring(ui.source_search)
+	case .Transcript_Search:
+		return nsstring(ui.transcript_search)
 	case .Exercise_Search:
 		return nsstring(ui.exercise_search)
 	case .Exercise_Name:
@@ -2850,6 +2983,9 @@ on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
 		ui_set_string(&ui.url_input, text)
 	case .Source_Search:
 		ui_set_string(&ui.source_search, text)
+	case .Transcript_Search:
+		ui_set_string(&ui.transcript_search, text)
+		invalidate_transcript_matches()
 	case .Exercise_Search:
 		ui_set_string(&ui.exercise_search, text)
 	case .Exercise_Name:
@@ -3013,10 +3149,12 @@ ui_memory_destroy :: proc() {
 	   nil {foreign_release(ui.texture_cache, "CVMetalTextureCache", "ui_memory_destroy")}
 	delete(ui.url_input)
 	delete(ui.source_search)
+	delete(ui.transcript_search)
 	delete(ui.exercise_search)
 	delete(ui.exercise_name)
 	delete(ui.status)
 	delete(ui.marked_text)
+	delete(ui.transcript_matches)
 	delete(ax_actions)
 	ui = {}
 	ax_actions = nil
@@ -3370,9 +3508,10 @@ dispatch_click :: proc(point: Point) {
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 		return
 	}
-	if ui.mode == .Create && contains(source_search, point) {ui.focus = .Source_Search; return}
-	if ui.mode == .Play && contains(exercise_search, point) {ui.focus = .Exercise_Search; return}
-	if ui.mode == .Create && contains(exercise_name, point) {ui.focus = .Exercise_Name; return}
+	if ui.mode == .Create && contains(source_search, point) {focus_text_input(.Source_Search); return}
+	if ui.mode == .Create && contains(transcript_search_rect(transcript), point) {focus_text_input(.Transcript_Search); return}
+	if ui.mode == .Play && contains(exercise_search, point) {focus_text_input(.Exercise_Search); return}
+	if ui.mode == .Create && contains(exercise_name, point) {focus_text_input(.Exercise_Name); return}
 	ui.focus = .None
 	if ui.mode == .Create &&
 	   contains(source_add_button_rect(source_panel), point) {open_source_modal(); return}
@@ -3419,18 +3558,16 @@ dispatch_click :: proc(point: Point) {
 			transcript_content.w,
 			25,
 		}
-		if state.active_source >= 0 {
-			source_id := state.sources[state.active_source].id
-			for segment in state.transcripts.segments {
-				if segment.source_id != source_id {continue}
-				if row.y >= transcript_content.y &&
+		ensure_transcript_matches()
+		for segment_index in ui.transcript_matches {
+			segment := state.transcripts.segments[segment_index]
+			if row.y >= transcript_content.y &&
 				   row.y + row.h <= transcript_content.y + transcript_content.h &&
 				   contains(row, point) {
 					seek_seconds(segment.start_seconds)
 					return
 				}
-				row.y -= 26
-			}
+			row.y -= 26
 		}
 	}
 	if ui.mode == .Play {
@@ -3580,6 +3717,25 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 	ui.needs_redraw = true
 }
 
+on_metal_insert_text_simple :: proc "c" (self: Id, command: Sel, value: Id) {
+	on_metal_insert_text(self, command, value, NS_Range{0, 0})
+}
+
+text_input_string :: proc(value: Id) -> (string, bool) {
+	if value == nil {return "", false}
+	utf8_selector := sel_registerName("UTF8String")
+	text_object := value
+	if !msg_bool_sel(text_object, sel_registerName("respondsToSelector:"), utf8_selector) {
+		string_selector := sel_registerName("string")
+		if !msg_bool_sel(text_object, sel_registerName("respondsToSelector:"), string_selector) {return "", false}
+		text_object = msg_id(text_object, string_selector)
+		if text_object == nil || !msg_bool_sel(text_object, sel_registerName("respondsToSelector:"), utf8_selector) {return "", false}
+	}
+	utf8 := msg_id(text_object, utf8_selector)
+	if utf8 == nil {return "", false}
+	return string(cstring(utf8)), true
+}
+
 on_metal_insert_text :: proc "c" (self: Id, command: Sel, value: Id, replacement: NS_Range) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -3588,9 +3744,8 @@ on_metal_insert_text :: proc "c" (self: Id, command: Sel, value: Id, replacement
 	if ui.has_marked_text && len(ui.marked_text) <= len(target^) {
 		ui_set_string(target, target^[:len(target^) - len(ui.marked_text)])
 	}
-	utf8 := msg_id(value, sel_registerName("UTF8String"))
-	if utf8 != nil {append_text(target, string(cstring(utf8)))}
-	if target == &ui.url_input {schedule_source_probe(30)}
+	if text, ok := text_input_string(value); ok && text_event_is_insertable(text) {append_text(target, text)}
+	focused_text_changed(target)
 	ui_set_string(&ui.marked_text, "")
 	ui.has_marked_text = false
 	ui.needs_redraw = true
@@ -3612,7 +3767,7 @@ on_metal_paste :: proc "c" (self: Id, command: Sel, sender: Id) {
 	utf8 := msg_id(value, sel_registerName("UTF8String"))
 	if utf8 == nil {return}
 	append_text(target, string(cstring(utf8)))
-	if target == &ui.url_input {schedule_source_probe(1)}
+	if target == &ui.url_input {schedule_source_probe(1)} else {focused_text_changed(target)}
 	ui.needs_redraw = true
 }
 
@@ -3621,14 +3776,14 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	target := focused_text()
 	if selector == sel_registerName("deleteBackward:") {
-		if target != nil {remove_last_character(target); if target == &ui.url_input {schedule_source_probe(30)}}
+		if target != nil {remove_last_character(target); focused_text_changed(target)}
 	} else if selector == sel_registerName("deleteWordBackward:") {
-		if target != nil {remove_last_word(target); if target == &ui.url_input {schedule_source_probe(30)}}
+		if target != nil {remove_last_word(target); focused_text_changed(target)}
 	} else if selector == sel_registerName("paste:") {
 		on_metal_paste(self, selector, nil)
 	} else if selector == sel_registerName("insertNewline:") {
 		if ui.focus ==
-		   .URL {append_text(&ui.url_input, "\n"); schedule_source_probe(1)} else if ui.focus == .Source_Search || ui.focus == .Exercise_Search {ui.focus = .None} else if ui.focus == .Exercise_Name {ui.focus = .None}
+		   .URL {append_text(&ui.url_input, "\n"); schedule_source_probe(1)} else if ui.focus == .Source_Search || ui.focus == .Transcript_Search || ui.focus == .Exercise_Search {ui.focus = .None} else if ui.focus == .Exercise_Name {ui.focus = .None}
 	} else if selector == sel_registerName("insertTab:") {
 		if ui.source_modal_open {
 			ui.focus = .URL
@@ -3637,10 +3792,10 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 		} else {
 			#partial switch ui.focus {
 			case .None:
-				ui.focus = .URL
-			case .URL:
 				ui.focus = .Source_Search
 			case .Source_Search:
+				ui.focus = .Transcript_Search
+			case .Transcript_Search:
 				ui.focus = .Exercise_Name
 			case:
 				ui.focus = .None
@@ -3654,18 +3809,27 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	key := msg_uint(event, sel_registerName("keyCode"))
+	modifiers := msg_uint(event, sel_registerName("modifierFlags"))
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
 	if ui.source_details_open && key == 53 {close_source_details(); return}
-	if is_paste_shortcut(key, msg_uint(event, sel_registerName("modifierFlags"))) {
+	if is_paste_shortcut(key, modifiers) {
 		on_metal_paste(self, sel_registerName("paste:"), nil)
 		return
 	}
-	if target := focused_text();
-	   target != nil &&
-	   is_delete_word_shortcut(key, msg_uint(event, sel_registerName("modifierFlags"))) {
-		remove_last_word(target)
-		ui.needs_redraw = true
-		return
+	if focused_text() != nil {
+		#partial switch dispose_focused_text_key(key, modifiers) {
+		case .Delete_Word:
+			if target := focused_text(); target != nil {
+				remove_last_word(target)
+				focused_text_changed(target)
+				ui.needs_redraw = true
+			}
+			return
+		case .Interpret:
+			// Backspace, Return, Tab, arrows, Command shortcuts, and IME input
+			// go through interpretKeyEvents and NSTextInputClient. These fields
+			// have no caret, so Forward Delete is intentionally unhandled.
+		}
 	}
 	if ui.focus == .None {
 		if key == 49 {on_toggle_playback(nil, nil, nil); return}
@@ -3696,10 +3860,11 @@ on_metal_set_marked :: proc "c" (
 	if ui.has_marked_text && len(ui.marked_text) <= len(target^) {
 		ui_set_string(target, target^[:len(target^) - len(ui.marked_text)])
 	}
-	utf8 := msg_id(value, sel_registerName("UTF8String"))
-	if utf8 == nil {return}
-	ui_set_string(&ui.marked_text, string(cstring(utf8)))
+	text, ok := text_input_string(value)
+	if !ok {return}
+	ui_set_string(&ui.marked_text, text)
 	append_text(target, ui.marked_text)
+	focused_text_changed(target)
 	ui.has_marked_text = true
 	ui.needs_redraw = true
 }
@@ -3718,9 +3883,11 @@ on_metal_range :: proc "c" (self: Id, command: Sel) -> NS_Range {
 	if target == nil {return NS_Range{~uint(0), 0}}
 	if command == sel_registerName("markedRange") {
 		if !ui.has_marked_text {return NS_Range{~uint(0), 0}}
-		return NS_Range{uint(len(target^) - len(ui.marked_text)), uint(len(ui.marked_text))}
+		total := utf16_index_for_byte_offset(target^, len(target^))
+		marked := utf16_index_for_byte_offset(ui.marked_text, len(ui.marked_text))
+		return NS_Range{uint(max(0, total - marked)), uint(marked)}
 	}
-	return NS_Range{uint(len(target^)), 0}
+	return NS_Range{uint(utf16_index_for_byte_offset(target^, len(target^))), 0}
 }
 on_metal_valid_attributes :: proc "c" (self: Id, command: Sel) -> Id {
 	context = runtime.default_context()
@@ -3835,6 +4002,9 @@ register_delegate :: proc(app: Id) {
 
 register_metal_view_class :: proc() -> Id {
 	class := objc_allocateClassPair(objc_getClass("NSView"), "VocalMetalView", 0)
+	if protocol := objc_getProtocol("NSTextInputClient"); protocol != nil {
+		class_addProtocol(class, protocol)
+	}
 	class_addMethod(
 		class,
 		sel_registerName("acceptsFirstResponder"),
@@ -3849,6 +4019,7 @@ register_metal_view_class :: proc() -> Id {
 	class_addMethod(class, sel_registerName("scrollWheel:"), rawptr(on_metal_scroll), "v@:@")
 	class_addMethod(class, sel_registerName("keyDown:"), rawptr(on_metal_key_down), "v@:@")
 	class_addMethod(class, sel_registerName("paste:"), rawptr(on_metal_paste), "v@:@")
+	class_addMethod(class, sel_registerName("insertText:"), rawptr(on_metal_insert_text_simple), "v@:@")
 	class_addMethod(
 		class,
 		sel_registerName("insertText:replacementRange:"),
@@ -3956,6 +4127,7 @@ build_metal_window :: proc() {
 	ui_set_string(&ui.status, "Ready")
 	ui.scale = 1
 	ui.active_exercise = -1
+	ui.transcript_matches_dirty = true
 	ui.needs_redraw = true
 
 	frame := Rect{Point{120, 100}, Size{1100, 720}}

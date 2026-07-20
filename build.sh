@@ -2,6 +2,11 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+MATCH_SORTER_ROOT="$ROOT/../hw_odin_matchSorter"
+if [ ! -f "$MATCH_SORTER_ROOT/match_sorter.odin" ]; then
+  echo "[vocal-training] missing Odin match-sorter checkout: $MATCH_SORTER_ROOT" >&2
+  exit 1
+fi
 cd "$ROOT"
 
 MODE=${1:-debug}
@@ -34,6 +39,7 @@ TEMP="$ROOT/build/temp/$MODE"
 mkdir -p "$TEMP"
 cd "$TEMP"
 odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
+  -collection:match_sorter="$MATCH_SORTER_ROOT" \
   -extra-linker-flags:"-framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 

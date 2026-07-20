@@ -150,6 +150,7 @@ build_transcript_generation :: proc(source: ^Source_Video, previous: []Transcrip
 install_transcript_generation :: proc(next: Transcript_Generation) {
 	previous := state.transcripts
 	state.transcripts = next
+	invalidate_transcript_matches()
 	transcript_generation_destroy(&previous)
 }
 

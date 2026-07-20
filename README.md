@@ -63,6 +63,8 @@ not available. Right-click that source and refetch it. Inspect `yt-dlp.log` if
 the refetch fails.
 
 Select a source, load its captions, and click a timed transcript row to seek.
+Use the transcript search field to rank fuzzy caption matches. Clear the field
+to restore the transcript's time order.
 Mark the start and end of a useful section, then commit the range as an
 exercise. Saved exercises appear in the exercise bank and play as standalone
 clips when selected. The Source Monitor volume controls adjust playback in 10%
@@ -87,9 +89,12 @@ directory in Finder.
 
 A thin AppKit shell creates the window and forwards input. Odin calculates
 every visible control, while Metal renders the interface through one
-`CAMetalLayer`. AVPlayer decodes muted video, and Core Video maps its frames
-into Metal textures. AVAudioEngine routes audio through a time-pitch unit, so
-speed changes preserve vocal pitch without restarting the audio stream.
+`CAMetalLayer`. The custom Metal view conforms to `NSTextInputClient` and
+routes typing through `interpretKeyEvents`, so Command shortcuts and input
+methods stay on the AppKit path. AVPlayer decodes muted video, and Core Video
+maps its frames into Metal textures. AVAudioEngine routes audio through a
+time-pitch unit, so speed changes preserve vocal pitch without restarting the
+audio stream.
 
 The interface uses Berkeley Mono and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface, including the compact
@@ -126,8 +131,10 @@ never substitutes for framework reference counting.
 
 ### Build
 
-Install Odin and ensure `odin` is on `PATH`. The default build is unoptimized,
-includes debug information and assertions, and emits a matching dSYM:
+Install Odin and ensure `odin` is on `PATH`. Clone `hw_odin_matchSorter` next
+to this repository; the build imports it as the `match_sorter` collection. The
+default build is unoptimized, includes debug information and assertions, and
+emits a matching dSYM:
 
 ```sh
 ./build.sh

@@ -5,6 +5,7 @@ import "core:encoding/json"
 import "core:os"
 import "core:strings"
 import mem_virtual "core:mem/virtual"
+import match_sorter "match_sorter:."
 
 @(test)
 parse_standard_youtube_url_test :: proc(t: ^testing.T) {
@@ -888,4 +889,101 @@ source_transport_and_timeline_stay_inside_player_test :: proc(t: ^testing.T) {
 		testing.expect(t, rect.x >= player.x && rect.x+rect.w <= player.x+player.w)
 		testing.expect(t, rect.y >= player.y && rect.y+rect.h <= player.y+player.h)
 	}
+}
+
+@(test)
+transcript_search_ranks_matches_and_returns_original_indices_test :: proc(t: ^testing.T) {
+	search: match_sorter.Search_Context
+	testing.expect(t, match_sorter.search_context_init(&search) == nil)
+	defer match_sorter.search_context_destroy(&search)
+	segments := []Transcript_Segment{
+		{source_id="a", text="voice warmup routine"},
+		{source_id="a", text="warmup"},
+		{source_id="b", text="warmup"},
+	}
+	indices := transcript_ranked_indices(&search, segments, "a", "warmup")
+	defer delete(indices)
+	testing.expect_value(t, len(indices), 2)
+	testing.expect_value(t, indices[0], 1)
+	testing.expect_value(t, indices[1], 0)
+	missing := transcript_ranked_indices(&search, segments, "a", "zzzz")
+	defer delete(missing)
+	testing.expect_value(t, len(missing), 0)
+}
+
+@(test)
+empty_transcript_search_keeps_active_source_in_chronological_order_test :: proc(t: ^testing.T) {
+	search: match_sorter.Search_Context
+	testing.expect(t, match_sorter.search_context_init(&search) == nil)
+	defer match_sorter.search_context_destroy(&search)
+	segments := []Transcript_Segment{
+		{source_id="a", text="first"},
+		{source_id="b", text="other"},
+		{source_id="a", text="second"},
+	}
+	indices := transcript_ranked_indices(&search, segments, "a", "")
+	defer delete(indices)
+	testing.expect_value(t, len(indices), 2)
+	testing.expect_value(t, indices[0], 0)
+	testing.expect_value(t, indices[1], 2)
+}
+
+@(test)
+transcript_search_field_sits_between_header_and_results_test :: proc(t: ^testing.T) {
+	transcript := UI_Rect{308, 116, 480, 220}
+	search := transcript_search_rect(transcript)
+	content := transcript_content_rect(transcript)
+	testing.expect(t, search.y > content.y + content.h)
+	testing.expect(t, search.y + search.h < transcript.y + transcript.h)
+}
+
+@(test)
+text_input_key_classification_test :: proc(t: ^testing.T) {
+	testing.expect(t, text_event_is_insertable("adele"))
+	testing.expect(t, text_event_is_insertable("café"))
+	testing.expect(t, text_event_is_insertable("Α"))
+	testing.expect(t, !text_event_is_insertable(""))
+	testing.expect(t, !text_event_is_insertable("\t"))
+	testing.expect(t, !text_event_is_insertable("\n"))
+	// NSLeftArrowFunctionKey = U+F702
+	testing.expect(t, !text_event_is_insertable("\uF702"))
+	testing.expect(t, !text_event_is_insertable("\uF700"))
+
+	testing.expect(t, is_paste_shortcut(9, NSEventModifierFlagCommand))
+	testing.expect(t, !is_paste_shortcut(0, NSEventModifierFlagCommand))
+	testing.expect(t, is_delete_word_shortcut(51, NSEventModifierFlagControl))
+	testing.expect(t, !is_delete_word_shortcut(51, 0))
+
+	// Ordinary letter, Return, Tab, and arrows all defer to AppKit.
+	testing.expect_value(t, dispose_focused_text_key(0, 0), Text_Input_Key_Disposition.Interpret)
+	testing.expect_value(t, dispose_focused_text_key(36, 0), Text_Input_Key_Disposition.Interpret)
+	testing.expect_value(t, dispose_focused_text_key(48, 0), Text_Input_Key_Disposition.Interpret)
+	testing.expect_value(t, dispose_focused_text_key(123, 0), Text_Input_Key_Disposition.Interpret)
+	testing.expect_value(t, dispose_focused_text_key(126, 0), Text_Input_Key_Disposition.Interpret)
+	testing.expect_value(t, dispose_focused_text_key(117, 0), Text_Input_Key_Disposition.Interpret)
+	testing.expect_value(
+		t,
+		dispose_focused_text_key(0, NSEventModifierFlagCommand),
+		Text_Input_Key_Disposition.Interpret,
+	)
+	testing.expect_value(
+		t,
+		dispose_focused_text_key(51, NSEventModifierFlagControl),
+		Text_Input_Key_Disposition.Delete_Word,
+	)
+}
+
+@(test)
+text_input_ranges_count_utf16_code_units_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, utf16_index_for_byte_offset("abc", len("abc")), 3)
+	testing.expect_value(t, utf16_index_for_byte_offset("café", len("café")), 4)
+	testing.expect_value(t, utf16_index_for_byte_offset("A😀B", len("A😀B")), 4)
+}
+
+@(test)
+source_search_matches_title_and_video_id_without_case_test :: proc(t: ^testing.T) {
+	source := Source_Video{title="Appoggio Breathing", video_id="AbC123XyZ"}
+	testing.expect(t, source_matches_search(source, "APPOGGIO"))
+	testing.expect(t, source_matches_search(source, "abc123"))
+	testing.expect(t, !source_matches_search(source, "falsetto"))
 }
