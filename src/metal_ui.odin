@@ -5,6 +5,7 @@ import "core:fmt"
 import mem_virtual "core:mem/virtual"
 import "core:strings"
 import CF "core:sys/darwin/CoreFoundation"
+import flash "flash:."
 import match_sorter "match_sorter:."
 
 foreign import metal "system:Metal.framework"
@@ -214,8 +215,11 @@ AX_Kind :: enum {
 	Cancel_Source_Modal,
 	Close_Source_Details,
 	Refetch_Source_Details,
+	Open_Source_Details,
 	URL,
 	Import,
+	Source_Quality,
+	Stop_Download,
 	Source_Search,
 	Transcript_Search,
 	Source,
@@ -246,12 +250,31 @@ AX_Action :: struct {
 	element: Id,
 	kind:    AX_Kind,
 	index:   int,
+	value:   int,
 	seconds: f64,
+}
+
+UI_Action :: struct {
+	kind:    AX_Kind,
+	index:   int,
+	value:   int,
+	seconds: f64,
+}
+
+Interactive_Target :: struct {
+	label:  string,
+	role:   string,
+	rect:   UI_Rect,
+	anchor: flash.Anchor,
+	action: UI_Action,
 }
 
 ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1}
 ui_event_tag: int
 ax_actions: [dynamic]AX_Action
+interactive_targets: [dynamic]Interactive_Target
+flash_state: flash.State
+flash_actions: [dynamic]UI_Action
 
 CONTROL_URL :: Id(rawptr(uintptr(1)))
 CONTROL_STATUS :: Id(rawptr(uintptr(2)))
@@ -715,6 +738,7 @@ source_details_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 }
 
 close_source_details :: proc() {
+	cancel_ui_flash()
 	ui.source_details_open = false
 	ui.source_details_index = -1
 	ui.needs_redraw = true
@@ -728,6 +752,7 @@ source_details_metadata_changed :: proc() {
 }
 
 open_source_details :: proc(source_index: int) {
+	cancel_ui_flash()
 	if source_index < 0 || source_index >= len(state.sources) {return}
 	if ui.source_details_open {close_source_details()}
 	ui.source_details_index = source_index
@@ -741,6 +766,7 @@ open_source_details :: proc(source_index: int) {
 }
 
 open_source_modal :: proc() {
+	cancel_ui_flash()
 	if ui.source_details_open {close_source_details()}
 	ui.source_modal_refetch_index = -1
 	ui.source_modal_open = true
@@ -753,6 +779,7 @@ open_source_modal :: proc() {
 }
 
 open_refetch_source_modal :: proc(source_index: int) {
+	cancel_ui_flash()
 	if source_index < 0 || source_index >= len(state.sources) {return}
 	if ui.source_details_open {close_source_details()}
 	ui.source_modal_refetch_index = source_index
@@ -765,6 +792,7 @@ open_refetch_source_modal :: proc(source_index: int) {
 }
 
 close_source_modal :: proc() {
+	cancel_ui_flash()
 	ui.source_modal_open = false
 	ui.source_modal_refetch_index = -1
 	ui.focus = .None
@@ -780,6 +808,7 @@ schedule_source_probe :: proc(delay_frames: uint) {
 
 set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.mode == mode {return}
+	cancel_ui_flash()
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
 	ui.source_scrubbing = false
@@ -889,7 +918,13 @@ is_delete_word_shortcut :: proc(key, modifiers: uint) -> bool {
 }
 
 NSEventModifierFlagControl :: uint(1 << 18)
+NSEventModifierFlagOption  :: uint(1 << 19)
 NSEventModifierFlagCommand :: uint(1 << 20)
+
+flash_leader_allowed :: proc(focus: UI_Focus, modifiers: uint, text: string) -> bool {
+	blocked := NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand
+	return focus == .None && modifiers & blocked == 0 && text == "/"
+}
 
 Text_Input_Key_Disposition :: enum {
 	Delete_Word,
@@ -1120,24 +1155,6 @@ source_matches_search :: proc(source: Source_Video, query: string) -> bool {
 	if strings.contains(lower_title, lower_query) {return true}
 	lower_video_id := strings.to_lower(source.video_id, context.temp_allocator)
 	return strings.contains(lower_video_id, lower_query)
-}
-
-source_index_at_point :: proc(point: Point, source_search, source_panel: UI_Rect) -> int {
-	source_content := source_content_rect(source_search, source_panel)
-	row := UI_Rect {
-		source_content.x,
-		source_content.y + source_content.h - 29 + ui.source_scroll,
-		source_content.w,
-		29,
-	}
-	for source, index in state.sources {
-		if !source_matches_search(source, ui.source_search) {continue}
-		if row.y >= source_content.y &&
-		   row.y + row.h <= source_content.y + source_content.h &&
-		   contains(row, point) {return index}
-		row.y -= 30
-	}
-	return -1
 }
 
 format_file_size :: proc(bytes: i64) -> string {
@@ -1624,6 +1641,41 @@ fill_overlay_border :: proc(ctx: rawptr, rect: UI_Rect, color: [4]f64) {
 	fill_overlay_rect(ctx, UI_Rect{rect.x, rect.y + rect.h - 1, rect.w, 1}, color)
 	fill_overlay_rect(ctx, UI_Rect{rect.x, rect.y, 1, rect.h}, color)
 	fill_overlay_rect(ctx, UI_Rect{rect.x + rect.w - 1, rect.y, 1, rect.h}, color)
+}
+
+flash_badge_rect :: proc(target: flash.Target, label_length: int, view_width, view_height: f64) -> UI_Rect {
+	width := 16.0
+	if label_length > 1 {width = 24}
+	height := 18.0
+	rect := target.rect
+	x, y := rect.x + 2, rect.y + rect.h - height - 2
+	#partial switch target.anchor {
+	case .Top_Right:
+		x = rect.x + rect.w - width - 2
+	case .Bottom_Left:
+		y = rect.y + 2
+	case .Bottom_Right:
+		x, y = rect.x + rect.w - width - 2, rect.y + 2
+	case .Center:
+		x, y = rect.x + (rect.w - width) / 2, rect.y + (rect.h - height) / 2
+	}
+	x = min(max(x, 0), max(0, view_width - width))
+	y = min(max(y, 0), max(0, view_height - height))
+	return UI_Rect{x, y, width, height}
+}
+
+draw_flash_hints :: proc(ctx, font: rawptr) {
+	if !flash.is_active(&flash_state) {return}
+	background := [4]f64{0.96, 0.94, 0.85, 1}
+	foreground := [4]f64{0.025, 0.027, 0.026, 1}
+	border := [4]f64{0.02, 0.02, 0.02, 1}
+	for &hint in flash.visible_hints(&flash_state) {
+		badge := flash_badge_rect(hint.target, hint.label_length, ui.width, ui.height)
+		fill_overlay_rect(ctx, badge, background)
+		fill_overlay_border(ctx, badge, border)
+		label := string(hint.label[:hint.label_length])
+		draw_text_in_rect(ctx, font, label, badge, .Center, .Center, foreground)
+	}
 }
 
 draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
@@ -2710,6 +2762,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			ui.status_success ? success : muted,
 		)
 	}
+	draw_flash_hints(ctx, small_font)
 	return pixels
 }
 
@@ -2797,6 +2850,8 @@ add_ax_element :: proc(
 	kind: AX_Kind,
 	index: int = 0,
 	seconds: f64 = 0,
+	value: int = 0,
+	anchor: flash.Anchor = .Top_Left,
 ) {
 	element := msg_id(element_class, sel_registerName("new"))
 	msg_void_id(element, sel_registerName("setAccessibilityParent:"), ui.view)
@@ -2806,30 +2861,67 @@ add_ax_element :: proc(
 	msg_void_id(array, sel_registerName("addObject:"), element)
 	append(
 		&ax_actions,
-		AX_Action{element = element, kind = kind, index = index, seconds = seconds},
+		AX_Action{element = element, kind = kind, index = index, value = value, seconds = seconds},
+	)
+	append(
+		&interactive_targets,
+		Interactive_Target{
+			label = label,
+			role = role,
+			rect = rect,
+			anchor = anchor,
+			action = UI_Action{kind = kind, index = index, value = value, seconds = seconds},
+		},
 	)
 	msg_void(element, sel_registerName("release"))
 }
 
 rebuild_accessibility :: proc() {
 	clear(&ax_actions)
+	clear(&interactive_targets)
 	if ui.ax_children != nil {msg_void(ui.ax_children, sel_registerName("release"))}
 	array := msg_id(objc_getClass("NSMutableArray"), sel_registerName("array"))
 	ui.ax_children = msg_id(array, sel_registerName("retain"))
 	element_class := objc_getClass("VocalAccessibilityElement")
 	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
 		layout_rects()
+	if import_job != nil {
+		add_ax_element(array, element_class, "Stop download", "AXButton", import_cancel_rect(), .Stop_Download)
+		return
+	}
 	if ui.source_modal_open {
-		add_ax_element(array, element_class, "YouTube URLs", "AXTextField", import_field, .URL)
+		refetching := ui.source_modal_refetch_index >= 0
+		if ui.source_modal_refetch_index < 0 {
+			add_ax_element(array, element_class, "YouTube URLs", "AXTextField", import_field, .URL)
+		}
+		modal := source_modal_rect()
+		for result, result_index in source_probe_results {
+			if result_index >= 5 {break}
+			row := source_probe_row_rect(modal, result_index)
+			for height, option_index in result.heights {
+				quality := source_probe_quality_rect(row, option_index)
+				if quality.x + quality.w > row.x + row.w - 8 {break}
+				add_ax_element(
+					array,
+					element_class,
+					fmt.tprintf("Download %s at %dp", result.title, height),
+					"AXButton",
+					quality,
+					.Source_Quality,
+					result_index,
+					value = height,
+				)
+			}
+		}
 		add_ax_element(
 			array,
 			element_class,
-			"Cancel adding source",
+			refetching ? "Cancel refetch" : "Cancel adding source",
 			"AXButton",
-			source_modal_cancel_rect(source_modal_rect()),
+			source_modal_cancel_rect(modal),
 			.Cancel_Source_Modal,
 		)
-		add_ax_element(array, element_class, "Add source", "AXButton", import_button, .Import)
+		add_ax_element(array, element_class, refetching ? "Refetch source" : "Add source", "AXButton", import_button, .Import)
 		return
 	}
 	if ui.source_details_open {
@@ -2877,6 +2969,16 @@ rebuild_accessibility :: proc() {
 			if !source_matches_search(source, ui.source_search) {continue}
 			if row.y >= source_content.y && row.y + row.h <= source_content.y + source_content.h {
 				add_ax_element(array, element_class, source.title, "AXButton", row, .Source, index)
+				add_ax_element(
+					array,
+					element_class,
+					fmt.tprintf("Open details for %s", source.title),
+					"AXButton",
+					row,
+					.Open_Source_Details,
+					index,
+					anchor = .Top_Right,
+				)
 			}
 			row.y -= 30
 		}
@@ -3001,6 +3103,38 @@ rebuild_accessibility :: proc() {
 	}
 }
 
+cancel_ui_flash :: proc() {
+	if !flash.is_active(&flash_state) {return}
+	flash.cancel(&flash_state)
+	clear(&flash_actions)
+	ui.needs_redraw = true
+}
+
+begin_ui_flash :: proc() -> bool {
+	rebuild_accessibility()
+	clear(&flash_actions)
+	targets := make([]flash.Target, len(interactive_targets), context.temp_allocator)
+	for target, index in interactive_targets {
+		append(&flash_actions, target.action)
+		targets[index] = flash.Target{
+			id = flash.Target_ID(index + 1),
+			rect = flash.Rect{target.rect.x, target.rect.y, target.rect.w, target.rect.h},
+			anchor = target.anchor,
+		}
+	}
+	error := flash.begin(&flash_state, targets)
+	ui.needs_redraw = true
+	return error == .None && flash.is_active(&flash_state)
+}
+
+activate_flash_target :: proc(id: flash.Target_ID) -> bool {
+	index := int(id) - 1
+	if index < 0 || index >= len(flash_actions) {return false}
+	action := flash_actions[index]
+	clear(&flash_actions)
+	return activate_ui_action(action)
+}
+
 find_ax_action :: proc(element: Id) -> ^AX_Action {
 	for &action in ax_actions {
 		if action.element == element {return &action}
@@ -3008,11 +3142,7 @@ find_ax_action :: proc(element: Id) -> ^AX_Action {
 	return nil
 }
 
-on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
-	context = runtime.default_context()
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	action := find_ax_action(self)
-	if action == nil {return false}
+activate_ui_action :: proc(action: UI_Action) -> bool {
 	#partial switch action.kind {
 	case .Mode_Toggle:
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
@@ -3023,12 +3153,22 @@ on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 	case .Close_Source_Details:
 		close_source_details()
 	case .Refetch_Source_Details:
-		button := source_details_refetch_rect(source_details_rect())
-		dispatch_click(Point{button.x + button.w / 2, button.y + button.h / 2})
+		open_refetch_source_modal(ui.source_details_index)
+	case .Open_Source_Details:
+		open_source_details(action.index)
 	case .URL:
 		focus_text_input(.URL)
 	case .Import:
 		on_import(nil, nil, nil)
+	case .Source_Quality:
+		if action.index >= 0 && action.index < len(source_probe_results) {
+			source_probe_results[action.index].selected_height = action.value
+		}
+	case .Stop_Download:
+		if import_job != nil {
+			import_job_cancel(import_job)
+			set_text(state.status, "Stopping download...")
+		}
 	case .Source_Search:
 		focus_text_input(.Source_Search)
 	case .Transcript_Search:
@@ -3083,6 +3223,19 @@ on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
 	}
 	ui.needs_redraw = true
 	return true
+}
+
+on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	action := find_ax_action(self)
+	if action == nil {return false}
+	return activate_ui_action(UI_Action{
+		kind = action.kind,
+		index = action.index,
+		value = action.value,
+		seconds = action.seconds,
+	})
 }
 
 on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
@@ -3291,8 +3444,13 @@ ui_memory_destroy :: proc() {
 	delete(ui.marked_text)
 	delete(ui.transcript_matches)
 	delete(ax_actions)
+	delete(interactive_targets)
+	delete(flash_actions)
+	flash.state_destroy(&flash_state)
 	ui = {}
 	ax_actions = nil
+	interactive_targets = nil
+	flash_actions = nil
 }
 
 compile_pipelines :: proc() -> bool {
@@ -3595,36 +3753,30 @@ activate_control :: proc(index: int) {
 	}
 }
 
+activate_registered_target_at_point :: proc(point: Point) -> bool {
+	rebuild_accessibility()
+	for target in interactive_targets {
+		if contains(target.rect, point) {return activate_ui_action(target.action)}
+	}
+	return false
+}
+
 dispatch_click :: proc(point: Point) {
-	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
-		layout_rects()
-	if ui.has_marked_text {
-		ui_set_string(&ui.marked_text, "")
-		ui.has_marked_text = false
-	}
-	if import_job != nil && contains(import_cancel_rect(), point) {
-		import_job_cancel(import_job)
-		set_text(state.status, "Stopping download...")
-		return
-	}
+	cancel_ui_flash()
+	_, _, source_search, _, player, transcript, exercise_search, _, exercise_name, _ := layout_rects()
+	clear_marked_text()
 	if ui.source_details_open {
 		modal := source_details_rect()
-		if contains(source_details_close_rect(modal), point) || !contains(modal, point) {close_source_details(); return}
-		if contains(source_details_refetch_rect(modal), point) {
-			source_index := ui.source_details_index
-			if source_index >= 0 && source_index < len(state.sources) {
-				open_refetch_source_modal(source_index)
-			}
-			return
-		}
+		if !contains(modal, point) {close_source_details(); return}
+		_ = activate_registered_target_at_point(point)
 		return
 	}
 	if ui.source_modal_open {
 		modal := source_modal_rect()
-		if contains(source_modal_input_rect(modal), point) {
+		input := source_modal_input_rect(modal)
+		if contains(input, point) {
 			if ui.source_modal_refetch_index < 0 {
 				focus_text_input(.URL)
-				input := source_modal_input_rect(modal)
 				lines := strings.split_lines(ui.url_input)
 				caret_line := 0
 				for index in 0 ..< min(ui.caret_byte_offset, len(ui.url_input)) {if ui.url_input[index] == '\n' {caret_line += 1}}
@@ -3632,27 +3784,12 @@ dispatch_click :: proc(point: Point) {
 				clicked_line := first_line + int(max(0, min(f64(len(lines) - first_line - 1), (input.y + input.h - 19 - point.y) / 23)))
 				line_start := 0
 				for index in 0 ..< clicked_line {line_start += len(lines[index]) + 1}
-				line := lines[clicked_line]
-				place_caret_in_text_field(fmt.tprintf("$ %s", line), UI_Rect{input.x + 12, input.y, input.w - 24, input.h}, point, 0, line_start, 2)
+				place_caret_in_text_field(fmt.tprintf("$ %s", lines[clicked_line]), UI_Rect{input.x + 12, input.y, input.w - 24, input.h}, point, 0, line_start, 2)
 			}
 			return
 		}
-		for &result, result_index in source_probe_results {
-			if result_index >= 5 {break}
-			row := source_probe_row_rect(modal, result_index)
-			for height, option_index in result.heights {
-				quality := source_probe_quality_rect(row, option_index)
-				if quality.x + quality.w > row.x + row.w - 8 {break}
-				if contains(quality, point) {result.selected_height = height; ui.needs_redraw = true; return}
-			}
-		}
-		if contains(source_modal_cancel_rect(modal), point) {close_source_modal(); return}
-		if contains(source_modal_confirm_rect(modal), point) {on_import(nil, nil, nil); return}
-		if !contains(modal, point) {close_source_modal()}
-		return
-	}
-	if contains(mode_button_rect(), point) {
-		set_ui_mode(ui.mode == .Create ? .Play : .Create)
+		if !contains(modal, point) {close_source_modal(); return}
+		_ = activate_registered_target_at_point(point)
 		return
 	}
 	if ui.mode == .Create && contains(source_search, point) {focus_text_input(.Source_Search); place_caret_in_text_field(ui.source_search, source_search, point); return}
@@ -3660,91 +3797,19 @@ dispatch_click :: proc(point: Point) {
 	if ui.mode == .Play && contains(exercise_search, point) {focus_text_input(.Exercise_Search); place_caret_in_text_field(ui.exercise_search, exercise_search, point); return}
 	if ui.mode == .Create && contains(exercise_name, point) {focus_text_input(.Exercise_Name); place_caret_in_text_field(ui.exercise_name, exercise_name, point); return}
 	ui.focus = .None
-	if ui.mode == .Create &&
-	   contains(source_add_button_rect(source_panel), point) {open_source_modal(); return}
-	if ui.mode == .Create && state.player != nil {
-		hint_count := source_hint_count(state.active_source)
-		hint_control := source_hint_control(hint_count)
-		if ui.source_hint_menu_open {
-			values := source_hint_values(state.active_source, context.temp_allocator)
-			for seconds, option_index in values {
-				if contains(source_hint_option_rect(player, option_index, len(values)), point) {
-					ui.source_hint_menu_open = false
-					_ = select_source_hint(state.active_source, seconds)
-					return
-				}
-			}
-			if !contains(source_reset_rect(player), point) {ui.source_hint_menu_open = false}
-		}
-		if contains(source_timeline_rect(player), point) {
-			ui.source_scrubbing = true
-			seek_source_timeline(point, player)
-			return
-		}
-		if contains(source_play_pause_rect(player), point) {on_toggle_playback(nil, nil, nil); return}
-		if contains(source_stop_rect(player), point) {stop_source_playback(); return}
-		if hint_control == .Reset && contains(source_reset_rect(player), point) {reset_source_playback(); return}
-		if hint_control == .Menu && contains(source_reset_rect(player), point) {ui.source_hint_menu_open = !ui.source_hint_menu_open; ui.needs_redraw = true; return}
-		if contains(source_speed_down_rect(player), point) {adjust_playback_rate(-0.1); return}
-		if contains(source_speed_up_rect(player), point) {adjust_playback_rate(0.1); return}
-		if contains(source_volume_down_rect(player), point) {adjust_player_volume(-0.1); return}
-		if contains(source_volume_up_rect(player), point) {adjust_player_volume(0.1); return}
+	if ui.mode == .Create && state.player != nil && contains(source_timeline_rect(player), point) {
+		ui.source_scrubbing = true
+		seek_source_timeline(point, player)
+		return
 	}
-	if contains(player, point) {on_toggle_playback(nil, nil, nil); return}
-
-	if ui.mode == .Create {
-		if source_index := source_index_at_point(point, source_search, source_panel); source_index >= 0 {
-			ui_event_tag = source_index
-			on_select_source(nil, nil, nil)
-			return
-		}
-		transcript_content := transcript_content_rect(transcript)
-		row := UI_Rect {
-			transcript_content.x,
-			transcript_content.y + transcript_content.h - 25 + ui.transcript_scroll,
-			transcript_content.w,
-			25,
-		}
-		ensure_transcript_matches()
-		for segment_index in ui.transcript_matches {
-			segment := state.transcripts.segments[segment_index]
-			if row.y >= transcript_content.y &&
-				   row.y + row.h <= transcript_content.y + transcript_content.h &&
-				   contains(row, point) {
-					seek_seconds(segment.start_seconds)
-					return
-				}
-			row.y -= 26
-		}
+	if ui.source_hint_menu_open && !contains(source_reset_rect(player), point) {
+		values := source_hint_values(state.active_source, context.temp_allocator)
+		inside_option := false
+		for _, index in values {if contains(source_hint_option_rect(player, index, len(values)), point) {inside_option = true; break}}
+		if !inside_option {ui.source_hint_menu_open = false}
 	}
-	if ui.mode == .Play {
-		exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
-		row := UI_Rect {
-			exercise_content.x,
-			exercise_content.y + exercise_content.h - 29 + ui.exercise_scroll,
-			exercise_content.w,
-			29,
-		}
-		for exercise, index in state.exercises {
-			if len(ui.exercise_search) > 0 &&
-			   !strings.contains(exercise.name, ui.exercise_search) {continue}
-			if row.y >= exercise_content.y &&
-			   row.y + row.h <= exercise_content.y + exercise_content.h &&
-			   contains(row, point) {
-				ui_event_tag = index
-				on_play_exercise(nil, nil, nil)
-				return
-			}
-			row.y -= 30
-		}
-	}
-	for index in 0 ..< 8 {
-		rect := control_rect(controls, index)
-		if rect.w > 0 && contains(rect, point) {
-			activate_control(index)
-			return
-		}
-	}
+	if activate_registered_target_at_point(point) {return}
+	if contains(player, point) {on_toggle_playback(nil, nil, nil)}
 }
 
 on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
@@ -3774,14 +3839,18 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	cancel_ui_flash()
 	if ui.source_modal_open || ui.source_details_open || ui.mode != .Create { return }
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
-	_, _, source_search, source_panel, _, _, _, _, _, _ := layout_rects()
-	source_index := source_index_at_point(point, source_search, source_panel)
-	if source_index < 0 { return }
 	ui.mouse = point
-	open_source_details(source_index)
+	rebuild_accessibility()
+	for target in interactive_targets {
+		if target.action.kind == .Open_Source_Details && contains(target.rect, point) {
+			_ = activate_ui_action(target.action)
+			break
+		}
+	}
 	ui.needs_redraw = true
 }
 
@@ -3819,6 +3888,7 @@ on_metal_mouse_up :: proc "c" (self: Id, command: Sel, event: Id) {
 on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	cancel_ui_flash()
 	if ui.source_modal_open || ui.source_details_open {return}
 	delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
@@ -3965,6 +4035,24 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	key := msg_uint(event, sel_registerName("keyCode"))
 	modifiers := msg_uint(event, sel_registerName("modifierFlags"))
+	characters := msg_id(event, sel_registerName("characters"))
+	event_text, has_event_text := text_input_string(characters)
+	if flash.is_active(&flash_state) {
+		if key == 53 {
+			cancel_ui_flash()
+			return
+		}
+		value := u8(0)
+		if has_event_text && len(event_text) == 1 {value = event_text[0]}
+		result := flash.consume(&flash_state, value)
+		ui.needs_redraw = true
+		if result.kind == .Activated {_ = activate_flash_target(result.target_id)}
+		return
+	}
+	if has_event_text && flash_leader_allowed(ui.focus, modifiers, event_text) {
+		_ = begin_ui_flash()
+		return
+	}
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
 	if ui.source_details_open && key == 53 {close_source_details(); return}
 	if is_paste_shortcut(key, modifiers) {
@@ -4088,6 +4176,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	   msg_f32(state.player, sel_registerName("rate")) > 0 {ui.needs_redraw = true}
 	frame := msg_rect(ui.view, sel_registerName("bounds"))
 	if ui.width != frame.size.width || ui.height != frame.size.height {
+		cancel_ui_flash()
 		ui.width, ui.height = frame.size.width, frame.size.height
 		ui.needs_redraw = true
 	}
@@ -4281,6 +4370,7 @@ build_metal_window :: proc() {
 	ui.active_exercise = -1
 	ui.transcript_matches_dirty = true
 	ui.needs_redraw = true
+	flash.state_init(&flash_state)
 
 	frame := Rect{Point{120, 100}, Size{1100, 720}}
 	state.window = msg_id_rect_u_u_b(

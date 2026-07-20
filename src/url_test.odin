@@ -5,6 +5,7 @@ import "core:encoding/json"
 import "core:os"
 import "core:strings"
 import mem_virtual "core:mem/virtual"
+import flash "flash:."
 import match_sorter "match_sorter:."
 
 @(test)
@@ -1004,4 +1005,46 @@ source_search_matches_title_and_video_id_without_case_test :: proc(t: ^testing.T
 	testing.expect(t, source_matches_search(source, "APPOGGIO"))
 	testing.expect(t, source_matches_search(source, "abc123"))
 	testing.expect(t, !source_matches_search(source, "falsetto"))
+}
+
+@(test)
+flash_leader_starts_only_without_text_focus_test :: proc(t: ^testing.T) {
+	testing.expect(t, flash_leader_allowed(.None, 0, "/"))
+	testing.expect(t, !flash_leader_allowed(.Source_Search, 0, "/"))
+	testing.expect(t, !flash_leader_allowed(.None, NSEventModifierFlagCommand, "/"))
+	testing.expect(t, !flash_leader_allowed(.None, NSEventModifierFlagOption, "/"))
+	testing.expect(t, !flash_leader_allowed(.None, 0, "a"))
+}
+
+@(test)
+flash_badges_use_opposite_anchors_for_shared_targets_test :: proc(t: ^testing.T) {
+	target_rect := flash.Rect{10, 20, 100, 30}
+	left := flash_badge_rect(
+		flash.Target{rect = target_rect, anchor = .Top_Left},
+		2,
+		200,
+		100,
+	)
+	right := flash_badge_rect(
+		flash.Target{rect = target_rect, anchor = .Top_Right},
+		2,
+		200,
+		100,
+	)
+	testing.expect(t, left.x < right.x)
+	testing.expect_value(t, left.y, right.y)
+	testing.expect_value(t, left.w, 24.0)
+}
+
+@(test)
+flash_badges_clamp_to_the_view_test :: proc(t: ^testing.T) {
+	badge := flash_badge_rect(
+		flash.Target{rect = {-20, -10, 8, 8}, anchor = .Bottom_Left},
+		1,
+		100,
+		100,
+	)
+	testing.expect_value(t, badge.x, 0.0)
+	testing.expect_value(t, badge.y, 0.0)
+	testing.expect_value(t, badge.w, 16.0)
 }
