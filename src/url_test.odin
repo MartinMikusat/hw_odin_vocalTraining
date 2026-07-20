@@ -978,6 +978,24 @@ text_input_ranges_count_utf16_code_units_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, utf16_index_for_byte_offset("abc", len("abc")), 3)
 	testing.expect_value(t, utf16_index_for_byte_offset("café", len("café")), 4)
 	testing.expect_value(t, utf16_index_for_byte_offset("A😀B", len("A😀B")), 4)
+	testing.expect_value(t, byte_offset_for_utf16_index("A😀B", 3), len("A😀"))
+}
+
+@(test)
+text_caret_offsets_follow_utf8_character_boundaries_test :: proc(t: ^testing.T) {
+	text := "A😀B"
+	testing.expect_value(t, next_character_offset(text, 1), len("A😀"))
+	testing.expect_value(t, previous_character_offset(text, len("A😀")), 1)
+	testing.expect_value(t, next_character_offset(text, len(text)), len(text))
+	testing.expect_value(t, previous_character_offset(text, 0), 0)
+}
+
+@(test)
+text_caret_line_boundaries_test :: proc(t: ^testing.T) {
+	text := "first\nsecond\nthird"
+	offset := strings.index(text, "cond")
+	testing.expect_value(t, line_start_for_offset(text, offset), len("first\n"))
+	testing.expect_value(t, line_end_for_offset(text, offset), len("first\nsecond"))
 }
 
 @(test)

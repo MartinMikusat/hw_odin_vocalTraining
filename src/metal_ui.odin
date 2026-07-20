@@ -34,6 +34,7 @@ foreign core_text {
 	CTLineCreateTruncatedLine :: proc "c" (line: rawptr, width: f64, truncation_type: u32, token: rawptr) -> rawptr ---
 	CTLineGetTypographicBounds :: proc "c" (line: rawptr, ascent, descent, leading: ^f64) -> f64 ---
 	CTLineGetOffsetForStringIndex :: proc "c" (line: rawptr, index: int, secondary_offset: ^f64) -> f64 ---
+	CTLineGetStringIndexForPosition :: proc "c" (line: rawptr, position: Point) -> int ---
 	CTLineGetGlyphRuns :: proc "c" (line: rawptr) -> rawptr ---
 	CTLineDraw :: proc "c" (line, ctx: rawptr) ---
 	CTRunGetGlyphCount :: proc "c" (run: rawptr) -> int ---
@@ -119,6 +120,9 @@ UI_State :: struct {
 	scale:              f64,
 	mouse:              Point,
 	focus:              UI_Focus,
+	caret_byte_offset:  int,
+	marked_start_byte:  int,
+	text_scroll_x:      f64,
 	mode:               UI_Mode,
 	source_modal_open:  bool,
 	source_modal_refetch_index: int,
@@ -450,6 +454,104 @@ append_text :: proc(target: ^string, value: string) {
 	ui_set_string(target, updated)
 }
 
+previous_character_offset :: proc(text: string, offset: int) -> int {
+	if offset <= 0 {return 0}
+	index := min(offset, len(text)) - 1
+	for index > 0 && (text[index] & 0xc0) == 0x80 {index -= 1}
+	return index
+}
+
+next_character_offset :: proc(text: string, offset: int) -> int {
+	if offset >= len(text) {return len(text)}
+	index := max(0, offset) + 1
+	for index < len(text) && (text[index] & 0xc0) == 0x80 {index += 1}
+	return index
+}
+
+byte_offset_for_utf16_index :: proc(text: string, target_index: int) -> int {
+	byte_index, utf16_index := 0, 0
+	for byte_index < len(text) && utf16_index < target_index {
+		first := text[byte_index]
+		byte_count, utf16_count := 1, 1
+		if first & 0xf8 == 0xf0 {byte_count, utf16_count = 4, 2}
+		else if first & 0xf0 == 0xe0 {byte_count = 3}
+		else if first & 0xe0 == 0xc0 {byte_count = 2}
+		if utf16_index + utf16_count > target_index {break}
+		byte_index += byte_count
+		utf16_index += utf16_count
+	}
+	return byte_index
+}
+
+insert_text_at_caret :: proc(target: ^string, value: string) {
+	caret := min(max(ui.caret_byte_offset, 0), len(target^))
+	updated := fmt.tprintf("%s%s%s", target^[:caret], value, target^[caret:])
+	ui_set_string(target, updated)
+	ui.caret_byte_offset = caret + len(value)
+}
+
+remove_character_before_caret :: proc(target: ^string) {
+	caret := min(max(ui.caret_byte_offset, 0), len(target^))
+	start := previous_character_offset(target^, caret)
+	if start == caret {return}
+	updated := fmt.tprintf("%s%s", target^[:start], target^[caret:])
+	ui_set_string(target, updated)
+	ui.caret_byte_offset = start
+}
+
+remove_character_after_caret :: proc(target: ^string) {
+	caret := min(max(ui.caret_byte_offset, 0), len(target^))
+	end := next_character_offset(target^, caret)
+	if end == caret {return}
+	updated := fmt.tprintf("%s%s", target^[:caret], target^[end:])
+	ui_set_string(target, updated)
+}
+
+remove_word_before_caret :: proc(target: ^string) {
+	caret := min(max(ui.caret_byte_offset, 0), len(target^))
+	start := caret
+	for start > 0 {
+		previous := previous_character_offset(target^, start)
+		if !is_word_delimiter(target^[previous]) {break}
+		start = previous
+	}
+	for start > 0 {
+		previous := previous_character_offset(target^, start)
+		if is_word_delimiter(target^[previous]) {break}
+		start = previous
+	}
+	updated := fmt.tprintf("%s%s", target^[:start], target^[caret:])
+	ui_set_string(target, updated)
+	ui.caret_byte_offset = start
+}
+
+line_start_for_offset :: proc(text: string, offset: int) -> int {
+	index := min(max(offset, 0), len(text))
+	for index > 0 && text[index - 1] != '\n' {index -= 1}
+	return index
+}
+
+line_end_for_offset :: proc(text: string, offset: int) -> int {
+	index := min(max(offset, 0), len(text))
+	for index < len(text) && text[index] != '\n' {index += 1}
+	return index
+}
+
+clear_marked_text :: proc() {
+	ui_set_string(&ui.marked_text, "")
+	ui.has_marked_text = false
+}
+
+remove_marked_text :: proc(target: ^string) {
+	if !ui.has_marked_text {return}
+	start := min(max(ui.marked_start_byte, 0), len(target^))
+	end := min(start + len(ui.marked_text), len(target^))
+	updated := fmt.tprintf("%s%s", target^[:start], target^[end:])
+	ui_set_string(target, updated)
+	ui.caret_byte_offset = start
+	clear_marked_text()
+}
+
 remove_last_character :: proc(target: ^string) {
 	if len(target^) == 0 {return}
 	index := len(target^) - 1
@@ -496,7 +598,12 @@ focused_text_changed :: proc(target: ^string) {
 }
 
 focus_text_input :: proc(focus: UI_Focus) {
+	changed := ui.focus != focus
 	ui.focus = focus
+	if changed {
+		if target := focused_text(); target != nil {ui.caret_byte_offset = len(target^)}
+		ui.text_scroll_x = 0
+	}
 	if state.window != nil && ui.view != nil {
 		msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
 	}
@@ -1338,6 +1445,61 @@ draw_text_in_rect :: proc(
 	delete_text_run(&truncated)
 }
 
+draw_editable_text_field :: proc(
+	ctx, font: rawptr,
+	text, placeholder: string,
+	rect: UI_Rect,
+	focus: UI_Focus,
+	text_color, placeholder_color, caret_color: [4]f64,
+	inset := 8.0,
+) {
+	if ui.focus != focus {
+		value := text
+		color := text_color
+		if len(value) == 0 {value, color = placeholder, placeholder_color}
+		draw_text_in_rect(ctx, font, value, rect, .Start, .Center, color, inset)
+		return
+	}
+	run_text := text
+	if len(run_text) == 0 {run_text = " "}
+	run := make_text_run(font, run_text)
+	defer delete_text_run(&run)
+	if run.line == nil {return}
+	caret := min(max(ui.caret_byte_offset, 0), len(text))
+	caret_utf16 := utf16_index_for_byte_offset(text, caret)
+	caret_advance := CTLineGetOffsetForStringIndex(run.line, caret_utf16, nil) / ui.scale
+	available := max(0, rect.w - inset * 2)
+	if caret_advance - ui.text_scroll_x > available {ui.text_scroll_x = caret_advance - available}
+	if caret_advance - ui.text_scroll_x < 0 {ui.text_scroll_x = caret_advance}
+	origin := text_origin(rect, run, .Start, .Center, inset)
+	origin.x -= ui.text_scroll_x * ui.scale
+	CGContextSaveGState(ctx)
+	CGContextClipToRect(ctx, Rect{Point{rect.x * ui.scale, rect.y * ui.scale}, Size{rect.w * ui.scale, rect.h * ui.scale}})
+	if len(text) > 0 {draw_text_run(ctx, run, origin, text_color)}
+	caret_x := rect.x + inset + caret_advance - ui.text_scroll_x
+	fill_overlay_rect(ctx, UI_Rect{caret_x, rect.y + 5, max(1 / ui.scale, 0.5), max(1, rect.h - 10)}, caret_color)
+	CGContextRestoreGState(ctx)
+}
+
+place_caret_in_text_field :: proc(text: string, rect: UI_Rect, point: Point, inset := 8.0, base_byte_offset := 0, prefix_bytes := 0) {
+	if len(text) == 0 {ui.caret_byte_offset = base_byte_offset; return}
+	font_name := CFStringCreateWithCString(nil, "BerkeleyMonoVariable-Regular", 0x08000100)
+	if font_name == nil {return}
+	font := CTFontCreateWithName(font_name, SMALL_FONT_SIZE * ui.scale, nil)
+	CFRelease(font_name)
+	if font == nil {return}
+	defer CFRelease(font)
+	run := make_text_run(font, text)
+	defer delete_text_run(&run)
+	if run.line == nil {return}
+	x := max(0, (point.x - rect.x - inset + ui.text_scroll_x) * ui.scale)
+	utf16_index := CTLineGetStringIndexForPosition(run.line, Point{x, 0})
+	if utf16_index < 0 {utf16_index = utf16_index_for_byte_offset(text, len(text))}
+	byte_offset := byte_offset_for_utf16_index(text, utf16_index)
+	ui.caret_byte_offset = base_byte_offset + max(0, byte_offset - prefix_bytes)
+	ui.needs_redraw = true
+}
+
 utf16_index_for_byte_offset :: proc(text: string, byte_offset: int) -> int {
 	byte_index, utf16_index := 0, 0
 	for byte_index < byte_offset {
@@ -1901,46 +2063,11 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	)
 
 	if ui.mode == .Create {
-		source_text := ui.source_search
-		if len(source_text) == 0 {source_text = "/ filter source register"}
-		draw_text_in_rect(ctx, small_font, source_text, source_search, .Start, .Center, dim, 8)
-		transcript_search_text := ui.transcript_search
-		if len(transcript_search_text) == 0 {transcript_search_text = "/ search timed transcript"}
-		draw_text_in_rect(
-			ctx,
-			small_font,
-			transcript_search_text,
-			transcript_search_rect(transcript),
-			.Start,
-			.Center,
-			len(ui.transcript_search) > 0 ? ink : dim,
-			8,
-		)
-		exercise_name_text := ui.exercise_name
-		if len(exercise_name_text) == 0 {exercise_name_text = "NAME / optional designation"}
-		draw_text_in_rect(
-			ctx,
-			small_font,
-			exercise_name_text,
-			exercise_name,
-			.Start,
-			.Center,
-			len(ui.exercise_name) > 0 ? ink : dim,
-			8,
-		)
+		draw_editable_text_field(ctx, small_font, ui.source_search, "/ filter source register", source_search, .Source_Search, ink, dim, orange)
+		draw_editable_text_field(ctx, small_font, ui.transcript_search, "/ search timed transcript", transcript_search_rect(transcript), .Transcript_Search, ink, dim, orange)
+		draw_editable_text_field(ctx, small_font, ui.exercise_name, "NAME / optional designation", exercise_name, .Exercise_Name, ink, dim, orange)
 	} else {
-		exercise_search_text := ui.exercise_search
-		if len(exercise_search_text) == 0 {exercise_search_text = "/ filter exercise library"}
-		draw_text_in_rect(
-			ctx,
-			small_font,
-			exercise_search_text,
-			exercise_search,
-			.Start,
-			.Center,
-			dim,
-			8,
-		)
+		draw_editable_text_field(ctx, small_font, ui.exercise_search, "/ filter exercise library", exercise_search, .Exercise_Search, ink, dim, orange)
 	}
 
 	if ui.mode == .Create {
@@ -2504,17 +2631,25 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		} else {
 			line_y := input.y + input.h - 30
 			lines := strings.split_lines(ui.url_input)
-			first_line := max(0, len(lines) - 10)
-			for line in lines[first_line:] {
-				draw_text_in_rect(
-					ctx,
-					small_font,
-					fmt.tprintf("$ %s", line),
-					UI_Rect{input.x + 12, line_y, input.w - 24, 22},
-					.Start,
-					.Center,
-					ink,
-				)
+			caret_line, line_start := 0, 0
+			for index in 0 ..< min(ui.caret_byte_offset, len(ui.url_input)) {
+				if ui.url_input[index] == '\n' {caret_line += 1; line_start = index + 1}
+			}
+			first_line := min(max(0, caret_line - 9), max(0, len(lines) - 10))
+			visible_line_start := 0
+			for index in 0 ..< first_line {visible_line_start += len(lines[index]) + 1}
+			for line, visible_index in lines[first_line:] {
+				field := UI_Rect{input.x + 12, line_y, input.w - 24, 22}
+				line_index := first_line + visible_index
+				if ui.focus == .URL && line_index == caret_line {
+					saved_caret := ui.caret_byte_offset
+					ui.caret_byte_offset = 2 + saved_caret - line_start
+					draw_editable_text_field(ctx, small_font, fmt.tprintf("$ %s", line), "", field, .URL, ink, dim, orange, 0)
+					ui.caret_byte_offset = saved_caret
+				} else {
+					draw_text_in_rect(ctx, small_font, fmt.tprintf("$ %s", line), field, .Start, .Center, ink)
+				}
+				visible_line_start += len(line) + 1
 				line_y -= 23
 			}
 		}
@@ -3487,7 +3622,19 @@ dispatch_click :: proc(point: Point) {
 	if ui.source_modal_open {
 		modal := source_modal_rect()
 		if contains(source_modal_input_rect(modal), point) {
-			if ui.source_modal_refetch_index < 0 {ui.focus = .URL}
+			if ui.source_modal_refetch_index < 0 {
+				focus_text_input(.URL)
+				input := source_modal_input_rect(modal)
+				lines := strings.split_lines(ui.url_input)
+				caret_line := 0
+				for index in 0 ..< min(ui.caret_byte_offset, len(ui.url_input)) {if ui.url_input[index] == '\n' {caret_line += 1}}
+				first_line := min(max(0, caret_line - 9), max(0, len(lines) - 10))
+				clicked_line := first_line + int(max(0, min(f64(len(lines) - first_line - 1), (input.y + input.h - 19 - point.y) / 23)))
+				line_start := 0
+				for index in 0 ..< clicked_line {line_start += len(lines[index]) + 1}
+				line := lines[clicked_line]
+				place_caret_in_text_field(fmt.tprintf("$ %s", line), UI_Rect{input.x + 12, input.y, input.w - 24, input.h}, point, 0, line_start, 2)
+			}
 			return
 		}
 		for &result, result_index in source_probe_results {
@@ -3508,10 +3655,10 @@ dispatch_click :: proc(point: Point) {
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 		return
 	}
-	if ui.mode == .Create && contains(source_search, point) {focus_text_input(.Source_Search); return}
-	if ui.mode == .Create && contains(transcript_search_rect(transcript), point) {focus_text_input(.Transcript_Search); return}
-	if ui.mode == .Play && contains(exercise_search, point) {focus_text_input(.Exercise_Search); return}
-	if ui.mode == .Create && contains(exercise_name, point) {focus_text_input(.Exercise_Name); return}
+	if ui.mode == .Create && contains(source_search, point) {focus_text_input(.Source_Search); place_caret_in_text_field(ui.source_search, source_search, point); return}
+	if ui.mode == .Create && contains(transcript_search_rect(transcript), point) {field := transcript_search_rect(transcript); focus_text_input(.Transcript_Search); place_caret_in_text_field(ui.transcript_search, field, point); return}
+	if ui.mode == .Play && contains(exercise_search, point) {focus_text_input(.Exercise_Search); place_caret_in_text_field(ui.exercise_search, exercise_search, point); return}
+	if ui.mode == .Create && contains(exercise_name, point) {focus_text_input(.Exercise_Name); place_caret_in_text_field(ui.exercise_name, exercise_name, point); return}
 	ui.focus = .None
 	if ui.mode == .Create &&
 	   contains(source_add_button_rect(source_panel), point) {open_source_modal(); return}
@@ -3741,13 +3888,10 @@ on_metal_insert_text :: proc "c" (self: Id, command: Sel, value: Id, replacement
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	target := focused_text()
 	if target == nil {return}
-	if ui.has_marked_text && len(ui.marked_text) <= len(target^) {
-		ui_set_string(target, target^[:len(target^) - len(ui.marked_text)])
-	}
-	if text, ok := text_input_string(value); ok && text_event_is_insertable(text) {append_text(target, text)}
+	remove_marked_text(target)
+	if text, ok := text_input_string(value); ok && text_event_is_insertable(text) {insert_text_at_caret(target, text)}
 	focused_text_changed(target)
-	ui_set_string(&ui.marked_text, "")
-	ui.has_marked_text = false
+	clear_marked_text()
 	ui.needs_redraw = true
 }
 
@@ -3766,7 +3910,8 @@ on_metal_paste :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if value == nil {return}
 	utf8 := msg_id(value, sel_registerName("UTF8String"))
 	if utf8 == nil {return}
-	append_text(target, string(cstring(utf8)))
+	remove_marked_text(target)
+	insert_text_at_caret(target, string(cstring(utf8)))
 	if target == &ui.url_input {schedule_source_probe(1)} else {focused_text_changed(target)}
 	ui.needs_redraw = true
 }
@@ -3776,14 +3921,24 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	target := focused_text()
 	if selector == sel_registerName("deleteBackward:") {
-		if target != nil {remove_last_character(target); focused_text_changed(target)}
+		if target != nil {remove_marked_text(target); remove_character_before_caret(target); focused_text_changed(target)}
+	} else if selector == sel_registerName("deleteForward:") {
+		if target != nil {remove_marked_text(target); remove_character_after_caret(target); focused_text_changed(target)}
 	} else if selector == sel_registerName("deleteWordBackward:") {
-		if target != nil {remove_last_word(target); focused_text_changed(target)}
+		if target != nil {remove_marked_text(target); remove_word_before_caret(target); focused_text_changed(target)}
+	} else if selector == sel_registerName("moveLeft:") {
+		if target != nil {clear_marked_text(); ui.caret_byte_offset = previous_character_offset(target^, ui.caret_byte_offset)}
+	} else if selector == sel_registerName("moveRight:") {
+		if target != nil {clear_marked_text(); ui.caret_byte_offset = next_character_offset(target^, ui.caret_byte_offset)}
+	} else if selector == sel_registerName("moveToBeginningOfLine:") {
+		if target != nil {clear_marked_text(); ui.caret_byte_offset = line_start_for_offset(target^, ui.caret_byte_offset)}
+	} else if selector == sel_registerName("moveToEndOfLine:") {
+		if target != nil {clear_marked_text(); ui.caret_byte_offset = line_end_for_offset(target^, ui.caret_byte_offset)}
 	} else if selector == sel_registerName("paste:") {
 		on_metal_paste(self, selector, nil)
 	} else if selector == sel_registerName("insertNewline:") {
 		if ui.focus ==
-		   .URL {append_text(&ui.url_input, "\n"); schedule_source_probe(1)} else if ui.focus == .Source_Search || ui.focus == .Transcript_Search || ui.focus == .Exercise_Search {ui.focus = .None} else if ui.focus == .Exercise_Name {ui.focus = .None}
+		   .URL {insert_text_at_caret(&ui.url_input, "\n"); schedule_source_probe(1)} else if ui.focus == .Source_Search || ui.focus == .Transcript_Search || ui.focus == .Exercise_Search {ui.focus = .None} else if ui.focus == .Exercise_Name {ui.focus = .None}
 	} else if selector == sel_registerName("insertTab:") {
 		if ui.source_modal_open {
 			ui.focus = .URL
@@ -3820,15 +3975,14 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		#partial switch dispose_focused_text_key(key, modifiers) {
 		case .Delete_Word:
 			if target := focused_text(); target != nil {
-				remove_last_word(target)
+				remove_marked_text(target)
+				remove_word_before_caret(target)
 				focused_text_changed(target)
 				ui.needs_redraw = true
 			}
 			return
 		case .Interpret:
-			// Backspace, Return, Tab, arrows, Command shortcuts, and IME input
-			// go through interpretKeyEvents and NSTextInputClient. These fields
-			// have no caret, so Forward Delete is intentionally unhandled.
+			// AppKit translates editing keys and IME input into NSTextInputClient commands.
 		}
 	}
 	if ui.focus == .None {
@@ -3857,13 +4011,12 @@ on_metal_set_marked :: proc "c" (
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	target := focused_text()
 	if target == nil {return}
-	if ui.has_marked_text && len(ui.marked_text) <= len(target^) {
-		ui_set_string(target, target^[:len(target^) - len(ui.marked_text)])
-	}
+	remove_marked_text(target)
 	text, ok := text_input_string(value)
 	if !ok {return}
 	ui_set_string(&ui.marked_text, text)
-	append_text(target, ui.marked_text)
+	ui.marked_start_byte = ui.caret_byte_offset
+	insert_text_at_caret(target, ui.marked_text)
 	focused_text_changed(target)
 	ui.has_marked_text = true
 	ui.needs_redraw = true
@@ -3872,8 +4025,7 @@ on_metal_set_marked :: proc "c" (
 on_metal_unmark :: proc "c" (self: Id, command: Sel) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	ui_set_string(&ui.marked_text, "")
-	ui.has_marked_text = false
+	clear_marked_text()
 }
 on_metal_has_marked :: proc "c" (self: Id, command: Sel) -> bool {return ui.has_marked_text}
 on_metal_range :: proc "c" (self: Id, command: Sel) -> NS_Range {
@@ -3883,11 +4035,11 @@ on_metal_range :: proc "c" (self: Id, command: Sel) -> NS_Range {
 	if target == nil {return NS_Range{~uint(0), 0}}
 	if command == sel_registerName("markedRange") {
 		if !ui.has_marked_text {return NS_Range{~uint(0), 0}}
-		total := utf16_index_for_byte_offset(target^, len(target^))
+		total := utf16_index_for_byte_offset(target^, ui.marked_start_byte)
 		marked := utf16_index_for_byte_offset(ui.marked_text, len(ui.marked_text))
-		return NS_Range{uint(max(0, total - marked)), uint(marked)}
+		return NS_Range{uint(total), uint(marked)}
 	}
-	return NS_Range{uint(utf16_index_for_byte_offset(target^, len(target^))), 0}
+	return NS_Range{uint(utf16_index_for_byte_offset(target^, ui.caret_byte_offset)), 0}
 }
 on_metal_valid_attributes :: proc "c" (self: Id, command: Sel) -> Id {
 	context = runtime.default_context()
