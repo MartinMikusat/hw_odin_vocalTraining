@@ -1017,6 +1017,16 @@ flash_leader_starts_only_without_text_focus_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+escape_unfocuses_each_text_input_kind_test :: proc(t: ^testing.T) {
+	testing.expect(t, !escape_should_unfocus(.None))
+	testing.expect(t, escape_should_unfocus(.URL))
+	testing.expect(t, escape_should_unfocus(.Source_Search))
+	testing.expect(t, escape_should_unfocus(.Transcript_Search))
+	testing.expect(t, escape_should_unfocus(.Exercise_Search))
+	testing.expect(t, escape_should_unfocus(.Exercise_Name))
+}
+
+@(test)
 flash_badges_use_opposite_anchors_for_shared_targets_test :: proc(t: ^testing.T) {
 	target_rect := flash.Rect{10, 20, 100, 30}
 	left := flash_badge_rect(

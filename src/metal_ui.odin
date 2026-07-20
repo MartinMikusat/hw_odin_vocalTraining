@@ -634,6 +634,22 @@ focus_text_input :: proc(focus: UI_Focus) {
 	ui.needs_redraw = true
 }
 
+escape_should_unfocus :: proc(focus: UI_Focus) -> bool {
+	return focus != .None
+}
+
+unfocus_text_input :: proc() -> bool {
+	if !escape_should_unfocus(ui.focus) {return false}
+	target := focused_text()
+	had_marked_text := ui.has_marked_text
+	if target != nil {remove_marked_text(target)} else {clear_marked_text()}
+	if had_marked_text && target != nil {focused_text_changed(target)}
+	ui.focus = .None
+	ui.text_scroll_x = 0
+	ui.needs_redraw = true
+	return true
+}
+
 contains :: proc(rect: UI_Rect, point: Point) -> bool {
 	return(
 		point.x >= rect.x &&
@@ -4081,6 +4097,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		_ = begin_ui_flash()
 		return
 	}
+	if key == 53 && unfocus_text_input() {return}
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
 	if ui.source_details_open && key == 53 {close_source_details(); return}
 	if is_paste_shortcut(key, modifiers) {

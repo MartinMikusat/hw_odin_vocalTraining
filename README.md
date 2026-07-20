@@ -85,7 +85,8 @@ name. Type characters until one control remains. For example, type `pl` for
 Play or `se` for Search Timed Transcript. A prefix grows when another visible
 control has the same starting characters. Press **Escape**, click, scroll, or
 resize the window to cancel label mode. A slash typed in a focused text field
-remains normal text.
+remains normal text. Press **Escape** to leave a focused text field and make
+Flash navigation available again.
 
 Download and export diagnostics are stored as `yt-dlp.log` and `ffmpeg.log` in
 the application-support directory. Use the **Data** control to open that
