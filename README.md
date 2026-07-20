@@ -80,10 +80,12 @@ When no text field has focus, press **Space** to toggle playback or **1–8** to
 activate the matching numbered transport control.
 
 Press **/** when no text field has focus to show keyboard labels on all visible
-discrete controls. Type the two-letter label to activate its control. The first
-letter filters the labels and leaves only their second letters visible. Press
-**Escape**, click, scroll, or resize the window to cancel label mode. A slash
-typed in a focused text field remains normal text.
+discrete controls. Each label is the shortest unique prefix of the control's
+name. Type characters until one control remains. For example, type `pl` for
+Play or `se` for Search Timed Transcript. A prefix grows when another visible
+control has the same starting characters. Press **Escape**, click, scroll, or
+resize the window to cancel label mode. A slash typed in a focused text field
+remains normal text.
 
 Download and export diagnostics are stored as `yt-dlp.log` and `ffmpeg.log` in
 the application-support directory. Use the **Data** control to open that
@@ -110,10 +112,10 @@ advance and ascent/descent metrics. Measurement, alignment, truncation, and
 drawing reuse that same shaped line, preserving kerning, ligatures, fallback
 fonts, combining marks, bidirectional ordering, and complex-script shaping.
 
-The sibling `hw_odin_ui_flash` package sorts visible interaction targets and
-processes their two-letter keyboard labels. One application target registry
-supplies the label mode and macOS accessibility elements. The app retains
-control of Metal rendering and action execution.
+The sibling `hw_odin_ui_flash` package normalizes functional control names,
+calculates their shortest unique prefixes, and processes keyboard selection.
+One application target registry supplies the label mode and macOS accessibility
+elements. The app retains control of Metal rendering and action execution.
 
 SQLite stores sources, transcript segments, hints, exercises, and source
 metadata. The main thread commits state changes in transactions. A startup

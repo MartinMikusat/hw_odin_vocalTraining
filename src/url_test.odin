@@ -1020,13 +1020,13 @@ flash_leader_starts_only_without_text_focus_test :: proc(t: ^testing.T) {
 flash_badges_use_opposite_anchors_for_shared_targets_test :: proc(t: ^testing.T) {
 	target_rect := flash.Rect{10, 20, 100, 30}
 	left := flash_badge_rect(
-		flash.Target{rect = target_rect, anchor = .Top_Left},
+		flash.Target{label = "play", rect = target_rect, anchor = .Top_Left},
 		2,
 		200,
 		100,
 	)
 	right := flash_badge_rect(
-		flash.Target{rect = target_rect, anchor = .Top_Right},
+		flash.Target{label = "play", rect = target_rect, anchor = .Top_Right},
 		2,
 		200,
 		100,
@@ -1039,7 +1039,7 @@ flash_badges_use_opposite_anchors_for_shared_targets_test :: proc(t: ^testing.T)
 @(test)
 flash_badges_clamp_to_the_view_test :: proc(t: ^testing.T) {
 	badge := flash_badge_rect(
-		flash.Target{rect = {-20, -10, 8, 8}, anchor = .Bottom_Left},
+		flash.Target{label = "play", rect = {-20, -10, 8, 8}, anchor = .Bottom_Left},
 		1,
 		100,
 		100,
@@ -1047,4 +1047,25 @@ flash_badges_clamp_to_the_view_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, badge.x, 0.0)
 	testing.expect_value(t, badge.y, 0.0)
 	testing.expect_value(t, badge.w, 16.0)
+}
+
+@(test)
+flash_functional_labels_produce_stable_control_prefixes_test :: proc(t: ^testing.T) {
+	jump: flash.State
+	flash.state_init(&jump)
+	defer flash.state_destroy(&jump)
+	targets := []flash.Target{
+		{id = 1, label = "play pause source", rect = {0, 0, 10, 10}},
+		{id = 2, label = "search timed transcript", rect = {0, 0, 10, 10}},
+		{id = 3, label = "set start", rect = {0, 0, 10, 10}},
+		{id = 4, label = "set end", rect = {0, 0, 10, 10}},
+		{id = 5, label = "run", rect = {0, 0, 10, 10}},
+	}
+	testing.expect_value(t, flash.begin(&jump, targets), flash.Begin_Error.None)
+	hints := flash.visible_hints(&jump)
+	testing.expect_value(t, hints[0].label, "pl")
+	testing.expect_value(t, hints[1].label, "sea")
+	testing.expect_value(t, hints[2].label, "sets")
+	testing.expect_value(t, hints[3].label, "sete")
+	testing.expect_value(t, hints[4].label, "ru")
 }

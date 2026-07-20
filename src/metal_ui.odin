@@ -262,11 +262,12 @@ UI_Action :: struct {
 }
 
 Interactive_Target :: struct {
-	label:  string,
-	role:   string,
-	rect:   UI_Rect,
-	anchor: flash.Anchor,
-	action: UI_Action,
+	label:       string,
+	flash_label: string,
+	role:        string,
+	rect:        UI_Rect,
+	anchor:      flash.Anchor,
+	action:      UI_Action,
 }
 
 ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1}
@@ -1644,8 +1645,7 @@ fill_overlay_border :: proc(ctx: rawptr, rect: UI_Rect, color: [4]f64) {
 }
 
 flash_badge_rect :: proc(target: flash.Target, label_length: int, view_width, view_height: f64) -> UI_Rect {
-	width := 16.0
-	if label_length > 1 {width = 24}
+	width := max(16, 8 + f64(label_length) * 8)
 	height := 18.0
 	rect := target.rect
 	x, y := rect.x + 2, rect.y + rect.h - height - 2
@@ -1670,11 +1670,10 @@ draw_flash_hints :: proc(ctx, font: rawptr) {
 	foreground := [4]f64{0.025, 0.027, 0.026, 1}
 	border := [4]f64{0.02, 0.02, 0.02, 1}
 	for &hint in flash.visible_hints(&flash_state) {
-		badge := flash_badge_rect(hint.target, hint.label_length, ui.width, ui.height)
+		badge := flash_badge_rect(hint.target, len(hint.label), ui.width, ui.height)
 		fill_overlay_rect(ctx, badge, background)
 		fill_overlay_border(ctx, badge, border)
-		label := string(hint.label[:hint.label_length])
-		draw_text_in_rect(ctx, font, label, badge, .Center, .Center, foreground)
+		draw_text_in_rect(ctx, font, hint.label, badge, .Center, .Center, foreground)
 	}
 }
 
@@ -2852,7 +2851,10 @@ add_ax_element :: proc(
 	seconds: f64 = 0,
 	value: int = 0,
 	anchor: flash.Anchor = .Top_Left,
+	flash_label: string = "",
 ) {
+	keyboard_label := flash_label
+	if len(keyboard_label) == 0 {keyboard_label = label}
 	element := msg_id(element_class, sel_registerName("new"))
 	msg_void_id(element, sel_registerName("setAccessibilityParent:"), ui.view)
 	msg_void_id(element, sel_registerName("setAccessibilityRole:"), nsstring(role))
@@ -2867,6 +2869,7 @@ add_ax_element :: proc(
 		&interactive_targets,
 		Interactive_Target{
 			label = label,
+			flash_label = keyboard_label,
 			role = role,
 			rect = rect,
 			anchor = anchor,
@@ -2886,13 +2889,13 @@ rebuild_accessibility :: proc() {
 	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
 		layout_rects()
 	if import_job != nil {
-		add_ax_element(array, element_class, "Stop download", "AXButton", import_cancel_rect(), .Stop_Download)
+		add_ax_element(array, element_class, "Stop download", "AXButton", import_cancel_rect(), .Stop_Download, flash_label = "stop download")
 		return
 	}
 	if ui.source_modal_open {
 		refetching := ui.source_modal_refetch_index >= 0
 		if ui.source_modal_refetch_index < 0 {
-			add_ax_element(array, element_class, "YouTube URLs", "AXTextField", import_field, .URL)
+			add_ax_element(array, element_class, "YouTube URLs", "AXTextField", import_field, .URL, flash_label = "youtube urls")
 		}
 		modal := source_modal_rect()
 		for result, result_index in source_probe_results {
@@ -2910,6 +2913,7 @@ rebuild_accessibility :: proc() {
 					.Source_Quality,
 					result_index,
 					value = height,
+					flash_label = fmt.tprintf("quality %dp %s", height, result.video_id),
 				)
 			}
 		}
@@ -2920,14 +2924,15 @@ rebuild_accessibility :: proc() {
 			"AXButton",
 			source_modal_cancel_rect(modal),
 			.Cancel_Source_Modal,
+			flash_label = refetching ? "cancel refetch" : "cancel source ingest",
 		)
-		add_ax_element(array, element_class, refetching ? "Refetch source" : "Add source", "AXButton", import_button, .Import)
+		add_ax_element(array, element_class, refetching ? "Refetch source" : "Add source", "AXButton", import_button, .Import, flash_label = refetching ? "refetch source" : "import source")
 		return
 	}
 	if ui.source_details_open {
 		modal := source_details_rect()
-		add_ax_element(array, element_class, "Close source details", "AXButton", source_details_close_rect(modal), .Close_Source_Details)
-		add_ax_element(array, element_class, "Refetch and select quality", "AXButton", source_details_refetch_rect(modal), .Refetch_Source_Details)
+		add_ax_element(array, element_class, "Close source details", "AXButton", source_details_close_rect(modal), .Close_Source_Details, flash_label = "close source details")
+		add_ax_element(array, element_class, "Refetch and select quality", "AXButton", source_details_refetch_rect(modal), .Refetch_Source_Details, flash_label = "refetch quality")
 		return
 	}
 	toggle_label := "Switch to Play mode"
@@ -2939,6 +2944,7 @@ rebuild_accessibility :: proc() {
 		"AXButton",
 		mode_button_rect(),
 		.Mode_Toggle,
+		flash_label = ui.mode == .Create ? "mode practice exercises" : "mode build exercises",
 	)
 	if ui.mode == .Create {
 		add_ax_element(
@@ -2948,6 +2954,7 @@ rebuild_accessibility :: proc() {
 			"AXButton",
 			source_add_button_rect(source_panel),
 			.Open_Source_Modal,
+			flash_label = "add source",
 		)
 		add_ax_element(
 			array,
@@ -2956,8 +2963,9 @@ rebuild_accessibility :: proc() {
 			"AXTextField",
 			source_search,
 			.Source_Search,
+			flash_label = "filter source register",
 		)
-		add_ax_element(array, element_class, "Search timed transcript", "AXTextField", transcript_search_rect(transcript), .Transcript_Search)
+		add_ax_element(array, element_class, "Search timed transcript", "AXTextField", transcript_search_rect(transcript), .Transcript_Search, flash_label = "search timed transcript")
 		source_content := source_content_rect(source_search, source_panel)
 		row := UI_Rect {
 			source_content.x,
@@ -2968,7 +2976,7 @@ rebuild_accessibility :: proc() {
 		for source, index in state.sources {
 			if !source_matches_search(source, ui.source_search) {continue}
 			if row.y >= source_content.y && row.y + row.h <= source_content.y + source_content.h {
-				add_ax_element(array, element_class, source.title, "AXButton", row, .Source, index)
+				add_ax_element(array, element_class, source.title, "AXButton", row, .Source, index, flash_label = fmt.tprintf("%s %s", source.title, source.video_id))
 				add_ax_element(
 					array,
 					element_class,
@@ -2978,6 +2986,7 @@ rebuild_accessibility :: proc() {
 					.Open_Source_Details,
 					index,
 					anchor = .Top_Right,
+					flash_label = fmt.tprintf("details %s %s", source.title, source.video_id),
 				)
 			}
 			row.y -= 30
@@ -3003,6 +3012,7 @@ rebuild_accessibility :: proc() {
 						row,
 						.Transcript,
 						seconds = segment.start_seconds,
+						flash_label = fmt.tprintf("line %s %s", segment.text, format_timestamp(segment.start_seconds)),
 					)
 				}
 			row.y -= 26
@@ -3014,6 +3024,7 @@ rebuild_accessibility :: proc() {
 			"AXTextField",
 			exercise_name,
 			.Exercise_Name,
+			flash_label = "exercise name",
 		)
 	} else {
 		add_ax_element(
@@ -3023,6 +3034,7 @@ rebuild_accessibility :: proc() {
 			"AXTextField",
 			exercise_search,
 			.Exercise_Search,
+			flash_label = "filter exercises",
 		)
 		exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
 		row := UI_Rect {
@@ -3044,6 +3056,7 @@ rebuild_accessibility :: proc() {
 					row,
 					.Exercise,
 					index,
+					flash_label = fmt.tprintf("%s %s", exercise.name, exercise.id),
 				)
 			}
 			row.y -= 30
@@ -3051,23 +3064,23 @@ rebuild_accessibility :: proc() {
 	}
 	if ui.mode == .Create && state.player != nil {
 		playing := msg_f32(state.player, sel_registerName("rate")) > 0
-		add_ax_element(array, element_class, playing ? "Pause source" : "Play source", "AXButton", source_play_pause_rect(player), .Source_Play_Pause)
-		add_ax_element(array, element_class, "Stop source and return to zero", "AXButton", source_stop_rect(player), .Source_Stop)
+		add_ax_element(array, element_class, playing ? "Pause source" : "Play source", "AXButton", source_play_pause_rect(player), .Source_Play_Pause, flash_label = "play pause source")
+		add_ax_element(array, element_class, "Stop source and return to zero", "AXButton", source_stop_rect(player), .Source_Stop, flash_label = "stop source")
 		hint_count := source_hint_count(state.active_source)
 		hint_control := source_hint_control(hint_count)
 		if hint_control == .Reset {
-			add_ax_element(array, element_class, "Return to the imported source timestamp", "AXButton", source_reset_rect(player), .Source_Reset)
+			add_ax_element(array, element_class, "Return to the imported source timestamp", "AXButton", source_reset_rect(player), .Source_Reset, flash_label = "reset source timestamp")
 		} else if hint_control == .Menu {
-			add_ax_element(array, element_class, fmt.tprintf("Source timestamp %s", format_timestamp(source_initial_seconds(state.active_source))), "AXButton", source_reset_rect(player), .Source_Hint_Menu)
+			add_ax_element(array, element_class, fmt.tprintf("Source timestamp %s", format_timestamp(source_initial_seconds(state.active_source))), "AXButton", source_reset_rect(player), .Source_Hint_Menu, flash_label = "select source timestamp")
 			if ui.source_hint_menu_open {
 				values := source_hint_values(state.active_source, context.temp_allocator)
 				for seconds, option_index in values {
-					add_ax_element(array, element_class, format_timestamp(seconds), "AXButton", source_hint_option_rect(player, option_index, len(values)), .Source_Hint, 0, seconds)
+					add_ax_element(array, element_class, format_timestamp(seconds), "AXButton", source_hint_option_rect(player, option_index, len(values)), .Source_Hint, 0, seconds, flash_label = fmt.tprintf("timestamp %s", format_timestamp(seconds)))
 				}
 			}
 		}
-		add_ax_element(array, element_class, "Decrease source playback speed", "AXButton", source_speed_down_rect(player), .Speed_Down)
-		add_ax_element(array, element_class, "Increase source playback speed", "AXButton", source_speed_up_rect(player), .Speed_Up)
+		add_ax_element(array, element_class, "Decrease source playback speed", "AXButton", source_speed_down_rect(player), .Speed_Down, flash_label = "slower")
+		add_ax_element(array, element_class, "Increase source playback speed", "AXButton", source_speed_up_rect(player), .Speed_Up, flash_label = "faster")
 		percent := volume_percent(ui.player_volume)
 		add_ax_element(
 			array,
@@ -3076,6 +3089,7 @@ rebuild_accessibility :: proc() {
 			"AXButton",
 			source_volume_down_rect(player),
 			.Volume_Down,
+			flash_label = "quieter",
 		)
 		add_ax_element(
 			array,
@@ -3084,6 +3098,7 @@ rebuild_accessibility :: proc() {
 			"AXButton",
 			source_volume_up_rect(player),
 			.Volume_Up,
+			flash_label = "louder",
 		)
 	}
 	kinds := [8]AX_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data}
@@ -3097,9 +3112,10 @@ rebuild_accessibility :: proc() {
 		"Preview range",
 		"Open data folder",
 	}
+	flash_labels := [8]string{"mark in", "mark out", "commit", "run", "hold", "captions", "audition", "data"}
 	for kind, index in kinds {
 		rect := control_rect(controls, index)
-		if rect.w > 0 {add_ax_element(array, element_class, labels[index], "AXButton", rect, kind)}
+		if rect.w > 0 {add_ax_element(array, element_class, labels[index], "AXButton", rect, kind, flash_label = flash_labels[index])}
 	}
 }
 
@@ -3118,11 +3134,23 @@ begin_ui_flash :: proc() -> bool {
 		append(&flash_actions, target.action)
 		targets[index] = flash.Target{
 			id = flash.Target_ID(index + 1),
+			label = target.flash_label,
 			rect = flash.Rect{target.rect.x, target.rect.y, target.rect.w, target.rect.h},
 			anchor = target.anchor,
 		}
 	}
 	error := flash.begin(&flash_state, targets)
+	if error != .None {
+		clear(&flash_actions)
+		#partial switch error {
+		case .Invalid_Target_Label:
+			set_text(state.status, "Flash target has no letters or digits")
+		case .Duplicate_Target_Label:
+			set_text(state.status, "Flash targets have duplicate labels")
+		case .Prefix_Conflict:
+			set_text(state.status, "One Flash target label is a prefix of another label")
+		}
+	}
 	ui.needs_redraw = true
 	return error == .None && flash.is_active(&flash_state)
 }
