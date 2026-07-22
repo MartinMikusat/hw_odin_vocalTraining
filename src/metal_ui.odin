@@ -140,12 +140,20 @@ UI_State :: struct {
 	transcript_scroll:  f64,
 	transcript_matches: [dynamic]int,
 	transcript_matches_dirty: bool,
+	transcript_active_match: int,
+	transcript_active_progress: f64,
+	transcript_follow_pending: bool,
+	transcript_follow_suspended: bool,
+	transcript_follow_target_seconds: f64,
+	transcript_follow_target_deadline: uint,
+	transcript_has_follow_target: bool,
 	exercise_scroll:    f64,
 	active_exercise:    int,
 	marked_text:        string,
 	has_marked_text:    bool,
 	player_volume:      f32,
 	playback_rate:      f32,
+	source_playback_active: bool,
 	source_scrubbing:   bool,
 	source_hint_menu_open: bool,
 	activity_tick:      uint,
@@ -270,7 +278,7 @@ Interactive_Target :: struct {
 	action:      UI_Action,
 }
 
-ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1}
+ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1, transcript_active_match = -1}
 ui_event_tag: int
 ax_actions: [dynamic]AX_Action
 interactive_targets: [dynamic]Interactive_Target
@@ -835,7 +843,10 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	} else {
 		ui.active_exercise = -1
 		if state.active_source >= 0 && state.active_source < len(state.sources) {
-			_ = metal_player_load(state.sources[state.active_source].media_path)
+			if metal_player_load(state.sources[state.active_source].media_path) {
+				set_source_playback_active(true)
+				request_transcript_follow()
+			}
 		}
 	}
 	ui.mode = mode
@@ -1229,6 +1240,9 @@ transcript_ranked_indices :: proc(
 invalidate_transcript_matches :: proc(reset_scroll := true) {
 	ui.transcript_matches_dirty = true
 	if reset_scroll {ui.transcript_scroll = 0}
+	ui.transcript_active_match = -1
+	ui.transcript_active_progress = 0
+	ui.transcript_follow_pending = true
 }
 
 ensure_transcript_matches :: proc() {
@@ -1250,6 +1264,119 @@ ensure_transcript_matches :: proc() {
 active_segment_count :: proc() -> int {
 	ensure_transcript_matches()
 	return len(ui.transcript_matches)
+}
+
+transcript_playback_match :: proc(
+	matches: []int,
+	segments: []Transcript_Segment,
+	source_id: string,
+	seconds: f64,
+) -> (match_index: int, progress: f64, found: bool) {
+	latest_start := 0.0
+	match_index = -1
+	for segment_index, result_index in matches {
+		if segment_index < 0 || segment_index >= len(segments) {continue}
+		segment := segments[segment_index]
+		if segment.source_id != source_id || segment.duration_seconds <= 0 {continue}
+		end_seconds := segment.start_seconds + segment.duration_seconds
+		if seconds < segment.start_seconds || seconds >= end_seconds {continue}
+		if found && segment.start_seconds < latest_start {continue}
+		found = true
+		latest_start = segment.start_seconds
+		match_index = result_index
+		progress = clamp((seconds-segment.start_seconds)/segment.duration_seconds, 0, 1)
+	}
+	return
+}
+
+transcript_centered_scroll :: proc(match_index, item_count: int, viewport_height: f64) -> f64 {
+	if match_index < 0 || match_index >= item_count {return 0}
+	desired := f64(match_index)*26 - viewport_height/2 + 12.5
+	return bounded_scroll(desired, 0, item_count, 25, 26, viewport_height)
+}
+
+transcript_follow_should_center :: proc(
+	pending, playing, suspended, search_active, source_playback_active: bool,
+) -> bool {
+	if search_active || !source_playback_active {return false}
+	return pending || playing && !suspended
+}
+
+request_transcript_follow :: proc() {
+	ui.transcript_follow_suspended = false
+	ui.transcript_follow_pending = true
+	ui.transcript_has_follow_target = false
+	ui.needs_redraw = true
+}
+
+request_transcript_follow_to :: proc(seconds: f64) {
+	request_transcript_follow()
+	ui.transcript_follow_target_seconds = seconds
+	ui.transcript_follow_target_deadline = ui.frame_tick + 120
+	ui.transcript_has_follow_target = true
+}
+
+set_source_playback_active :: proc(active: bool) {
+	ui.source_playback_active = active
+	ui.transcript_active_match = -1
+	ui.transcript_active_progress = 0
+	ui.transcript_follow_suspended = false
+	ui.transcript_follow_pending = active
+	ui.transcript_has_follow_target = false
+	ui.needs_redraw = true
+}
+
+sync_transcript_playback :: proc() {
+	previous_match := ui.transcript_active_match
+	ui.transcript_active_match = -1
+	ui.transcript_active_progress = 0
+	if ui.transcript_has_follow_target && ui.frame_tick >= ui.transcript_follow_target_deadline {
+		ui.transcript_has_follow_target = false
+	}
+	search_active := len(ui.transcript_search) > 0
+	if ui.mode != .Create || !ui.source_playback_active || state.player == nil || search_active ||
+	   state.active_source < 0 || state.active_source >= len(state.sources) {
+		return
+	}
+	ensure_transcript_matches()
+	seconds, has_seconds := current_seconds()
+	if !has_seconds {return}
+	if ui.transcript_has_follow_target {
+		if abs(seconds-ui.transcript_follow_target_seconds) <= 0.05 {
+			ui.transcript_has_follow_target = false
+		} else {
+			seconds = ui.transcript_follow_target_seconds
+		}
+	}
+	source_id := state.sources[state.active_source].id
+	match_index, progress, found := transcript_playback_match(
+		ui.transcript_matches[:],
+		state.transcripts.segments[:],
+		source_id,
+		seconds,
+	)
+	if found {
+		ui.transcript_active_match = match_index
+		ui.transcript_active_progress = progress
+	}
+	playing := msg_f32(state.player, sel_registerName("rate")) > 0
+	if found && transcript_follow_should_center(
+		ui.transcript_follow_pending,
+		playing,
+		ui.transcript_follow_suspended,
+		search_active,
+		ui.source_playback_active,
+	) {
+		_, _, _, _, _, transcript, _, _, _, _ := layout_rects()
+		content := transcript_content_rect(transcript)
+		next_scroll := transcript_centered_scroll(match_index, len(ui.transcript_matches), content.h)
+		if next_scroll != ui.transcript_scroll {
+			ui.transcript_scroll = next_scroll
+			ui.needs_redraw = true
+		}
+	}
+	if ui.transcript_follow_pending {ui.transcript_follow_pending = false}
+	if previous_match != ui.transcript_active_match {ui.needs_redraw = true}
 }
 
 filtered_exercise_count :: proc() -> int {
@@ -1882,13 +2009,20 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			25,
 		}
 		ensure_transcript_matches()
-		for segment_index in ui.transcript_matches {
+		for segment_index, result_index in ui.transcript_matches {
 			segment := state.transcripts.segments[segment_index]
 			if row.y >= transcript_content.y &&
 			   row.y + row.h <= transcript_content.y + transcript_content.h {
 				color := [4]f32{0.043, 0.047, 0.045, 0.96}
+				active := result_index == ui.transcript_active_match
+				if active {color = [4]f32{0.082, 0.046, 0.031, 1}}
 				if contains(row, ui.mouse) {color = [4]f32{0.071, 0.078, 0.073, 1}}
 				push_rect(vertices, row, color)
+				if active {
+					progress := clamp(ui.transcript_active_progress, 0, 1)
+					push_rect(vertices, UI_Rect{row.x, row.y, row.w*progress, row.h}, [4]f32{0.24, 0.082, 0.026, 1})
+					push_rect(vertices, UI_Rect{row.x, row.y, 3, row.h}, orange)
+				}
 				push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
 			}
 			row.y -= 26
@@ -3691,6 +3825,7 @@ metal_audio_load :: proc(url: Id) -> (engine, player, pitch, file: Id, ok: bool)
 }
 
 metal_player_clear :: proc() {
+	set_source_playback_active(false)
 	ui.source_scrubbing = false
 	ui.source_hint_menu_open = false
 	metal_player_clear_texture()
@@ -3965,6 +4100,11 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 			26,
 			transcript_content.h,
 		)
+		if state.player != nil && msg_f32(state.player, sel_registerName("rate")) > 0 {
+			ui.transcript_follow_suspended = true
+			ui.transcript_follow_pending = false
+			ui.transcript_has_follow_target = false
+		}
 	} else if ui.mode == .Play && contains(exercise_content, point) {
 		ui.exercise_scroll = bounded_scroll(
 			ui.exercise_scroll,
@@ -4234,6 +4374,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 		}
 	}
 	if ui.scale <= 0 {ui.scale = 1}
+	sync_transcript_playback()
 	normalize_scroll_offsets()
 	msg_void_size(
 		ui.layer,

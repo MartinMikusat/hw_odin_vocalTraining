@@ -986,6 +986,51 @@ empty_transcript_search_keeps_active_source_in_chronological_order_test :: proc(
 }
 
 @(test)
+transcript_playback_uses_latest_starting_overlapping_segment_test :: proc(t: ^testing.T) {
+	segments := []Transcript_Segment{
+		{id="a-1", source_id="a", start_seconds=1, duration_seconds=6},
+		{id="a-2", source_id="a", start_seconds=4, duration_seconds=5},
+		{id="b-1", source_id="b", start_seconds=5, duration_seconds=5},
+	}
+	match_index, progress, found := transcript_playback_match([]int{0, 1, 2}, segments, "a", 5)
+	testing.expect(t, found)
+	testing.expect_value(t, match_index, 1)
+	testing.expect_value(t, progress, 0.2)
+}
+
+@(test)
+transcript_playback_uses_half_open_ranges_and_skips_gaps_test :: proc(t: ^testing.T) {
+	segments := []Transcript_Segment{
+		{id="a-1", source_id="a", start_seconds=1, duration_seconds=2},
+		{id="a-2", source_id="a", start_seconds=4, duration_seconds=0},
+	}
+	match_index, progress, found := transcript_playback_match([]int{0, 1}, segments, "a", 1)
+	testing.expect(t, found)
+	testing.expect_value(t, match_index, 0)
+	testing.expect_value(t, progress, 0.0)
+	_, _, found = transcript_playback_match([]int{0, 1}, segments, "a", 3)
+	testing.expect(t, !found)
+	_, _, found = transcript_playback_match([]int{0, 1}, segments, "a", 4)
+	testing.expect(t, !found)
+}
+
+@(test)
+transcript_centered_scroll_clamps_first_and_last_rows_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, transcript_centered_scroll(0, 20, 100), 0.0)
+	testing.expect_value(t, transcript_centered_scroll(10, 20, 100), 222.5)
+	testing.expect_value(t, transcript_centered_scroll(19, 20, 100), 419.0)
+}
+
+@(test)
+transcript_follow_respects_search_and_manual_suspension_test :: proc(t: ^testing.T) {
+	testing.expect(t, transcript_follow_should_center(true, false, false, false, true))
+	testing.expect(t, transcript_follow_should_center(false, true, false, false, true))
+	testing.expect(t, !transcript_follow_should_center(false, true, true, false, true))
+	testing.expect(t, !transcript_follow_should_center(true, true, false, true, true))
+	testing.expect(t, !transcript_follow_should_center(true, true, false, false, false))
+}
+
+@(test)
 transcript_search_field_sits_between_header_and_results_test :: proc(t: ^testing.T) {
 	transcript := UI_Rect{308, 116, 480, 220}
 	search := transcript_search_rect(transcript)

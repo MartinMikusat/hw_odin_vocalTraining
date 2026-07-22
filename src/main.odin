@@ -578,6 +578,7 @@ seek_video_seconds :: proc(seconds: f64) {
 
 seek_seconds :: proc(seconds: f64) {
 	if state.player == nil { return }
+	request_transcript_follow_to(seconds)
 	resume := msg_f32(state.player, sel_registerName("rate")) > 0
 	seek_video_seconds(seconds)
 	metal_audio_seek(seconds, resume)
@@ -667,6 +668,7 @@ load_source_player :: proc(index: int) -> bool {
 	}
 	path := source.media_path
 	if !metal_player_load(path) {metal_player_clear(); return false}
+	set_source_playback_active(true)
 	state.has_start, state.has_end = false, false
 	set_text(state.exercise_name_input, "")
 	if state.has_pending_hint {
@@ -1290,6 +1292,7 @@ on_play :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if state.player != nil {
+		request_transcript_follow()
 		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
 		metal_audio_play()
 	}
@@ -1312,6 +1315,7 @@ on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
 		msg_void(state.player, sel_registerName("pause"))
 		metal_audio_pause()
 	} else {
+		request_transcript_follow()
 		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
 		metal_audio_play()
 	}
@@ -1385,6 +1389,7 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			set_text(state.status, "Unable to load the exported preview")
 			return
 		}
+		set_source_playback_active(false)
 		msg_void(state.player, sel_registerName("play"))
 		set_text(state.status, fmt.tprintf("Previewing %s", format_timestamp(job.exercise.end_seconds-job.exercise.start_seconds)))
 		return
@@ -1428,6 +1433,7 @@ on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
 		set_text(state.status, "Unable to load the selected exercise")
 		return
 	}
+	set_source_playback_active(false)
 	msg_void(state.player, sel_registerName("play"))
 	ui.active_exercise = index
 	set_text(state.status, fmt.tprintf("Playing %s", exercise.name))
