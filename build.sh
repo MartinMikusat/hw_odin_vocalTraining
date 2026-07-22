@@ -48,6 +48,7 @@ odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
   -collection:flash="$UI_FLASH_ROOT" \
   -extra-linker-flags:"-framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+cp "$EXECUTABLE" "$ROOT/build/vocal-training"
 
 if [ "$MODE" != "release" ]; then
   xcrun dsymutil "$EXECUTABLE" -o "$APP.dSYM"

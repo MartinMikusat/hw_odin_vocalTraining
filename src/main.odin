@@ -1008,6 +1008,43 @@ import_worker :: proc(t: ^thread.Thread) {
 	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("importFinished:"), nil, false)
 }
 
+import_job_apply :: proc(job: ^Import_Job) -> bool {
+	if job == nil || job.accepted <= 0 {return false}
+	if job.has_source_update {
+		updated := false
+		for &source, index in state.sources {
+			if source.video_id != job.updated_source.video_id {continue}
+			copy, copied := clone_source_video(job.updated_source)
+			if !copied {return false}
+			delete_source_video(&source)
+			source = copy
+			last_imported_source = index
+			updated = true
+			break
+		}
+		if !updated {return false}
+	}
+	for source in job.new_sources {
+		copy, copied := clone_source_video(source)
+		if !copied {return false}
+		append(&state.sources, copy)
+	}
+	for hint in job.new_hints {
+		copy, copied := clone_import_hint(hint)
+		if !copied {return false}
+		append(&state.hints, copy)
+	}
+	if job.has_transcript_update {
+		install_transcript_generation(job.transcripts)
+		job.transcripts = {}
+	}
+	for source, index in state.sources {
+		if source.video_id == job.last_video_id {last_imported_source = index; break}
+	}
+	if job.has_pending_hint {state.pending_hint, state.has_pending_hint = job.pending_hint, true}
+	return save_library()
+}
+
 on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -1025,39 +1062,13 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		return
 	}
 	if job.accepted > 0 {
-		if job.has_source_update {
-			for &source, index in state.sources {
-				if source.video_id != job.updated_source.video_id { continue }
-				copy, copied := clone_source_video(job.updated_source)
-				if copied {
-					delete_source_video(&source)
-					source = copy
-					last_imported_source = index
-				}
-				break
-			}
+		if import_job_apply(job) {
+			if last_imported_source >= 0 {load_source_player(last_imported_source)}
+			refresh_sources()
+		} else {
+			set_text(state.status, "The import completed, but the library update failed")
+			return
 		}
-		for source in job.new_sources {
-			copy, copied := clone_source_video(source)
-			if copied { append(&state.sources, copy) }
-		}
-		for hint in job.new_hints {
-			copy, copied := clone_import_hint(hint)
-			if copied { append(&state.hints, copy) }
-		}
-		if job.has_transcript_update {
-			install_transcript_generation(job.transcripts)
-			job.transcripts = {}
-		}
-		for source, index in state.sources {
-			if source.video_id == job.last_video_id { last_imported_source = index; break }
-		}
-		if job.has_pending_hint {
-			state.pending_hint, state.has_pending_hint = job.pending_hint, true
-		}
-		if last_imported_source >= 0 { load_source_player(last_imported_source) }
-		save_library()
-		refresh_sources()
 	}
 	if job.failed > 0 {
 		if job.invalid_merged_media > 0 {
@@ -1485,6 +1496,7 @@ jobs_shutdown :: proc() {
 main :: proc() {
 	if !memory_init() { fmt.eprintln("Unable to initialize memory arenas"); return }
 	defer memory_destroy()
+	defer cli_library_release()
 	if error := match_sorter.search_context_init(&transcript_search_context); error != nil {
 		fmt.eprintln("Unable to initialize transcript search")
 		return
@@ -1495,6 +1507,7 @@ main :: proc() {
 	defer source_probe_cache_clear()
 	defer database_close()
 	defer jobs_shutdown()
+	defer cli_ipc_server_stop()
 	configure_helper_path()
 	objc_handle := os.dlopen("/usr/lib/libobjc.A.dylib", os.RTLD_NOW)
 	send_address = os.dlsym(objc_handle, "objc_msgSend")
@@ -1504,19 +1517,28 @@ main :: proc() {
 	system_address = os.dlsym(libsystem_handle, "system")
 	if system_address == nil { fmt.eprintln("Unable to resolve system"); return }
 	state.active_source = -1
-	load_library()
-	if len(os.args) == 3 && os.args[1] == "--import" {
-		yt_dlp_available, yt_dlp_reason := helper_available("yt-dlp")
-		if !yt_dlp_available { fmt.eprintln(yt_dlp_reason); return }
-		ffmpeg_available, ffmpeg_reason := helper_available("ffmpeg")
-		if !ffmpeg_available { fmt.eprintln(ffmpeg_reason); return }
-		if import_url(os.args[2]) && save_library() {
-			fmt.println("Imported source, YouTube captions, and timestamp hint")
-			return
+	if len(os.args) > 1 {
+		request, parse_result, parsed := cli_parse_request(os.args[1:])
+		result := parse_result
+		if parsed {
+			if routed_result, routed := cli_ipc_try_request(request); routed {
+				result = routed_result
+			} else if !cli_library_try_acquire() {
+				result = cli_error(request.command, .Busy, "busy", "The app owns the library, but its CLI control socket is not ready")
+			} else {
+				load_library()
+				result = cli_execute(request)
+			}
 		}
-		fmt.eprintln("Import failed; inspect", diagnostic_log_path("yt-dlp"))
+		fmt.println(result.output)
+		delete(result.output)
+		os.exit(int(result.exit_code))
+	}
+	if !cli_library_try_acquire() {
+		fmt.eprintln("Vocal Training is already running or the library is busy")
 		return
 	}
+	load_library()
 	pool := msg_id(objc_getClass("NSAutoreleasePool"), sel_registerName("new"))
 	build_metal_window()
 	metal_player_clear()

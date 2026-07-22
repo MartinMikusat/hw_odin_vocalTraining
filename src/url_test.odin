@@ -167,6 +167,62 @@ exercise_range_validation_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+cli_source_add_parses_json_tool_arguments_test :: proc(t: ^testing.T) {
+	request, result, ok := cli_parse_request([]string{"source", "add", "--url", "https://youtu.be/dQw4w9WgXcQ", "--max-height", "720"})
+	defer delete(result.output)
+	testing.expect(t, ok)
+	testing.expect_value(t, request.command, CLI_Command.Source_Add)
+	testing.expect_value(t, request.url, "https://youtu.be/dQw4w9WgXcQ")
+	testing.expect_value(t, request.max_height, 720)
+}
+
+@(test)
+cli_source_add_defaults_to_1080p_test :: proc(t: ^testing.T) {
+	request, result, ok := cli_parse_request([]string{"--import", "https://youtu.be/dQw4w9WgXcQ"})
+	defer delete(result.output)
+	testing.expect(t, ok)
+	testing.expect_value(t, request.command, CLI_Command.Source_Add)
+	testing.expect_value(t, request.max_height, 1080)
+}
+
+@(test)
+cli_rejects_incomplete_clip_request_with_json_error_test :: proc(t: ^testing.T) {
+	_, result, ok := cli_parse_request([]string{"clip", "create", "--source", "source-1"})
+	defer delete(result.output)
+	testing.expect(t, !ok)
+	testing.expect_value(t, result.exit_code, CLI_Exit.Usage)
+	testing.expect(t, strings.contains(result.output, `"ok":false`))
+	testing.expect(t, strings.contains(result.output, `"code":"usage"`))
+}
+
+@(test)
+cli_segment_ids_map_to_exact_caption_bounds_test :: proc(t: ^testing.T) {
+	segments := []Transcript_Segment{
+		{id="source-1-1", source_id="source-1", start_seconds=12.5, duration_seconds=1.25},
+		{id="source-1-2", source_id="source-1", start_seconds=13.75, duration_seconds=2.5},
+	}
+	start, end, range_error := cli_segment_range("source-1", "source-1-1", "source-1-2", segments)
+	testing.expect_value(t, range_error, "")
+	testing.expect_value(t, start, 12.5)
+	testing.expect_value(t, end, 16.25)
+}
+
+@(test)
+cli_segment_range_rejects_wrong_source_and_reverse_order_test :: proc(t: ^testing.T) {
+	segments := []Transcript_Segment{
+		{id="source-1-1", source_id="source-1", start_seconds=12.5, duration_seconds=1.25},
+		{id="source-2-1", source_id="source-2", start_seconds=13.75, duration_seconds=2.5},
+		{id="source-1-2", source_id="source-1", start_seconds=16.25, duration_seconds=1.5},
+	}
+	_, _, source_error := cli_segment_range("source-1", "source-1-1", "source-2-1", segments)
+	testing.expect_value(t, source_error, "segment_source_mismatch")
+	_, _, order_error := cli_segment_range("source-1", "source-1-2", "source-1-1", segments)
+	testing.expect_value(t, order_error, "segment_order_invalid")
+	_, _, missing_error := cli_segment_range("source-1", "source-1-1", "missing", segments)
+	testing.expect_value(t, missing_error, "segment_not_found")
+}
+
+@(test)
 persisted_state_json_round_trip_test :: proc(t: ^testing.T) {
 	original := Persisted_State{version=1}
 	append(&original.sources, Source_Video{id="source-1", video_id="abc", title="Warmup", duration=90})

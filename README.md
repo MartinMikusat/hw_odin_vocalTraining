@@ -92,6 +92,32 @@ Download and export diagnostics are stored as `yt-dlp.log` and `ffmpeg.log` in
 the application-support directory. Use the **Data** control to open that
 directory in Finder.
 
+### Command-line control
+
+The debug build creates `build/vocal-training`. Each command writes one JSON
+result to standard output. Failed media commands include the diagnostic path.
+
+```sh
+build/vocal-training source add --url 'https://youtu.be/VIDEO_ID?t=120'
+build/vocal-training source list
+build/vocal-training transcript get --source VIDEO_ID
+build/vocal-training clip create \
+  --source VIDEO_ID \
+  --from-segment VIDEO_ID-12 \
+  --to-segment VIDEO_ID-18 \
+  --name 'Descending scale'
+build/vocal-training clip list --source VIDEO_ID
+```
+
+`source add` selects compatible media at or below 1080p. Use `--max-height N`
+to set another limit. The command downloads one URL at a time.
+
+`clip create` starts at the first segment start. It ends at the last segment
+start plus its duration. The command saves the MP4 as an exercise.
+
+The GUI owns the library while it runs. CLI commands then use its private local
+socket. When the GUI is closed, the CLI locks and updates the library directly.
+
 ## Development guide
 
 ### Architecture
@@ -163,7 +189,7 @@ Other build modes use separate output directories:
 ./build.sh release  # optimized production build
 ```
 
-The same binary supports scripted imports for diagnostics:
+The legacy scripted import form remains available and returns JSON:
 
 ```sh
 build/VocalTraining.app/Contents/MacOS/VocalTraining --import 'https://youtu.be/VIDEO_ID?t=SECONDS'

@@ -4277,6 +4277,12 @@ register_delegate :: proc(app: Id) {
 	)
 	class_addMethod(
 		delegate_class,
+		sel_registerName("cliRequest:"),
+		rawptr(on_cli_ipc_request),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
 		sel_registerName("applicationShouldTerminateAfterLastWindowClosed:"),
 		rawptr(should_terminate_after_window_close),
 		"B@:@",
@@ -4495,6 +4501,7 @@ build_metal_window :: proc() {
 	msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
 	msg_void_id(state.window, sel_registerName("makeKeyAndOrderFront:"), nil)
 	msg_void_i(app, sel_registerName("activateIgnoringOtherApps:"), 1)
+	if !cli_ipc_server_start() {set_text(state.status, "CLI control socket is unavailable")}
 	validate_startup_helpers()
 	request_next_missing_source_metadata()
 	msg_void(app, sel_registerName("run"))
