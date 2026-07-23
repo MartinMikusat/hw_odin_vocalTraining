@@ -194,6 +194,7 @@ CF_Range :: struct {
 	location, length: int,
 }
 
+UI_FONT_NAME :: "Iosevka Aile"
 SMALL_FONT_SIZE :: 10.5
 APP_HEADER_HEIGHT :: 38.0
 TRACE_FOREIGN_LIFETIMES :: #config(VT_TRACE_FOREIGN_LIFETIMES, false)
@@ -1644,7 +1645,7 @@ draw_editable_text_field :: proc(
 
 place_caret_in_text_field :: proc(text: string, rect: UI_Rect, point: Point, inset := 8.0, base_byte_offset := 0, prefix_bytes := 0) {
 	if len(text) == 0 {ui.caret_byte_offset = base_byte_offset; return}
-	font_name := CFStringCreateWithCString(nil, "BerkeleyMonoVariable-Regular", 0x08000100)
+	font_name := CFStringCreateWithCString(nil, UI_FONT_NAME, 0x08000100)
 	if font_name == nil {return}
 	font := CTFontCreateWithName(font_name, SMALL_FONT_SIZE * ui.scale, nil)
 	CFRelease(font_name)
@@ -2105,7 +2106,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	if ctx == nil {return pixels}
 	defer CGContextRelease(ctx)
 	CGContextClearRect(ctx, Rect{Point{0, 0}, Size{f64(width), f64(height)}})
-	font_name := CFStringCreateWithCString(nil, "BerkeleyMonoVariable-Regular", 0x08000100)
+	font_name := CFStringCreateWithCString(nil, UI_FONT_NAME, 0x08000100)
 	assert_foreign(font_name, "Unable to create the UI font name")
 	if font_name == nil {return pixels}
 	small_font := CTFontCreateWithName(font_name, SMALL_FONT_SIZE * ui.scale, nil)

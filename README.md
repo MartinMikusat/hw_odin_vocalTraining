@@ -131,7 +131,7 @@ maps its frames into Metal textures. AVAudioEngine routes audio through a
 time-pitch unit, so speed changes preserve vocal pitch without restarting the
 audio stream.
 
-The interface uses Berkeley Mono and a measured immediate-mode layout.
+The interface uses Iosevka Aile and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface, including the compact
 `VOCAL TRAINING` title. Container text is shaped as a complete CoreText line,
 then positioned from its measured
