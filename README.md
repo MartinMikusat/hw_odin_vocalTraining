@@ -79,14 +79,21 @@ The speed controls adjust playback from `0.1x` to `2.0x` in `0.1x` steps.
 When no text field has focus, press **Space** to toggle playback or **1–8** to
 activate the matching numbered transport control.
 
+Press **Control-K** to open the command palette from any application state.
+Type to search commands, sources, and exercises in one list. Use the arrow
+keys to move, Return to select, and Escape to close the palette. Commands that
+do not apply to the current mode remain visible with their unavailable reason.
+Selecting a source switches to Create and loads it. Selecting an exercise
+switches to Play and starts it.
+
 Press **/** when no text field has focus to show keyboard labels on all visible
-discrete controls. Each label is the shortest unique prefix of the control's
-name. Type characters until one control remains. For example, type `pl` for
-Play or `se` for Search Timed Transcript. A prefix grows when another visible
-control has the same starting characters. Press **Escape**, click, scroll, or
-resize the window to cancel label mode. A slash typed in a focused text field
-remains normal text. Press **Escape** to leave a focused text field and make
-Flash navigation available again.
+discrete controls. Each label is a compact mnemonic with two or three
+characters. For example, Mark In uses `mi` and Mark Out uses `mo`. A unique
+mnemonic activates its control immediately. If controls share one mnemonic,
+use Tab or Shift-Tab to select a control, then press Return. Press **Escape**,
+click, scroll, or resize the window to cancel label mode. A slash typed in a
+focused text field remains normal text. Press **Escape** to leave a focused
+text field and make Flash navigation available again.
 
 Download and export diagnostics are stored as `yt-dlp.log` and `ffmpeg.log` in
 the application-support directory. Use the **Data** control to open that
@@ -139,10 +146,25 @@ advance and ascent/descent metrics. Measurement, alignment, truncation, and
 drawing reuse that same shaped line, preserving kerning, ligatures, fallback
 fonts, combining marks, bidirectional ordering, and complex-script shaping.
 
-The sibling `hw_odin_ui_flash` package normalizes functional control names,
-calculates their shortest unique prefixes, and processes keyboard selection.
-One application target registry supplies the label mode and macOS accessibility
-elements. The app retains control of Metal rendering and action execution.
+The application builds each visible interactive control once per frame. Each
+control record contains a stable functional name, rectangle, action, state,
+and capability flags. Pointer input, macOS accessibility, and Flash navigation
+consume the same records. Dynamic controls include a durable source, segment,
+or exercise identifier in their functional name. Static panels and labels stay
+outside the control registry.
+
+The sibling `hw_odin_ui_flash` package consumes opaque control identifiers and
+Flash labels from the application registry. A control keeps its unique
+functional name separate from its short Flash label. Repeated row actions share
+one Flash label and form a spatial selection group. The package generates
+compact mnemonics and manages ambiguous selection groups. The app retains
+control of Metal rendering and action execution. If a Flash label has no ASCII
+letter or digit, the app derives a fallback from the control action.
+
+The sibling `hw_odin_ui_commandPalette` package owns command-palette state,
+context evaluation, keyboard selection, and match-sorter ranking. The
+application supplies curated actions and data, renders the Metal modal, and
+executes the selected opaque identifier.
 
 SQLite stores sources, transcript segments, hints, exercises, and source
 metadata. The main thread commits state changes in transactions. A startup
@@ -150,12 +172,14 @@ worker fills missing metadata from existing yt-dlp files.
 
 ### Memory ownership
 
-The renderer owns two virtual-memory arenas. The frame arena holds solid
-geometry until `setVertexBytes` copies it into Metal's command stream, then the
-next frame resets the complete arena. The redraw arena holds the scaled RGBA
-overlay until `replaceRegion` copies it into the retained text texture, then
-the next dirty redraw resets that arena. Debug builds print each arena's
-high-water mark, reset count, and allocation-failure count at shutdown.
+The renderer owns two virtual-memory arenas. The frame arena holds the control
+registry and solid geometry. `setVertexBytes` copies the geometry into Metal's
+command stream before the next frame resets the arena. Accessibility bindings
+retain stable control identifiers instead of pointers into the frame arena.
+The redraw arena holds the scaled RGBA overlay until `replaceRegion` copies it
+into the retained text texture. The next dirty redraw resets that arena. Debug
+builds print each arena's high-water mark, reset count, and allocation-failure
+count at shutdown.
 
 Each import or export worker owns a private growing arena and never reads the
 mutable UI or application arrays. The main thread joins the worker, clones its
@@ -171,10 +195,11 @@ never substitutes for framework reference counting.
 
 ### Build
 
-Install Odin and ensure `odin` is on `PATH`. Clone `hw_odin_matchSorter` and
-`hw_odin_ui_flash` next to this repository. The build imports them as the
-`match_sorter` and `flash` collections. The default build is unoptimized,
-includes debug information and assertions, and emits a matching dSYM:
+Install Odin and ensure `odin` is on `PATH`. Clone `hw_odin_matchSorter`,
+`hw_odin_ui_flash`, and `hw_odin_ui_commandPalette` next to this repository.
+The build imports them as the `match_sorter`, `flash`, and `command_palette`
+collections. The default build is unoptimized, includes debug information and
+assertions, and emits a matching dSYM:
 
 ```sh
 ./build.sh

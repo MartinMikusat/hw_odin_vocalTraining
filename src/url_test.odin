@@ -5,6 +5,7 @@ import "core:encoding/json"
 import "core:os"
 import "core:strings"
 import mem_virtual "core:mem/virtual"
+import command_palette "command_palette:."
 import flash "flash:."
 import match_sorter "match_sorter:."
 
@@ -455,16 +456,23 @@ metal_ui_titlebar_uses_compact_height_test :: proc(t: ^testing.T) {
 
 @(test)
 source_monitor_volume_controls_sit_left_of_timestamp_test :: proc(t: ^testing.T) {
-	player := UI_Rect{308, 306, 480, 310}
+	player := UI_Rect{308, 306, 760, 310}
+	reset := source_reset_rect(player)
+	speed_down := source_speed_down_rect(player)
+	speed_up := source_speed_up_rect(player)
 	down := source_volume_down_rect(player)
 	value := source_volume_value_rect(player)
 	up := source_volume_up_rect(player)
 	timestamp := source_timestamp_rect(player)
-	testing.expect(t, down.x >= player.x)
+	testing.expect(t, reset.x + reset.w <= speed_down.x)
+	testing.expect(t, speed_up.x + speed_up.w <= down.x)
 	testing.expect(t, down.x + down.w <= value.x)
 	testing.expect(t, value.x + value.w <= up.x)
 	testing.expect(t, up.x + up.w <= timestamp.x)
 	testing.expect(t, timestamp.x + timestamp.w <= player.x + player.w)
+	testing.expect_value(t, source_play_pause_rect(player).y, speed_down.y)
+	testing.expect_value(t, speed_down.y, down.y)
+	testing.expect_value(t, down.y, timestamp.y + 3)
 }
 
 @(test)
@@ -481,6 +489,60 @@ source_monitor_playback_rate_clamps_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, clamp_playback_rate(0), f32(0.1))
 	testing.expect_value(t, clamp_playback_rate(1.1), f32(1.1))
 	testing.expect_value(t, clamp_playback_rate(2.1), f32(2))
+}
+
+@(test)
+command_palette_modal_stays_centered_and_contains_its_search_and_results_test :: proc(t: ^testing.T) {
+	modal := command_palette_rect_for_size(1100, 720)
+	search := command_palette_search_rect(modal)
+	results := command_palette_results_rect(modal)
+	testing.expect_value(t, modal.x, (1100-modal.w)/2)
+	testing.expect_value(t, modal.y, (720-modal.h)/2)
+	testing.expect(t, contains(modal, Point{search.x, search.y}))
+	testing.expect(t, contains(modal, Point{results.x, results.y}))
+	testing.expect(t, results.y + results.h <= search.y)
+}
+
+@(test)
+command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^testing.T) {
+	previous_mode := ui.mode
+	previous_player := state.player
+	previous_source := state.active_source
+	previous_import := import_job
+	previous_export := export_job
+	previous_actions := command_palette_actions
+	defer {
+		delete(command_palette_actions)
+		command_palette_actions = previous_actions
+		ui.mode = previous_mode
+		state.player = previous_player
+		state.active_source = previous_source
+		import_job = previous_import
+		export_job = previous_export
+	}
+	command_palette_actions = nil
+	ui.mode = .Play
+	state.player = nil
+	state.active_source = -1
+	import_job = nil
+	export_job = nil
+	entries := build_command_palette_entries(context.temp_allocator)
+	active := palette_active_context()
+	found_mark_in := false
+	found_data := false
+	for entry in entries {
+		if entry.title == "Mark In" {
+			found_mark_in = true
+			testing.expect(t, !command_palette.context_matches(active, entry.contexts))
+			testing.expect(t, len(entry.unavailable_reason) > 0)
+		}
+		if entry.title == "Open data folder" {
+			found_data = true
+			testing.expect(t, command_palette.context_matches(active, entry.contexts))
+		}
+	}
+	testing.expect(t, found_mark_in)
+	testing.expect(t, found_data)
 }
 
 @(test)
@@ -892,6 +954,7 @@ mode_button_stays_inside_the_header_test :: proc(t: ^testing.T) {
 	testing.expect(t, rect.y+rect.h <= 720)
 	testing.expect(t, contains(header, Point{rect.x,rect.y}))
 	testing.expect(t, contains(header, Point{rect.x+rect.w,rect.y+rect.h}))
+	testing.expect(t, rect.x > 1100/2)
 }
 
 @(test)
@@ -902,6 +965,7 @@ source_header_add_action_stays_inside_panel_test :: proc(t: ^testing.T) {
 	testing.expect(t, add.y >= panel.y)
 	testing.expect(t, add.x+add.w <= panel.x+panel.w)
 	testing.expect(t, add.y+add.h <= panel.y+panel.h)
+	testing.expect(t, add.x > panel.x+panel.w/2)
 }
 
 @(test)
@@ -1161,7 +1225,7 @@ flash_badges_clamp_to_the_view_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-flash_functional_labels_produce_stable_control_prefixes_test :: proc(t: ^testing.T) {
+flash_functional_labels_produce_compact_control_mnemonics_test :: proc(t: ^testing.T) {
 	jump: flash.State
 	flash.state_init(&jump)
 	defer flash.state_destroy(&jump)
@@ -1175,8 +1239,122 @@ flash_functional_labels_produce_stable_control_prefixes_test :: proc(t: ^testing
 	testing.expect_value(t, flash.begin(&jump, targets), flash.Begin_Error.None)
 	hints := flash.visible_hints(&jump)
 	testing.expect_value(t, hints[0].label, "pl")
-	testing.expect_value(t, hints[1].label, "sea")
-	testing.expect_value(t, hints[2].label, "sets")
-	testing.expect_value(t, hints[3].label, "sete")
+	testing.expect_value(t, hints[1].label, "sa")
+	testing.expect_value(t, hints[2].label, "sts")
+	testing.expect_value(t, hints[3].label, "ste")
 	testing.expect_value(t, hints[4].label, "ru")
+}
+
+@(test)
+flash_target_label_replaces_a_name_without_input_characters_test :: proc(t: ^testing.T) {
+	control := UI_Control{
+		functional_name = "♪",
+		action = {
+			kind = .Transcript,
+			index = 7,
+		},
+	}
+	label := flash_target_label(&control)
+	testing.expect(t, flash.label_is_valid(label))
+	testing.expect(t, strings.contains(label, "Transcript"))
+
+	jump: flash.State
+	flash.state_init(&jump)
+	defer flash.state_destroy(&jump)
+	targets := []flash.Target{{id = 1, label = label, rect = {0, 0, 10, 10}}}
+	testing.expect_value(t, flash.begin(&jump, targets), flash.Begin_Error.None)
+	testing.expect(t, flash.is_active(&jump))
+}
+
+@(test)
+ui_control_identifiers_are_stable_and_name_derived_test :: proc(t: ^testing.T) {
+	first := ui_control_id("select source source-42")
+	second := ui_control_id("select source source-42")
+	other := ui_control_id("source details source-42")
+	testing.expect_value(t, first, second)
+	testing.expect(t, first != other)
+	testing.expect(t, first != 0)
+}
+
+@(test)
+ui_control_validation_rejects_duplicate_names_and_identifiers_test :: proc(t: ^testing.T) {
+	valid := []UI_Control{
+		{
+			id = ui_control_id("first control"),
+			functional_name = "first control",
+			rect = {0, 0, 20, 20},
+		},
+		{
+			id = ui_control_id("second control"),
+			functional_name = "second control",
+			rect = {20, 0, 20, 20},
+		},
+	}
+	testing.expect(t, ui_controls_valid(valid))
+
+	duplicate := make([]UI_Control, len(valid))
+	defer delete(duplicate)
+	copy(duplicate, valid)
+	duplicate[1].id = duplicate[0].id
+	testing.expect(t, !ui_controls_valid(duplicate))
+	duplicate[1].id = ui_control_id(duplicate[1].functional_name)
+	duplicate[1].functional_name = duplicate[0].functional_name
+	testing.expect(t, !ui_controls_valid(duplicate))
+}
+
+@(test)
+ui_control_hit_test_uses_visual_stack_and_capabilities_test :: proc(t: ^testing.T) {
+	controls := []UI_Control{
+		{
+			id = ui_control_id("player surface"),
+			functional_name = "player surface",
+			rect = {0, 0, 100, 100},
+			flags = {.Primary_Press, .Enabled},
+			action = {kind = .Player_Surface},
+		},
+		{
+			id = ui_control_id("timeline"),
+			functional_name = "timeline",
+			rect = {0, 0, 100, 20},
+			flags = {.Primary_Press, .Drag, .Enabled},
+			action = {kind = .Source_Timeline},
+		},
+	}
+	hit := find_ui_control_at_point(controls, Point{50, 10}, .Primary_Press)
+	testing.expect(t, hit != nil)
+	if hit != nil {testing.expect_value(t, hit.action.kind, UI_Action_Kind.Source_Timeline)}
+	testing.expect(t, find_ui_control_at_point(controls, Point{50, 50}, .Drag) == nil)
+}
+
+@(test)
+ui_flash_dynamic_identifiers_do_not_expose_synthetic_suffixes_test :: proc(t: ^testing.T) {
+	controls := []UI_Control{
+		{
+			id = ui_control_id("transcript segment source-1"),
+			functional_name = "transcript segment source-1",
+			flash_label = "transcript segment",
+			rect = {0, 0, 20, 20},
+		},
+		{
+			id = ui_control_id("transcript segment source-10"),
+			functional_name = "transcript segment source-10",
+			flash_label = "transcript segment",
+			rect = {20, 0, 20, 20},
+		},
+	}
+	targets := []flash.Target{
+		{id = 1, label = flash_target_label(&controls[0]), rect = {0, 0, 20, 20}},
+		{id = 2, label = flash_target_label(&controls[1]), rect = {20, 0, 20, 20}},
+	}
+	jump: flash.State
+	flash.state_init(&jump)
+	defer flash.state_destroy(&jump)
+	testing.expect_value(t, flash.begin(&jump, targets), flash.Begin_Error.None)
+	testing.expect(t, flash.is_active(&jump))
+	for hint in flash.visible_hints(&jump) {
+		testing.expect(t, len(hint.label) <= 3)
+		testing.expect(t, !strings.contains(hint.label, "target"))
+	}
+	testing.expect_value(t, flash.consume(&jump, 't').kind, flash.Input_Result_Kind.Pending)
+	testing.expect_value(t, flash.consume(&jump, 'r').kind, flash.Input_Result_Kind.Group_Selected)
 }

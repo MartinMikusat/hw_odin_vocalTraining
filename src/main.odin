@@ -255,6 +255,7 @@ nsstring :: proc(s: string) -> Id {
 set_text :: proc(control: Id, text: string) {
 	if control == state.status {
 		ui.status_success = false
+		ui.status_error = false
 		ui_set_string(&ui.status, text)
 		ui.needs_redraw = true
 		return
@@ -270,6 +271,11 @@ set_text :: proc(control: Id, text: string) {
 set_success_status :: proc(text: string) {
 	set_text(state.status, text)
 	ui.status_success = true
+}
+
+set_error_status :: proc(text: string) {
+	set_text(state.status, text)
+	ui.status_error = true
 }
 
 import_success_status :: proc(new_sources, existing_sources, updated_hints: int, latest_hint := -1.0) -> string {
