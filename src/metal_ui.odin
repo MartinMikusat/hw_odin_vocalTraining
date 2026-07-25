@@ -1831,10 +1831,8 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	metadata_ready := source.metadata_status != .Missing
 	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, [4]f64{0.008, 0.009, 0.009, 0.88})
 	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
-	fill_overlay_border(ctx, modal, [4]f64{0.31, 0.32, 0.30, 1})
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
 	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
-	fill_overlay_rect(ctx, UI_Rect{header.x, header.y, header.w, 1}, [4]f64{0.31, 0.32, 0.30, 1})
 	draw_text_in_rect(ctx, font, "SOURCE DETAILS / DOWNLOADED MEDIA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
 	title_color := cyan
 	if !source.media_available {title_color = [4]f64{0.95, 0.16, 0.10, 1}}
@@ -1877,7 +1875,6 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	close_color := [4]f64{0.052, 0.055, 0.052, 1}
 	if contains(close_button, ui.mouse) {close_color = [4]f64{0.09, 0.095, 0.09, 1}}
 	fill_overlay_rect(ctx, close_button, close_color)
-	fill_overlay_border(ctx, close_button, [4]f64{0.31, 0.32, 0.30, 1})
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
 	refetch_color := [4]f64{0.91, 0.31, 0.075, 1}
 	if contains(refetch_button, ui.mouse) {refetch_color = [4]f64{1.0, 0.42, 0.10, 1}}
@@ -1899,7 +1896,6 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	cyan := [4]f32{0.27, 0.72, 0.73, 1}
 	push_rect(vertices, UI_Rect{0, 0, ui.width, ui.height}, chassis)
 	push_rect(vertices, app_header_rect(), [4]f32{0.018, 0.020, 0.019, 1})
-	push_rect(vertices, UI_Rect{0, ui.height - APP_HEADER_HEIGHT - 1, ui.width, 1}, border)
 	mode_rect := mode_button_rect()
 	mode_color := [4]f32{0.15, 0.061, 0.032, 1}
 	if contains(mode_rect, ui.mouse) {mode_color = [4]f32{0.23, 0.083, 0.035, 1}}
@@ -1910,20 +1906,16 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	for rect in panels {
 		if rect.w <= 0 || rect.h <= 0 {continue}
 		push_rect(vertices, rect, panel)
-		push_border(vertices, rect, border)
 		push_rect(vertices, UI_Rect{rect.x, rect.y + rect.h - 34, rect.w, 34}, panel_alt)
-		push_rect(vertices, UI_Rect{rect.x, rect.y + rect.h - 35, rect.w, 1}, border)
 	}
 	fields := [3]UI_Rect{source_search, exercise_search, exercise_name}
 	for rect in fields {
 		if rect.w <= 0 || rect.h <= 0 {continue}
 		push_rect(vertices, rect, field)
-		push_border(vertices, rect, border)
 	}
 	if ui.mode == .Create {
 		search := transcript_search_rect(transcript)
 		push_rect(vertices, search, field)
-		push_border(vertices, search, border)
 	}
 	if ui.mode == .Create && state.player != nil {
 		volume_buttons := [2]UI_Rect{source_volume_down_rect(player), source_volume_up_rect(player)}
@@ -1931,28 +1923,24 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			button_color := field
 			if contains(rect, ui.mouse) {button_color = panel_alt}
 			push_rect(vertices, rect, button_color)
-			push_border(vertices, rect, border)
 		}
 		speed_buttons := [2]UI_Rect{source_speed_down_rect(player), source_speed_up_rect(player)}
 		for rect in speed_buttons {
 			button_color := field
 			if contains(rect, ui.mouse) {button_color = panel_alt}
 			push_rect(vertices, rect, button_color)
-			push_border(vertices, rect, border)
 		}
 		transport_buttons := [2]UI_Rect{source_play_pause_rect(player), source_stop_rect(player)}
 		for rect in transport_buttons {
 			button_color := field
 			if contains(rect, ui.mouse) {button_color = panel_alt}
 			push_rect(vertices, rect, button_color)
-			push_border(vertices, rect, border)
 		}
 		if source_hint_control(source_hint_count(state.active_source)) != .None {
 			rect := source_reset_rect(player)
 			button_color := field
 			if contains(rect, ui.mouse) {button_color = panel_alt}
 			push_rect(vertices, rect, button_color)
-			push_border(vertices, rect, border)
 		}
 		timeline := source_timeline_rect(player)
 		track := UI_Rect{timeline.x, timeline.y + timeline.h / 2 - 2, timeline.w, 4}
@@ -2066,9 +2054,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		if contains(rect, ui.mouse) {color = [4]f32{0.105, 0.112, 0.104, 1}}
 		if index == 2 && contains(rect, ui.mouse) {color = [4]f32{0.23, 0.083, 0.035, 1}}
 		push_rect(vertices, rect, color)
-		push_border(vertices, rect, border)
 	}
-	push_rect(vertices, UI_Rect{18, 30, ui.width - 36, 1}, border)
 	focus_rect := UI_Rect{}
 	#partial switch ui.focus {
 	case .URL:
@@ -2431,7 +2417,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			for seconds, option_index in values {
 				option := source_hint_option_rect(player, option_index, len(values))
 				fill_overlay_rect(ctx, option, [4]f64{0.028, 0.030, 0.029, 1})
-				fill_overlay_border(ctx, option, seconds == selected ? cyan : [4]f64{0.25, 0.26, 0.24, 1})
+				if seconds == selected {fill_overlay_border(ctx, option, cyan)}
 				draw_timestamp_text_in_rect(ctx, small_font, format_timestamp(seconds), option, .Center, .Center, seconds == selected ? cyan : bright)
 			}
 		}
@@ -2771,16 +2757,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			[4]f64{0.008, 0.009, 0.009, 0.88},
 		)
 		fill_overlay_rect(ctx, modal, [4]f64{0.041, 0.044, 0.042, 1})
-		fill_overlay_border(ctx, modal, [4]f64{0.31, 0.32, 0.30, 1})
 		fill_overlay_rect(
 			ctx,
 			UI_Rect{modal.x, modal.y + modal.h - 50, modal.w, 50},
 			[4]f64{0.052, 0.055, 0.052, 1},
-		)
-		fill_overlay_rect(
-			ctx,
-			UI_Rect{modal.x, modal.y + modal.h - 51, modal.w, 1},
-			[4]f64{0.31, 0.32, 0.30, 1},
 		)
 		draw_text_in_rect(
 			ctx,
@@ -2819,7 +2799,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			cyan,
 		)
 		fill_overlay_rect(ctx, input, [4]f64{0.020, 0.022, 0.021, 1})
-		fill_overlay_border(ctx, input, ui.focus == .URL && ui.source_modal_refetch_index < 0 ? orange : [4]f64{0.31, 0.32, 0.30, 1})
+		if ui.focus == .URL && ui.source_modal_refetch_index < 0 {
+			fill_overlay_border(ctx, input, orange)
+		}
 		if len(ui.url_input) == 0 {
 			draw_text_in_rect(
 				ctx,
@@ -2862,7 +2844,6 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				if result_index >= 5 {break}
 				row := source_probe_row_rect(modal, result_index)
 				fill_overlay_rect(ctx, row, [4]f64{0.028, 0.030, 0.029, 1})
-				fill_overlay_border(ctx, row, [4]f64{0.20, 0.21, 0.20, 1})
 				if len(result.error) > 0 {
 					draw_text_in_rect(ctx, small_font, fmt.tprintf("%s / %s", result.video_id, result.error), UI_Rect{row.x + 10, row.y, row.w - 20, row.h}, .Start, .Center, orange, 10)
 					continue
@@ -2874,7 +2855,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 					if quality.x + quality.w > row.x + row.w - 8 {break}
 					selected := height == result.selected_height
 					fill_overlay_rect(ctx, quality, selected ? [4]f64{0.08, 0.18, 0.18, 1} : [4]f64{0.035, 0.038, 0.036, 1})
-					fill_overlay_border(ctx, quality, selected ? cyan : [4]f64{0.25, 0.26, 0.24, 1})
+					if selected {fill_overlay_border(ctx, quality, cyan)}
 					draw_text_in_rect(ctx, small_font, fmt.tprintf("%dp", height), quality, .Center, .Center, selected ? cyan : muted)
 				}
 			}
@@ -2882,7 +2863,6 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		cancel_color := [4]f64{0.052, 0.055, 0.052, 1}
 		if contains(cancel, ui.mouse) {cancel_color = [4]f64{0.09, 0.095, 0.09, 1}}
 		fill_overlay_rect(ctx, cancel, cancel_color)
-		fill_overlay_border(ctx, cancel, [4]f64{0.31, 0.32, 0.30, 1})
 		draw_text_in_rect(ctx, small_font, "CANCEL", cancel, .Center, .Center, muted)
 		confirm_color := [4]f64{0.91, 0.31, 0.075, 1}
 		if contains(confirm, ui.mouse) {confirm_color = [4]f64{1.0, 0.42, 0.10, 1}}
