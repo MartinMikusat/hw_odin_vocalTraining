@@ -595,7 +595,20 @@ current_seconds :: proc() -> (f64, bool) {
 }
 
 valid_exercise_range :: proc(start, end, source_duration: f64) -> bool {
-	return start >= 0 && end > start && (source_duration <= 0 || end <= source_duration)
+	return start >= 0 &&
+	       end - start >= 1 &&
+	       (source_duration <= 0 || end <= source_duration)
+}
+
+active_exercise_range_is_valid :: proc() -> bool {
+	if state.active_source < 0 || state.active_source >= len(state.sources) {return false}
+	return state.has_start &&
+	       state.has_end &&
+	       valid_exercise_range(
+			state.range_start,
+			state.range_end,
+			state.sources[state.active_source].duration,
+		)
 }
 
 source_index_for_id :: proc(sources: []Source_Video, source_id: string) -> int {

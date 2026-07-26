@@ -394,6 +394,8 @@ exercise_range_validation_test :: proc(t: ^testing.T) {
 	testing.expect(t, valid_exercise_range(10, 20, 60))
 	testing.expect(t, !valid_exercise_range(-1, 20, 60))
 	testing.expect(t, !valid_exercise_range(20, 20, 60))
+	testing.expect(t, !valid_exercise_range(20, 20.999, 60))
+	testing.expect(t, valid_exercise_range(20, 21, 60))
 	testing.expect(t, !valid_exercise_range(20, 61, 60))
 	testing.expect(t, valid_exercise_range(20, 61, 0))
 }
@@ -1170,6 +1172,24 @@ mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, control_slot_for_action(.Play, 8), 2)
 	testing.expect_value(t, control_slot_for_action(.Play, 9), 4)
 	testing.expect_value(t, control_slot_for_action(.Play, 0), -1)
+}
+
+@(test)
+create_action_emphasis_follows_range_workflow_test :: proc(t: ^testing.T) {
+	testing.expect(t, create_action_is_emphasized(.Start, false, false, false))
+	testing.expect(t, create_action_is_emphasized(.End, false, false, false))
+	testing.expect(t, !create_action_is_emphasized(.Save, false, false, false))
+
+	testing.expect(t, !create_action_is_emphasized(.Start, true, false, false))
+	testing.expect(t, create_action_is_emphasized(.End, true, false, false))
+
+	testing.expect(t, create_action_is_emphasized(.Start, true, true, false))
+	testing.expect(t, create_action_is_emphasized(.End, true, true, false))
+	testing.expect(t, !create_action_is_emphasized(.Save, true, true, false))
+
+	testing.expect(t, !create_action_is_emphasized(.Start, true, true, true))
+	testing.expect(t, !create_action_is_emphasized(.End, true, true, true))
+	testing.expect(t, create_action_is_emphasized(.Save, true, true, true))
 }
 
 @(test)

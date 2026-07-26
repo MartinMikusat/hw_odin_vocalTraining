@@ -1186,6 +1186,17 @@ control_slot_for_action :: proc(mode: UI_Mode, action: int) -> int {
 	return -1
 }
 
+create_action_is_emphasized :: proc(
+	kind: UI_Action_Kind,
+	has_start, has_end, valid_range: bool,
+) -> bool {
+	if valid_range {return kind == .Save}
+	if has_start && has_end {return kind == .Start || kind == .End}
+	if kind == .Start {return !has_start}
+	if kind == .End {return !has_end}
+	return false
+}
+
 is_paste_shortcut :: proc(key, modifiers: uint) -> bool {
 	return key == 9 && modifiers & NSEventModifierFlagCommand != 0
 }
@@ -3201,6 +3212,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		"METADATA",
 	}
 	control_kinds := [10]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata}
+	valid_range := active_exercise_range_is_valid()
 	for label, i in labels {
 		rect := ui_control_rect(control_kinds[i])
 		slot := control_slot_for_action(ui.mode, i)
@@ -3215,7 +3227,15 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			muted,
 		)
 		button_color := ink
-		if i == 2 {button_color = orange}
+		if ui.mode == .Create &&
+		   create_action_is_emphasized(
+				control_kinds[i],
+				state.has_start,
+				state.has_end,
+				valid_range,
+			) {
+			button_color = orange
+		}
 		control := find_ui_control_by_action(control_kinds[i])
 		if control == nil || .Enabled not_in control.flags {button_color = dim}
 		draw_text_in_rect(
@@ -3229,11 +3249,20 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		)
 	}
 
-	range_text := "RANGE --:--:-- → --:--:--"
+	range_text := "RANGE --:--:-- → --:--:-- / CLIP --:--:--"
 	if state.has_start || state.has_end {
 		start_text := state.has_start ? format_timestamp(state.range_start) : "--:--:--"
 		end_text := state.has_end ? format_timestamp(state.range_end) : "--:--:--"
-		range_text = fmt.tprintf("RANGE %s → %s", start_text, end_text)
+		duration_text := "--:--:--"
+		if state.has_start && state.has_end {
+			duration_text = format_timestamp(max(0, state.range_end - state.range_start))
+		}
+		range_text = fmt.tprintf(
+			"RANGE %s → %s / CLIP %s",
+			start_text,
+			end_text,
+			duration_text,
+		)
 	}
 	if ui.mode ==
 	   .Play {range_text = fmt.tprintf("LIBRARY / %03d EXERCISES", len(state.exercises))}
@@ -3593,6 +3622,16 @@ ui_controls_valid :: proc(controls: []UI_Control) -> bool {
 
 ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Command_Palette_Disabled {return false}
+	if kind == .Start || kind == .End {
+		return state.player != nil &&
+		       state.active_source >= 0 &&
+		       state.active_source < len(state.sources)
+	}
+	if kind == .Save {
+		return import_job == nil &&
+		       export_job == nil &&
+		       active_exercise_range_is_valid()
+	}
 	if kind == .Rename || kind == .Metadata {
 		return import_job == nil &&
 		       ui.active_exercise >= 0 &&

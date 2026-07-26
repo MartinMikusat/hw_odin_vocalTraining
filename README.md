@@ -78,6 +78,9 @@ that level when another source or exercise is loaded during the session. The
 transport can play, pause, stop at zero, change speed, change volume, and scrub
 across the loaded media. Source reset seeks to the imported URL timestamp.
 Exercise reset seeks to the start of the clip.
+The Create footer highlights each missing range endpoint. It enables and
+highlights **Commit** only after the range is at least one second long. The
+footer shows the calculated clip duration beside the range.
 Select an exercise, then select **Rename** to edit its saved name. The rename
 dialog keeps the original name visible above the new name field.
 Select **Metadata** to inspect the exercise identifier, source, range, duration,
