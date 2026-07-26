@@ -5,6 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 MATCH_SORTER_ROOT="$ROOT/../hw_odin_matchSorter"
 UI_FLASH_ROOT="$ROOT/../hw_odin_ui_flash"
 COMMAND_PALETTE_ROOT="$ROOT/../hw_odin_ui_commandPalette"
+FONT_ROOT="$ROOT/resources/fonts"
 if [ ! -f "$MATCH_SORTER_ROOT/match_sorter.odin" ]; then
   echo "[vocal-training] missing Odin match-sorter checkout: $MATCH_SORTER_ROOT" >&2
   exit 1
@@ -15,6 +16,10 @@ if [ ! -f "$UI_FLASH_ROOT/flash.odin" ]; then
 fi
 if [ ! -f "$COMMAND_PALETTE_ROOT/command_palette.odin" ]; then
   echo "[vocal-training] missing Odin UI command palette checkout: $COMMAND_PALETTE_ROOT" >&2
+  exit 1
+fi
+if [ ! -f "$FONT_ROOT/Iosevka-Regular.ttf" ]; then
+  echo "[vocal-training] missing bundled Iosevka font: $FONT_ROOT/Iosevka-Regular.ttf" >&2
   exit 1
 fi
 cd "$ROOT"
@@ -54,6 +59,9 @@ odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
   -collection:command_palette="$COMMAND_PALETTE_ROOT" \
   -extra-linker-flags:"-framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+mkdir -p "$APP/Contents/Resources/Fonts"
+cp "$FONT_ROOT/Iosevka-Regular.ttf" "$APP/Contents/Resources/Fonts/Iosevka-Regular.ttf"
+cp "$FONT_ROOT/IOSEVKA-LICENSE.md" "$APP/Contents/Resources/Fonts/IOSEVKA-LICENSE.md"
 cp "$EXECUTABLE" "$ROOT/build/vocal-training"
 
 if [ "$MODE" != "release" ]; then

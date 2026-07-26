@@ -24,6 +24,9 @@ operation. It prefers executables packaged in
 `Contents/Resources/helpers/`, then searches the development machine's
 `PATH`; it never installs or downloads tools itself.
 
+The application bundles its Iosevka Regular interface font. The user does not
+need to install the font.
+
 The application stores its SQLite library and downloaded media in
 `~/Library/Application Support/VocalTraining`. It migrates and removes the old
 `library.json` file after it verifies the new database. Only download media you
@@ -155,13 +158,22 @@ maps its frames into Metal textures. AVAudioEngine routes audio through a
 time-pitch unit, so speed changes preserve vocal pitch without restarting the
 audio stream.
 
-The interface uses Iosevka Aile and a measured immediate-mode layout.
+The interface uses the bundled Iosevka Regular font and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface, including the compact
 `VOCAL TRAINING` title. Container text is shaped as a complete CoreText line,
 then positioned from its measured
 advance and ascent/descent metrics. Measurement, alignment, truncation, and
 drawing reuse that same shaped line, preserving kerning, ligatures, fallback
 fonts, combining marks, bidirectional ordering, and complex-script shaping.
+The bundle activates Iosevka only for the application through
+`ATSApplicationFontsPath`.
+
+Bundled font provenance:
+
+- Asset: Iosevka Regular 34.7.0
+- Source: [`PkgTTF-Iosevka-34.7.0.zip`](https://github.com/be5invis/Iosevka/releases/download/v34.7.0/PkgTTF-Iosevka-34.7.0.zip)
+- SHA-256: `2fe6f742431e66f218b713ecca986370612bc27594a96a8ab45a41e9ebbaf5e3`
+- License: [SIL Open Font License, Version 1.1](resources/fonts/IOSEVKA-LICENSE.md)
 
 The application builds each visible interactive control once per frame. Each
 control record contains a stable functional name, rectangle, action, state,

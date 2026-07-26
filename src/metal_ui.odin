@@ -204,7 +204,7 @@ CF_Range :: struct {
 	location, length: int,
 }
 
-UI_FONT_NAME :: "Iosevka Aile"
+UI_FONT_NAME :: "Iosevka"
 SMALL_FONT_SIZE :: 10.5
 APP_HEADER_HEIGHT :: 38.0
 TRACE_FOREIGN_LIFETIMES :: #config(VT_TRACE_FOREIGN_LIFETIMES, false)
