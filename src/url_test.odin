@@ -1160,13 +1160,15 @@ mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, control_action_for_slot(.Play, 0), 3)
 	testing.expect_value(t, control_action_for_slot(.Play, 1), 4)
-	testing.expect_value(t, control_action_for_slot(.Play, 2), 7)
-	testing.expect_value(t, control_action_for_slot(.Play, 3), 8)
-	testing.expect_value(t, control_action_for_slot(.Play, 4), -1)
+	testing.expect_value(t, control_action_for_slot(.Play, 2), 8)
+	testing.expect_value(t, control_action_for_slot(.Play, 3), 7)
+	testing.expect_value(t, control_action_for_slot(.Play, 4), 9)
+	testing.expect_value(t, control_action_for_slot(.Play, 5), -1)
 	testing.expect_value(t, control_slot_for_action(.Play, 3), 0)
 	testing.expect_value(t, control_slot_for_action(.Play, 4), 1)
-	testing.expect_value(t, control_slot_for_action(.Play, 7), 2)
-	testing.expect_value(t, control_slot_for_action(.Play, 8), 3)
+	testing.expect_value(t, control_slot_for_action(.Play, 7), 3)
+	testing.expect_value(t, control_slot_for_action(.Play, 8), 2)
+	testing.expect_value(t, control_slot_for_action(.Play, 9), 4)
 	testing.expect_value(t, control_slot_for_action(.Play, 0), -1)
 }
 
@@ -1182,6 +1184,19 @@ exercise_rename_modal_keeps_original_name_above_input_test :: proc(t: ^testing.T
 	testing.expect(t, input.y > confirm.y + confirm.h)
 	testing.expect(t, cancel.x >= modal.x && cancel.x + cancel.w <= modal.x + modal.w)
 	testing.expect(t, confirm.x >= modal.x && confirm.x + confirm.w <= modal.x + modal.w)
+}
+
+@(test)
+exercise_metadata_modal_contains_rows_and_actions_test :: proc(t: ^testing.T) {
+	modal := exercise_metadata_modal_rect_for_size(1100, 720)
+	last_row := exercise_metadata_row_rect(modal, 9)
+	close_button := exercise_metadata_close_rect(modal)
+	source_button := exercise_metadata_source_rect(modal)
+	testing.expect_value(t, modal.x + modal.w / 2, 550.0)
+	testing.expect(t, last_row.y > close_button.y + close_button.h)
+	testing.expect(t, last_row.y > source_button.y + source_button.h)
+	testing.expect(t, close_button.x >= modal.x && close_button.x + close_button.w <= modal.x + modal.w)
+	testing.expect(t, source_button.x >= modal.x && source_button.x + source_button.w <= modal.x + modal.w)
 }
 
 @(test)
@@ -1405,6 +1420,10 @@ source_and_exercise_id_lookups_return_stable_indices_test :: proc(t: ^testing.T)
 	testing.expect_value(t, source_index_for_id(sources, "missing"), -1)
 	testing.expect_value(t, exercise_index_for_id(exercises, "exercise-a"), 0)
 	testing.expect_value(t, exercise_index_for_id(exercises, "missing"), -1)
+	linked_exercises := []Exercise{{source_id="source-b"}, {source_id="missing"}}
+	testing.expect_value(t, source_index_for_exercise(sources, linked_exercises, 0), 1)
+	testing.expect_value(t, source_index_for_exercise(sources, linked_exercises, 1), -1)
+	testing.expect_value(t, source_index_for_exercise(sources, linked_exercises, 2), -1)
 }
 
 @(test)

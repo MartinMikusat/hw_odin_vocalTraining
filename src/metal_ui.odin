@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:hash"
 import mem_virtual "core:mem/virtual"
+import "core:os"
 import "core:strings"
 import CF "core:sys/darwin/CoreFoundation"
 import command_palette "command_palette:."
@@ -138,6 +139,8 @@ UI_State :: struct {
 	source_details_index: int,
 	exercise_rename_open: bool,
 	exercise_rename_index: int,
+	exercise_metadata_open: bool,
+	exercise_metadata_index: int,
 	url_input:          string,
 	source_search:      string,
 	transcript_search:  string,
@@ -258,6 +261,8 @@ UI_Action_Kind :: enum {
 	Cancel_Exercise_Rename,
 	Confirm_Exercise_Rename,
 	Exercise_Rename,
+	Close_Exercise_Metadata,
+	View_Exercise_Source,
 	Volume_Down,
 	Volume_Up,
 	Speed_Down,
@@ -278,6 +283,7 @@ UI_Action_Kind :: enum {
 	Preview,
 	Data,
 	Rename,
+	Metadata,
 }
 
 AX_Action :: struct {
@@ -324,7 +330,7 @@ UI_Build_Output :: struct {
 	frame:              int,
 }
 
-ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1, exercise_rename_index = -1, transcript_active_match = -1}
+ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1, exercise_rename_index = -1, exercise_metadata_index = -1, transcript_active_match = -1}
 ui_event_tag: int
 ax_actions: [dynamic]AX_Action
 ui_build: UI_Build_Output
@@ -902,6 +908,28 @@ exercise_rename_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + modal.w - 180, modal.y + 24, 156, 34}
 }
 
+exercise_metadata_modal_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
+	width := min(max(620, view_width * 0.58), 780)
+	height := min(max(500, view_height * 0.68), 580)
+	return UI_Rect{(view_width - width) / 2, (view_height - height) / 2, width, height}
+}
+
+exercise_metadata_modal_rect :: proc() -> UI_Rect {
+	return exercise_metadata_modal_rect_for_size(ui.width, ui.height)
+}
+
+exercise_metadata_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + modal.h - 142 - f64(row) * 32, modal.w - 48, 30}
+}
+
+exercise_metadata_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
+}
+
+exercise_metadata_source_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + modal.w - 204, modal.y + 22, 180, 34}
+}
+
 close_source_details :: proc() {
 	cancel_ui_flash()
 	ui.source_details_open = false
@@ -966,6 +994,41 @@ confirm_exercise_rename :: proc() {
 	set_success_status(fmt.tprintf("Renamed exercise to %s", renamed))
 }
 
+open_exercise_metadata :: proc() {
+	cancel_ui_flash()
+	if ui.active_exercise < 0 || ui.active_exercise >= len(state.exercises) {return}
+	ui.exercise_metadata_index = ui.active_exercise
+	ui.exercise_metadata_open = true
+	ui.focus = .None
+	ui.needs_redraw = true
+}
+
+close_exercise_metadata :: proc() {
+	cancel_ui_flash()
+	ui.exercise_metadata_open = false
+	ui.exercise_metadata_index = -1
+	ui.needs_redraw = true
+}
+
+view_exercise_source :: proc() {
+	if ui.exercise_metadata_index < 0 ||
+	   ui.exercise_metadata_index >= len(state.exercises) {
+		return
+	}
+	source_index := source_index_for_exercise(
+		state.sources[:],
+		state.exercises[:],
+		ui.exercise_metadata_index,
+	)
+	if source_index < 0 {
+		set_error_status("The exercise source is no longer in the source register")
+		return
+	}
+	set_ui_mode(.Create)
+	ui_event_tag = source_index
+	on_select_source(nil, nil, nil)
+}
+
 open_source_modal :: proc() {
 	cancel_ui_flash()
 	if ui.source_details_open {close_source_details()}
@@ -1013,6 +1076,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
 	if ui.exercise_rename_open {close_exercise_rename()}
+	if ui.exercise_metadata_open {close_exercise_metadata()}
 	ui.source_scrubbing = false
 	ui.source_hint_menu_open = false
 	if mode == .Play {
@@ -1096,9 +1160,11 @@ control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
 	case 1:
 		return 4
 	case 2:
-		return 7
-	case 3:
 		return 8
+	case 3:
+		return 7
+	case 4:
+		return 9
 	}
 	return -1
 }
@@ -1111,9 +1177,11 @@ control_slot_for_action :: proc(mode: UI_Mode, action: int) -> int {
 	case 4:
 		return 1
 	case 7:
-		return 2
-	case 8:
 		return 3
+	case 8:
+		return 2
+	case 9:
+		return 4
 	}
 	return -1
 }
@@ -1214,7 +1282,7 @@ control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
 	slot := control_slot_for_action(ui.mode, action)
 	if slot < 0 {return {}}
 	count := 8
-	if ui.mode == .Play {count = 4}
+	if ui.mode == .Play {count = 5}
 	gap := 6.0
 	cell_w := (controls.w - gap * f64(count - 1)) / f64(count)
 	return UI_Rect{controls.x + f64(slot) * (cell_w + gap), controls.y, cell_w, controls.h}
@@ -2188,6 +2256,94 @@ draw_exercise_rename :: proc(ctx, font: rawptr, bright, muted, dim, orange: [4]f
 	draw_text_in_rect(ctx, font, "RENAME", confirm, .Center, .Center, confirm_enabled ? bright : dim)
 }
 
+draw_exercise_metadata :: proc(
+	ctx, font: rawptr,
+	bright, muted, dim, orange, cyan, danger: [4]f64,
+) {
+	if !ui.exercise_metadata_open ||
+	   ui.exercise_metadata_index < 0 ||
+	   ui.exercise_metadata_index >= len(state.exercises) {
+		return
+	}
+	modal := exercise_metadata_modal_rect()
+	close_button := ui_control_rect(.Close_Exercise_Metadata)
+	source_button := ui_control_rect(.View_Exercise_Source)
+	exercise := &state.exercises[ui.exercise_metadata_index]
+	source_index := source_index_for_exercise(
+		state.sources[:],
+		state.exercises[:],
+		ui.exercise_metadata_index,
+	)
+	source_title := "SOURCE RECORD MISSING"
+	source_id := exercise.source_id
+	video_id := "UNAVAILABLE"
+	source_url := "UNAVAILABLE"
+	if source_index >= 0 {
+		source := &state.sources[source_index]
+		source_title = source.title
+		source_id = source.id
+		video_id = source.video_id
+		source_url = source.url
+	}
+	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, [4]f64{0.008, 0.009, 0.009, 0.88})
+	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
+	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	draw_text_in_rect(ctx, font, "EXERCISE METADATA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
+	draw_text_in_rect(ctx, font, exercise.name, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - 48, 28}, .Start, .Center, cyan)
+	clip_available := os.exists(exercise.clip_path)
+	labels := [10]string{
+		"EXERCISE ID",
+		"SOURCE TITLE",
+		"SOURCE ID",
+		"VIDEO ID",
+		"RANGE IN",
+		"RANGE OUT",
+		"DURATION",
+		"SOURCE URL",
+		"CLIP FILE",
+		"CLIP STATUS",
+	}
+	values := [10]string{
+		exercise.id,
+		source_title,
+		source_id,
+		video_id,
+		format_timestamp(exercise.start_seconds),
+		format_timestamp(exercise.end_seconds),
+		format_timestamp(exercise.end_seconds - exercise.start_seconds),
+		source_url,
+		exercise.clip_path,
+		clip_available ? "AVAILABLE" : "MISSING",
+	}
+	for label, row_index in labels {
+		row := exercise_metadata_row_rect(modal, row_index)
+		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, [4]f64{0.043, 0.046, 0.043, 1})}
+		draw_text_in_rect(ctx, font, label, UI_Rect{row.x + 10, row.y, 128, row.h}, .Start, .Center, muted)
+		value_color := bright
+		if (row_index == 1 && source_index < 0) ||
+		   (row_index == 9 && !clip_available) {
+			value_color = danger
+		}
+		value_rect := UI_Rect{row.x + 146, row.y, row.w - 156, row.h}
+		if row_index >= 4 && row_index <= 6 {
+			draw_timestamp_text_in_rect(ctx, font, values[row_index], value_rect, .Start, .Center, value_color)
+		} else {
+			draw_text_in_rect(ctx, font, values[row_index], value_rect, .Start, .Center, value_color)
+		}
+	}
+	close_color := [4]f64{0.052, 0.055, 0.052, 1}
+	if contains(close_button, ui.mouse) {close_color = [4]f64{0.09, 0.095, 0.09, 1}}
+	fill_overlay_rect(ctx, close_button, close_color)
+	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
+	source_control := find_ui_control_by_action(.View_Exercise_Source)
+	source_enabled := source_control != nil && .Enabled in source_control.flags
+	source_color := source_enabled ? [4]f64{0.045, 0.18, 0.18, 1} : [4]f64{0.052, 0.055, 0.052, 1}
+	if source_enabled && contains(source_button, ui.mouse) {source_color = [4]f64{0.06, 0.24, 0.24, 1}}
+	fill_overlay_rect(ctx, source_button, source_color)
+	draw_text_in_rect(ctx, font, "VIEW SOURCE", source_button, .Center, .Center, source_enabled ? cyan : dim)
+}
+
 draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	if !ui.source_details_open || ui.source_details_index < 0 || ui.source_details_index >= len(state.sources) {return}
 	modal := source_details_rect()
@@ -2422,7 +2578,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 	}
 
-	control_kinds := [9]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename}
+	control_kinds := [10]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata}
 	for kind, index in control_kinds {
 		rect := ui_control_rect(kind)
 		if rect.w <= 0 {continue}
@@ -3032,7 +3188,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		CGContextRestoreGState(ctx)
 	}
 
-	labels := [9]string {
+	labels := [10]string {
 		"MARK IN",
 		"MARK OUT",
 		"COMMIT",
@@ -3042,8 +3198,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		"AUDITION",
 		"DATA",
 		"RENAME",
+		"METADATA",
 	}
-	control_kinds := [9]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename}
+	control_kinds := [10]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata}
 	for label, i in labels {
 		rect := ui_control_rect(control_kinds[i])
 		slot := control_slot_for_action(ui.mode, i)
@@ -3124,6 +3281,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	}
 	draw_source_details(ctx, small_font, bright, muted, cyan)
 	draw_exercise_rename(ctx, small_font, bright, muted, dim, orange)
+	draw_exercise_metadata(ctx, small_font, bright, muted, dim, orange, cyan, danger)
 
 	if ui.source_modal_open {
 		modal := source_modal_rect()
@@ -3435,10 +3593,21 @@ ui_controls_valid :: proc(controls: []UI_Control) -> bool {
 
 ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Command_Palette_Disabled {return false}
-	if kind == .Rename {
+	if kind == .Rename || kind == .Metadata {
 		return import_job == nil &&
 		       ui.active_exercise >= 0 &&
 		       ui.active_exercise < len(state.exercises)
+	}
+	if kind == .View_Exercise_Source {
+		if ui.exercise_metadata_index < 0 ||
+		   ui.exercise_metadata_index >= len(state.exercises) {
+			return false
+		}
+		return source_index_for_exercise(
+			state.sources[:],
+			state.exercises[:],
+			ui.exercise_metadata_index,
+		) >= 0
 	}
 	if kind == .Confirm_Exercise_Rename {
 		return ui.exercise_rename_index >= 0 &&
@@ -3609,6 +3778,29 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				functional_name = fmt.tprintf("palette result %d", result.entry.id),
 			)
 		}
+		validate_ui_controls()
+		return
+	}
+	if ui.exercise_metadata_open {
+		modal := exercise_metadata_modal_rect()
+		add_ax_element(
+			array,
+			element_class,
+			"Close exercise metadata",
+			"AXButton",
+			exercise_metadata_close_rect(modal),
+			.Close_Exercise_Metadata,
+			flash_label = "close metadata",
+		)
+		add_ax_element(
+			array,
+			element_class,
+			"View exercise source",
+			"AXButton",
+			exercise_metadata_source_rect(modal),
+			.View_Exercise_Source,
+			flash_label = "view exercise source",
+		)
 		validate_ui_controls()
 		return
 	}
@@ -3893,8 +4085,8 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			flash_label = "louder",
 		)
 	}
-	kinds := [9]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename}
-	labels := [9]string {
+	kinds := [10]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata}
+	labels := [10]string {
 		"Set start",
 		"Set end",
 		"Save exercise",
@@ -3904,8 +4096,9 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		"Preview range",
 		"Open data folder",
 		"Rename exercise",
+		"Show exercise metadata",
 	}
-	flash_labels := [9]string{"mark in", "mark out", "commit", "run", "hold", "captions", "audition", "data", "rename exercise"}
+	flash_labels := [10]string{"mark in", "mark out", "commit", "run", "hold", "captions", "audition", "data", "rename exercise", "exercise metadata"}
 	for kind, index in kinds {
 		rect := control_rect(controls, index)
 		if rect.w > 0 {add_ax_element(array, element_class, labels[index], "AXButton", rect, kind, flash_label = flash_labels[index])}
@@ -4025,6 +4218,10 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		confirm_exercise_rename()
 	case .Exercise_Rename:
 		focus_text_input(.Exercise_Rename)
+	case .Close_Exercise_Metadata:
+		close_exercise_metadata()
+	case .View_Exercise_Source:
+		view_exercise_source()
 	case .Volume_Down:
 		adjust_player_volume(-0.1)
 	case .Volume_Up:
@@ -4066,6 +4263,8 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		on_open_data_folder(nil, nil, nil)
 	case .Rename:
 		open_exercise_rename()
+	case .Metadata:
+		open_exercise_metadata()
 	}
 	ui.needs_redraw = true
 	return true
@@ -4369,6 +4568,7 @@ begin_command_palette :: proc() -> bool {
 	if command_palette.is_open(&command_palette_state) {return true}
 	cancel_ui_flash()
 	if ui.exercise_rename_open {close_exercise_rename()}
+	if ui.exercise_metadata_open {close_exercise_metadata()}
 	ui.palette_previous_focus = ui.focus
 	ui.palette_previous_caret = ui.caret_byte_offset
 	ui.palette_previous_text_scroll = ui.text_scroll_x
@@ -4425,6 +4625,7 @@ activate_command_palette_result :: proc(result_index: int) -> bool {
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
 	if ui.exercise_rename_open {close_exercise_rename()}
+	if ui.exercise_metadata_open {close_exercise_metadata()}
 	if action.kind == .Source {set_ui_mode(.Create)}
 	if action.kind == .Exercise {set_ui_mode(.Play)}
 	return activate_ui_action(action)
@@ -4951,7 +5152,7 @@ metal_player_load :: proc(path: string) -> bool {
 }
 
 activate_control :: proc(index: int) {
-	kinds := [9]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename}
+	kinds := [10]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata}
 	if index < 0 || index >= len(kinds) {return}
 	control := find_ui_control_by_action(kinds[index])
 	if control != nil && .Enabled in control.flags {_ = activate_ui_action(control.action)}
@@ -5024,6 +5225,12 @@ dispatch_click :: proc(point: Point) {
 		return
 	}
 	clear_marked_text()
+	if ui.exercise_metadata_open {
+		modal := exercise_metadata_modal_rect()
+		if !contains(modal, point) {close_exercise_metadata(); return}
+		_ = activate_registered_target_at_point(point)
+		return
+	}
 	if ui.exercise_rename_open {
 		modal := exercise_rename_modal_rect()
 		if !contains(modal, point) {close_exercise_rename(); return}
@@ -5064,7 +5271,8 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		nil,
 	)
 	if !command_palette.is_open(&command_palette_state) &&
-	   !ui.source_modal_open && !ui.source_details_open && !ui.exercise_rename_open &&
+	   !ui.source_modal_open && !ui.source_details_open &&
+	   !ui.exercise_rename_open && !ui.exercise_metadata_open &&
 	   contains(app_header_rect(), ui.mouse) &&
 	   !contains(ui_control_rect(.Mode_Toggle), ui.mouse) {
 		if msg_uint(event, sel_registerName("clickCount")) >= 2 {
@@ -5083,7 +5291,11 @@ on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	cancel_ui_flash()
 	if command_palette.is_open(&command_palette_state) {return}
-	if ui.source_modal_open || ui.source_details_open || ui.exercise_rename_open || ui.mode != .Create { return }
+	if ui.source_modal_open || ui.source_details_open ||
+	   ui.exercise_rename_open || ui.exercise_metadata_open ||
+	   ui.mode != .Create {
+		return
+	}
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
 	ui.mouse = point
@@ -5142,7 +5354,10 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 		ui.needs_redraw = true
 		return
 	}
-	if ui.source_modal_open || ui.source_details_open || ui.exercise_rename_open {return}
+	if ui.source_modal_open || ui.source_details_open ||
+	   ui.exercise_rename_open || ui.exercise_metadata_open {
+		return
+	}
 	delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(
@@ -5366,6 +5581,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		_ = begin_ui_flash()
 		return
 	}
+	if ui.exercise_metadata_open && key == 53 {close_exercise_metadata(); return}
 	if ui.exercise_rename_open && key == 53 {close_exercise_rename(); return}
 	if key == 53 && unfocus_text_input() {return}
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
@@ -5691,6 +5907,7 @@ build_metal_window :: proc() {
 	ui.scale = 1
 	ui.active_exercise = -1
 	ui.exercise_rename_index = -1
+	ui.exercise_metadata_index = -1
 	ui.transcript_matches_dirty = true
 	ui.needs_redraw = true
 	flash.state_init(&flash_state)

@@ -612,6 +612,15 @@ exercise_index_for_id :: proc(exercises: []Exercise, exercise_id: string) -> int
 	return -1
 }
 
+source_index_for_exercise :: proc(
+	sources: []Source_Video,
+	exercises: []Exercise,
+	exercise_index: int,
+) -> int {
+	if exercise_index < 0 || exercise_index >= len(exercises) {return -1}
+	return source_index_for_id(sources, exercises[exercise_index].source_id)
+}
+
 rename_exercise :: proc(index: int, name: string) -> bool {
 	if index < 0 || index >= len(state.exercises) {return false}
 	trimmed := strings.trim_space(name)

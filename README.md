@@ -80,6 +80,9 @@ across the loaded media. Source reset seeks to the imported URL timestamp.
 Exercise reset seeks to the start of the clip.
 Select an exercise, then select **Rename** to edit its saved name. The rename
 dialog keeps the original name visible above the new name field.
+Select **Metadata** to inspect the exercise identifier, source, range, duration,
+source URL, clip path, and clip availability. Select **View Source** in that
+dialog to switch to Create mode and load the exercise source.
 If a source has multiple imported timestamps, the Reset control becomes a
 timestamp selector. Selecting a value seeks there and saves it as the source's
 active timestamp.
