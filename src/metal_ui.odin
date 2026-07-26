@@ -1084,10 +1084,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	} else {
 		ui.active_exercise = -1
 		if state.active_source >= 0 && state.active_source < len(state.sources) {
-			if metal_player_load(state.sources[state.active_source].media_path) {
-				set_source_playback_active(true)
-				request_transcript_follow()
-			}
+			_ = load_source_player(state.active_source)
 		}
 	}
 	ui.mode = mode
@@ -1470,6 +1467,10 @@ exercise_content_rect :: proc(exercise_search, exercise_panel, exercise_name: UI
 	top := exercise_search.y - 8
 	if exercise_search.h <= 0 {top = exercise_panel.y + exercise_panel.h - 43}
 	return UI_Rect{exercise_panel.x + 6, bottom, exercise_panel.w - 12, max(0, top - bottom)}
+}
+
+exercise_output_commit_rect :: proc(exercise_name: UI_Rect) -> UI_Rect {
+	return UI_Rect{exercise_name.x, exercise_name.y - 36, exercise_name.w, 28}
 }
 
 bounded_scroll :: proc(
@@ -2517,6 +2518,18 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 		push_rect(vertices, add_rect, add_color)
 		if add_enabled {push_border(vertices, add_rect, orange)}
+
+		commit_control := find_ui_control(ui_control_id("commit exercise output"))
+		if commit_control != nil {
+			commit_color := field
+			if .Enabled in commit_control.flags {
+				commit_color = [4]f32{0.15, 0.061, 0.032, 1}
+				if contains(commit_control.rect, ui.mouse) {
+					commit_color = [4]f32{0.23, 0.083, 0.035, 1}
+				}
+			}
+			push_rect(vertices, commit_control.rect, commit_color)
+		}
 	}
 
 	if ui.mode == .Create {
@@ -3096,7 +3109,22 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		}
 		CGContextRestoreGState(ctx)
 
+		output_commit := find_ui_control(ui_control_id("commit exercise output"))
 		output_top := exercise_name.y - 8
+		if output_commit != nil {
+			output_top = output_commit.rect.y - 8
+			commit_color := dim
+			if .Enabled in output_commit.flags {commit_color = orange}
+			draw_text_in_rect(
+				ctx,
+				small_font,
+				"COMMIT",
+				output_commit.rect,
+				.Center,
+				.Center,
+				commit_color,
+			)
+		}
 		output_content := UI_Rect {
 			exercise_panel.x + 6,
 			exercise_panel.y + 8,
@@ -4156,6 +4184,18 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 	for kind, index in kinds {
 		rect := control_rect(controls, index)
 		if rect.w > 0 {add_ax_element(array, element_class, labels[index], "AXButton", rect, kind, flash_label = flash_labels[index])}
+	}
+	if ui.mode == .Create {
+		add_ax_element(
+			array,
+			element_class,
+			"Save exercise",
+			"AXButton",
+			exercise_output_commit_rect(exercise_name),
+			.Save,
+			flash_label = "commit",
+			functional_name = "commit exercise output",
+		)
 	}
 	validate_ui_controls()
 }
