@@ -2207,7 +2207,11 @@ text_input_key_classification_test :: proc(t: ^testing.T) {
 
 	testing.expect(t, is_paste_shortcut(9, NSEventModifierFlagCommand))
 	testing.expect(t, !is_paste_shortcut(0, NSEventModifierFlagCommand))
+	testing.expect(t, is_copy_shortcut(8, NSEventModifierFlagCommand))
+	testing.expect(t, is_cut_shortcut(7, NSEventModifierFlagCommand))
+	testing.expect(t, is_select_all_shortcut(0, NSEventModifierFlagCommand))
 	testing.expect(t, is_delete_word_shortcut(51, NSEventModifierFlagControl))
+	testing.expect(t, is_delete_word_shortcut(51, NSEventModifierFlagOption))
 	testing.expect(t, !is_delete_word_shortcut(51, 0))
 
 	// Ordinary letter, Return, Tab, and arrows all defer to AppKit.
@@ -2252,6 +2256,167 @@ text_caret_line_boundaries_test :: proc(t: ^testing.T) {
 	offset := strings.index(text, "cond")
 	testing.expect_value(t, line_start_for_offset(text, offset), len("first\n"))
 	testing.expect_value(t, line_end_for_offset(text, offset), len("first\nsecond"))
+}
+
+@(test)
+text_word_selection_uses_utf8_and_character_classes_test :: proc(t: ^testing.T) {
+	text := "hello,  café!"
+	start, end := text_word_bounds(text, 2)
+	testing.expect_value(t, text[start:end], "hello")
+	start, end = text_word_bounds(text, 5)
+	testing.expect_value(t, text[start:end], ",")
+	start, end = text_word_bounds(text, 6)
+	testing.expect_value(t, text[start:end], "  ")
+	start, end = text_word_bounds(text, strings.index(text, "fé"))
+	testing.expect_value(t, text[start:end], "café")
+}
+
+@(test)
+text_selection_replacement_and_deletion_use_one_range_test :: proc(t: ^testing.T) {
+	value := strings.clone("A😀BC")
+	defer delete(value)
+	previous_caret := ui.caret_byte_offset
+	previous_anchor := ui.selection_anchor_byte
+	previous_redraw := ui.needs_redraw
+	defer {
+		ui.caret_byte_offset = previous_caret
+		ui.selection_anchor_byte = previous_anchor
+		ui.needs_redraw = previous_redraw
+	}
+	set_text_selection(1, len("A😀B"), value)
+	replace_text_selection(&value, "x")
+	testing.expect_value(t, value, "AxC")
+	testing.expect_value(t, ui.caret_byte_offset, 2)
+	testing.expect_value(t, ui.selection_anchor_byte, 2)
+	set_text_selection(1, 2, value)
+	testing.expect(t, remove_text_selection(&value))
+	testing.expect_value(t, value, "AC")
+	testing.expect_value(t, ui.caret_byte_offset, 1)
+}
+
+@(test)
+text_click_counts_select_caret_word_and_all_test :: proc(t: ^testing.T) {
+	value := strings.clone("one two")
+	defer delete(value)
+	previous_caret := ui.caret_byte_offset
+	previous_anchor := ui.selection_anchor_byte
+	previous_focus := ui.text_drag_focus
+	previous_granularity := ui.text_drag_granularity
+	previous_drag := ui.text_drag_active
+	previous_start := ui.text_drag_origin_start
+	previous_end := ui.text_drag_origin_end
+	defer {
+		ui.caret_byte_offset = previous_caret
+		ui.selection_anchor_byte = previous_anchor
+		ui.text_drag_focus = previous_focus
+		ui.text_drag_granularity = previous_granularity
+		ui.text_drag_active = previous_drag
+		ui.text_drag_origin_start = previous_start
+		ui.text_drag_origin_end = previous_end
+	}
+	begin_text_selection_at_offset(&value, .Exercise_Name, 1, 1)
+	testing.expect_value(t, ui.selection_anchor_byte, 1)
+	testing.expect_value(t, ui.caret_byte_offset, 1)
+	begin_text_selection_at_offset(&value, .Exercise_Name, 5, 2)
+	start, end := text_selection_bounds(value)
+	testing.expect_value(t, value[start:end], "two")
+	begin_text_selection_at_offset(&value, .Exercise_Name, 3, 3)
+	start, end = text_selection_bounds(value)
+	testing.expect_value(t, start, 0)
+	testing.expect_value(t, end, len(value))
+	testing.expect(t, !ui.text_drag_active)
+}
+
+@(test)
+text_selection_navigation_extends_and_collapses_test :: proc(t: ^testing.T) {
+	value := strings.clone("ab\ncafé")
+	defer delete(value)
+	previous_caret := ui.caret_byte_offset
+	previous_anchor := ui.selection_anchor_byte
+	previous_redraw := ui.needs_redraw
+	defer {
+		ui.caret_byte_offset = previous_caret
+		ui.selection_anchor_byte = previous_anchor
+		ui.needs_redraw = previous_redraw
+	}
+	collapse_text_selection(1)
+	move_text_right(&value, true)
+	testing.expect_value(t, ui.selection_anchor_byte, 1)
+	testing.expect_value(t, ui.caret_byte_offset, 2)
+	move_text_left(&value, false)
+	testing.expect_value(t, ui.caret_byte_offset, 1)
+	move_text_selection(
+		&value,
+		vertical_text_offset(value, 1, 1),
+		true,
+	)
+	testing.expect_value(t, ui.selection_anchor_byte, 1)
+	testing.expect_value(t, ui.caret_byte_offset, len("ab\nc"))
+}
+
+@(test)
+text_word_movement_skips_utf8_words_and_delimiters_test :: proc(t: ^testing.T) {
+	text := "one,  café_two! end"
+	first_end := len("one")
+	second_start := len("one,  ")
+	second_end := len("one,  café_two")
+	third_start := len("one,  café_two! ")
+	testing.expect_value(t, next_word_offset(text, 0), first_end)
+	testing.expect_value(t, next_word_offset(text, first_end), second_end)
+	testing.expect_value(
+		t,
+		next_word_offset(text, second_start + len("ca")),
+		second_end,
+	)
+	testing.expect_value(t, previous_word_offset(text, len(text)), third_start)
+	testing.expect_value(
+		t,
+		previous_word_offset(text, third_start),
+		second_end,
+	)
+	testing.expect_value(
+		t,
+		previous_word_offset(text, second_end),
+		second_start,
+	)
+	testing.expect_value(t, previous_word_offset(text, 0), 0)
+	testing.expect_value(t, next_word_offset(text, len(text)), len(text))
+}
+
+@(test)
+text_word_movement_extends_and_collapses_selection_test :: proc(t: ^testing.T) {
+	value := strings.clone("one two three")
+	defer delete(value)
+	previous_caret := ui.caret_byte_offset
+	previous_anchor := ui.selection_anchor_byte
+	previous_redraw := ui.needs_redraw
+	defer {
+		ui.caret_byte_offset = previous_caret
+		ui.selection_anchor_byte = previous_anchor
+		ui.needs_redraw = previous_redraw
+	}
+	collapse_text_selection(0)
+	move_text_word_right(&value, true)
+	testing.expect_value(t, ui.selection_anchor_byte, 0)
+	testing.expect_value(t, ui.caret_byte_offset, len("one"))
+	move_text_word_right(&value, true)
+	testing.expect_value(t, ui.caret_byte_offset, len("one two"))
+	move_text_word_left(&value, true)
+	testing.expect_value(t, ui.caret_byte_offset, len("one "))
+	move_text_word_left(&value, false)
+	testing.expect_value(t, ui.caret_byte_offset, 0)
+	testing.expect_value(t, ui.selection_anchor_byte, 0)
+}
+
+@(test)
+text_word_movement_preserves_word_end_between_delimiters_test :: proc(t: ^testing.T) {
+	text := "Larynx control - GYUUG"
+	after_control := len("Larynx control")
+	before_control := len("Larynx ")
+	before_gyuug := len("Larynx control - ")
+	testing.expect_value(t, previous_word_offset(text, len(text)), before_gyuug)
+	testing.expect_value(t, previous_word_offset(text, before_gyuug), after_control)
+	testing.expect_value(t, previous_word_offset(text, after_control), before_control)
 }
 
 @(test)

@@ -85,6 +85,12 @@ UI_Focus :: enum {
 	Exercise_Rename,
 }
 
+Text_Selection_Granularity :: enum {
+	Character,
+	Word,
+	All,
+}
+
 UI_Mode :: enum {
 	Create,
 	Play,
@@ -130,8 +136,15 @@ UI_State :: struct {
 	focus:              UI_Focus,
 	palette_previous_focus: UI_Focus,
 	caret_byte_offset:  int,
+	selection_anchor_byte: int,
 	palette_previous_caret: int,
+	palette_previous_selection_anchor: int,
 	marked_start_byte:  int,
+	text_drag_focus:    UI_Focus,
+	text_drag_granularity: Text_Selection_Granularity,
+	text_drag_origin_start: int,
+	text_drag_origin_end: int,
+	text_drag_active:   bool,
 	text_scroll_x:      f64,
 	palette_previous_text_scroll: f64,
 	mode:               UI_Mode,
@@ -411,6 +424,11 @@ msg_bool_sel :: proc(receiver: Id, selector, value: Sel) -> bool {
 	return p(receiver, selector, value)
 }
 
+msg_bool_id_id :: proc(receiver: Id, selector: Sel, a, b: Id) -> bool {
+	p := transmute(proc "c" (_: Id, _: Sel, _: Id, _: Id) -> bool)send_address
+	return p(receiver, selector, a, b)
+}
+
 msg_void_bool :: proc(receiver: Id, selector: Sel, value: bool) {
 	p := transmute(proc "c" (_: Id, _: Sel, _: bool))send_address
 	p(receiver, selector, value)
@@ -580,6 +598,87 @@ next_character_offset :: proc(text: string, offset: int) -> int {
 	return index
 }
 
+text_selection_bounds :: proc(text: string) -> (start, end: int) {
+	anchor := min(max(ui.selection_anchor_byte, 0), len(text))
+	active := min(max(ui.caret_byte_offset, 0), len(text))
+	return min(anchor, active), max(anchor, active)
+}
+
+text_has_selection :: proc(text: string) -> bool {
+	start, end := text_selection_bounds(text)
+	return start != end
+}
+
+collapse_text_selection :: proc(offset: int) {
+	ui.caret_byte_offset = offset
+	ui.selection_anchor_byte = offset
+	ui.needs_redraw = true
+}
+
+set_text_selection :: proc(anchor, active: int, text: string) {
+	ui.selection_anchor_byte = min(max(anchor, 0), len(text))
+	ui.caret_byte_offset = min(max(active, 0), len(text))
+	ui.needs_redraw = true
+}
+
+remove_text_selection :: proc(target: ^string) -> bool {
+	start, end := text_selection_bounds(target^)
+	if start == end {return false}
+	updated := fmt.tprintf("%s%s", target^[:start], target^[end:])
+	ui_set_string(target, updated)
+	collapse_text_selection(start)
+	return true
+}
+
+replace_text_selection :: proc(target: ^string, value: string) {
+	start, end := text_selection_bounds(target^)
+	updated := fmt.tprintf("%s%s%s", target^[:start], value, target^[end:])
+	ui_set_string(target, updated)
+	collapse_text_selection(start + len(value))
+}
+
+Text_Character_Class :: enum {
+	Word,
+	Whitespace,
+	Punctuation,
+}
+
+text_character_class :: proc(text: string, offset: int) -> Text_Character_Class {
+	if offset < 0 || offset >= len(text) {return .Whitespace}
+	value := text[offset]
+	if value >= 0x80 ||
+	   value >= 'a' && value <= 'z' ||
+	   value >= 'A' && value <= 'Z' ||
+	   value >= '0' && value <= '9' ||
+	   value == '_' {
+		return .Word
+	}
+	if value == ' ' || value == '\t' || value == '\n' ||
+	   value == '\r' || value == '\v' || value == '\f' {
+		return .Whitespace
+	}
+	return .Punctuation
+}
+
+text_word_bounds :: proc(text: string, offset: int) -> (start, end: int) {
+	if len(text) == 0 {return 0, 0}
+	index := min(max(offset, 0), len(text))
+	if index == len(text) {index = previous_character_offset(text, index)}
+	class := text_character_class(text, index)
+	start = index
+	for start > 0 {
+		previous := previous_character_offset(text, start)
+		if text_character_class(text, previous) != class {break}
+		start = previous
+	}
+	end = next_character_offset(text, index)
+	for end < len(text) {
+		if text_character_class(text, end) != class {break}
+		end = next_character_offset(text, end)
+	}
+	return
+}
+
 byte_offset_for_utf16_index :: proc(text: string, target_index: int) -> int {
 	byte_index, utf16_index := 0, 0
 	for byte_index < len(text) && utf16_index < target_index {
@@ -596,30 +695,31 @@ byte_offset_for_utf16_index :: proc(text: string, target_index: int) -> int {
 }
 
 insert_text_at_caret :: proc(target: ^string, value: string) {
-	caret := min(max(ui.caret_byte_offset, 0), len(target^))
-	updated := fmt.tprintf("%s%s%s", target^[:caret], value, target^[caret:])
-	ui_set_string(target, updated)
-	ui.caret_byte_offset = caret + len(value)
+	replace_text_selection(target, value)
 }
 
 remove_character_before_caret :: proc(target: ^string) {
+	if remove_text_selection(target) {return}
 	caret := min(max(ui.caret_byte_offset, 0), len(target^))
 	start := previous_character_offset(target^, caret)
 	if start == caret {return}
 	updated := fmt.tprintf("%s%s", target^[:start], target^[caret:])
 	ui_set_string(target, updated)
-	ui.caret_byte_offset = start
+	collapse_text_selection(start)
 }
 
 remove_character_after_caret :: proc(target: ^string) {
+	if remove_text_selection(target) {return}
 	caret := min(max(ui.caret_byte_offset, 0), len(target^))
 	end := next_character_offset(target^, caret)
 	if end == caret {return}
 	updated := fmt.tprintf("%s%s", target^[:caret], target^[end:])
 	ui_set_string(target, updated)
+	collapse_text_selection(caret)
 }
 
 remove_word_before_caret :: proc(target: ^string) {
+	if remove_text_selection(target) {return}
 	caret := min(max(ui.caret_byte_offset, 0), len(target^))
 	start := caret
 	for start > 0 {
@@ -634,7 +734,7 @@ remove_word_before_caret :: proc(target: ^string) {
 	}
 	updated := fmt.tprintf("%s%s", target^[:start], target^[caret:])
 	ui_set_string(target, updated)
-	ui.caret_byte_offset = start
+	collapse_text_selection(start)
 }
 
 line_start_for_offset :: proc(text: string, offset: int) -> int {
@@ -649,6 +749,154 @@ line_end_for_offset :: proc(text: string, offset: int) -> int {
 	return index
 }
 
+character_column_for_offset :: proc(text: string, line_start, offset: int) -> int {
+	column := 0
+	index := min(max(line_start, 0), len(text))
+	end := min(max(offset, index), len(text))
+	for index < end {
+		index = next_character_offset(text, index)
+		column += 1
+	}
+	return column
+}
+
+offset_for_character_column :: proc(
+	text: string,
+	line_start, line_end, column: int,
+) -> int {
+	offset := min(max(line_start, 0), len(text))
+	end := min(max(line_end, offset), len(text))
+	for _ in 0 ..< column {
+		if offset >= end {break}
+		offset = next_character_offset(text, offset)
+	}
+	return offset
+}
+
+vertical_text_offset :: proc(text: string, offset, direction: int) -> int {
+	current_start := line_start_for_offset(text, offset)
+	current_end := line_end_for_offset(text, offset)
+	column := character_column_for_offset(text, current_start, offset)
+	if direction < 0 {
+		if current_start == 0 {return offset}
+		previous_end := current_start - 1
+		previous_start := line_start_for_offset(text, previous_end)
+		return offset_for_character_column(
+			text,
+			previous_start,
+			previous_end,
+			column,
+		)
+	}
+	if current_end >= len(text) {return offset}
+	next_start := current_end + 1
+	next_end := line_end_for_offset(text, next_start)
+	return offset_for_character_column(text, next_start, next_end, column)
+}
+
+move_text_selection :: proc(target: ^string, destination: int, extend: bool) {
+	next := min(max(destination, 0), len(target^))
+	if extend {
+		ui.caret_byte_offset = next
+	} else {
+		collapse_text_selection(next)
+	}
+	ui.needs_redraw = true
+}
+
+move_text_left :: proc(target: ^string, extend: bool) {
+	start, _ := text_selection_bounds(target^)
+	if !extend && text_has_selection(target^) {
+		collapse_text_selection(start)
+		return
+	}
+	move_text_selection(
+		target,
+		previous_character_offset(target^, ui.caret_byte_offset),
+		extend,
+	)
+}
+
+move_text_right :: proc(target: ^string, extend: bool) {
+	_, end := text_selection_bounds(target^)
+	if !extend && text_has_selection(target^) {
+		collapse_text_selection(end)
+		return
+	}
+	move_text_selection(
+		target,
+		next_character_offset(target^, ui.caret_byte_offset),
+		extend,
+	)
+}
+
+previous_word_offset :: proc(text: string, offset: int) -> int {
+	index := min(max(offset, 0), len(text))
+	if index > 0 {
+		previous := previous_character_offset(text, index)
+		if text_character_class(text, previous) != .Word {
+			for index > 0 {
+				previous = previous_character_offset(text, index)
+				if text_character_class(text, previous) == .Word {break}
+				index = previous
+			}
+			return index
+		}
+	}
+	for index > 0 {
+		previous := previous_character_offset(text, index)
+		if text_character_class(text, previous) != .Word {break}
+		index = previous
+	}
+	return index
+}
+
+next_word_offset :: proc(text: string, offset: int) -> int {
+	index := min(max(offset, 0), len(text))
+	if index < len(text) && text_character_class(text, index) == .Word {
+		for index < len(text) &&
+		    text_character_class(text, index) == .Word {
+			index = next_character_offset(text, index)
+		}
+		return index
+	}
+	for index < len(text) &&
+	    text_character_class(text, index) != .Word {
+		index = next_character_offset(text, index)
+	}
+	for index < len(text) &&
+	    text_character_class(text, index) == .Word {
+		index = next_character_offset(text, index)
+	}
+	return index
+}
+
+move_text_word_left :: proc(target: ^string, extend: bool) {
+	start, _ := text_selection_bounds(target^)
+	if !extend && text_has_selection(target^) {
+		collapse_text_selection(start)
+		return
+	}
+	move_text_selection(
+		target,
+		previous_word_offset(target^, ui.caret_byte_offset),
+		extend,
+	)
+}
+
+move_text_word_right :: proc(target: ^string, extend: bool) {
+	_, end := text_selection_bounds(target^)
+	if !extend && text_has_selection(target^) {
+		collapse_text_selection(end)
+		return
+	}
+	move_text_selection(
+		target,
+		next_word_offset(target^, ui.caret_byte_offset),
+		extend,
+	)
+}
+
 clear_marked_text :: proc() {
 	ui_set_string(&ui.marked_text, "")
 	ui.has_marked_text = false
@@ -660,7 +908,7 @@ remove_marked_text :: proc(target: ^string) {
 	end := min(start + len(ui.marked_text), len(target^))
 	updated := fmt.tprintf("%s%s", target^[:start], target^[end:])
 	ui_set_string(target, updated)
-	ui.caret_byte_offset = start
+	collapse_text_selection(start)
 	clear_marked_text()
 }
 
@@ -722,7 +970,9 @@ focus_text_input :: proc(focus: UI_Focus) {
 	changed := ui.focus != focus
 	ui.focus = focus
 	if changed {
-		if target := focused_text(); target != nil {ui.caret_byte_offset = len(target^)}
+		if target := focused_text(); target != nil {
+			collapse_text_selection(len(target^))
+		}
 		ui.text_scroll_x = 0
 	}
 	if state.window != nil && ui.view != nil {
@@ -742,6 +992,8 @@ unfocus_text_input :: proc() -> bool {
 	if target != nil {remove_marked_text(target)} else {clear_marked_text()}
 	if had_marked_text && target != nil {focused_text_changed(target)}
 	ui.focus = .None
+	ui.text_drag_active = false
+	ui.selection_anchor_byte = ui.caret_byte_offset
 	ui.text_scroll_x = 0
 	ui.needs_redraw = true
 	return true
@@ -1072,6 +1324,7 @@ open_notification_history :: proc() {
 	if ui.source_modal_open {close_source_modal()}
 	ui.notification_modal_open = true
 	ui.focus = .None
+	ui.text_drag_active = false
 	ui.notification_scroll = 0
 	selected := notification_find(notification_history.current_id)
 	if selected == nil {selected = notification_latest()}
@@ -1170,6 +1423,7 @@ open_source_details :: proc(source_index: int) {
 	ui.source_details_index = source_index
 	ui.source_details_open = true
 	ui.focus = .None
+	ui.text_drag_active = false
 	ui.has_marked_text = false
 	ui_set_string(&ui.marked_text, "")
 	ui.needs_redraw = true
@@ -1191,6 +1445,7 @@ close_exercise_rename :: proc() {
 	ui.exercise_rename_open = false
 	ui.exercise_rename_index = -1
 	ui.focus = .None
+	ui.text_drag_active = false
 	ui.has_marked_text = false
 	ui_set_string(&ui.marked_text, "")
 	ui_set_string(&ui.exercise_rename, "")
@@ -1219,6 +1474,7 @@ open_exercise_metadata :: proc() {
 	ui.exercise_metadata_index = ui.active_exercise
 	ui.exercise_metadata_open = true
 	ui.focus = .None
+	ui.text_drag_active = false
 	ui.needs_redraw = true
 }
 
@@ -1236,6 +1492,7 @@ open_data_modal :: proc() {
 	ui.library_import_confirm_open = false
 	ui.library_import_pending = false
 	ui.focus = .None
+	ui.text_drag_active = false
 	ui.needs_redraw = true
 }
 
@@ -1272,10 +1529,7 @@ open_source_modal :: proc() {
 	if ui.source_details_open {close_source_details()}
 	ui.source_modal_refetch_index = -1
 	ui.source_modal_open = true
-	ui.focus = .URL
-	if state.window != nil && ui.view != nil {
-		msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
-	}
+	focus_text_input(.URL)
 	ui.needs_redraw = true
 	if len(strings.trim_space(ui.url_input)) > 0 && len(source_probe_results) == 0 {schedule_source_probe(1)}
 }
@@ -1287,6 +1541,7 @@ open_refetch_source_modal :: proc(source_index: int) {
 	ui.source_modal_refetch_index = source_index
 	ui.source_modal_open = true
 	ui.focus = .None
+	ui.text_drag_active = false
 	ui_set_string(&ui.url_input, state.sources[source_index].url)
 	source_probe_results_clear()
 	schedule_source_probe(1)
@@ -1298,6 +1553,7 @@ close_source_modal :: proc() {
 	ui.source_modal_open = false
 	ui.source_modal_refetch_index = -1
 	ui.focus = .None
+	ui.text_drag_active = false
 	ui.has_marked_text = false
 	ui_set_string(&ui.marked_text, "")
 	ui.needs_redraw = true
@@ -1329,6 +1585,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	}
 	ui.mode = mode
 	ui.focus = .None
+	ui.text_drag_active = false
 	ui.has_marked_text = false
 	ui_set_string(&ui.marked_text, "")
 	normalize_scroll_offsets()
@@ -1438,8 +1695,22 @@ is_paste_shortcut :: proc(key, modifiers: uint) -> bool {
 	return key == 9 && modifiers & NSEventModifierFlagCommand != 0
 }
 
+is_copy_shortcut :: proc(key, modifiers: uint) -> bool {
+	return key == 8 && modifiers & NSEventModifierFlagCommand != 0
+}
+
+is_cut_shortcut :: proc(key, modifiers: uint) -> bool {
+	return key == 7 && modifiers & NSEventModifierFlagCommand != 0
+}
+
+is_select_all_shortcut :: proc(key, modifiers: uint) -> bool {
+	return key == 0 && modifiers & NSEventModifierFlagCommand != 0
+}
+
 is_delete_word_shortcut :: proc(key, modifiers: uint) -> bool {
-	return key == 51 && modifiers & NSEventModifierFlagControl != 0
+	return key == 51 &&
+	       modifiers &
+	       (NSEventModifierFlagControl | NSEventModifierFlagOption) != 0
 }
 
 NSEventModifierFlagControl :: uint(1 << 18)
@@ -2176,6 +2447,8 @@ draw_editable_text_field :: proc(
 	focus: UI_Focus,
 	text_color, placeholder_color, caret_color: [4]f64,
 	inset := 8.0,
+	base_byte_offset := 0,
+	prefix_bytes := 0,
 ) {
 	if ui.focus != focus {
 		value := text
@@ -2189,39 +2462,99 @@ draw_editable_text_field :: proc(
 	run := make_text_run(font, run_text)
 	defer delete_text_run(&run)
 	if run.line == nil {return}
-	caret := min(max(ui.caret_byte_offset, 0), len(text))
-	caret_utf16 := utf16_index_for_byte_offset(text, caret)
+	logical_bytes := max(0, len(text) - prefix_bytes)
+	logical_end := base_byte_offset + logical_bytes
+	caret_in_line := ui.caret_byte_offset >= base_byte_offset &&
+	                 ui.caret_byte_offset <= logical_end
+	local_caret := min(
+		max(prefix_bytes + ui.caret_byte_offset - base_byte_offset, prefix_bytes),
+		len(text),
+	)
+	caret_utf16 := utf16_index_for_byte_offset(text, local_caret)
 	caret_advance := CTLineGetOffsetForStringIndex(run.line, caret_utf16, nil) / ui.scale
 	available := max(0, rect.w - inset * 2)
-	if caret_advance - ui.text_scroll_x > available {ui.text_scroll_x = caret_advance - available}
-	if caret_advance - ui.text_scroll_x < 0 {ui.text_scroll_x = caret_advance}
+	if caret_in_line {
+		if caret_advance - ui.text_scroll_x > available {
+			ui.text_scroll_x = caret_advance - available
+		}
+		if caret_advance - ui.text_scroll_x < 0 {
+			ui.text_scroll_x = caret_advance
+		}
+	}
 	origin := text_origin(rect, run, .Start, .Center, inset)
 	origin.x -= ui.text_scroll_x * ui.scale
 	CGContextSaveGState(ctx)
 	CGContextClipToRect(ctx, Rect{Point{rect.x * ui.scale, rect.y * ui.scale}, Size{rect.w * ui.scale, rect.h * ui.scale}})
+	selection_start := min(ui.selection_anchor_byte, ui.caret_byte_offset)
+	selection_end := max(ui.selection_anchor_byte, ui.caret_byte_offset)
+	line_selection_start := min(max(selection_start, base_byte_offset), logical_end)
+	line_selection_end := min(max(selection_end, base_byte_offset), logical_end)
+	if line_selection_start < line_selection_end {
+		local_start := prefix_bytes + line_selection_start - base_byte_offset
+		local_end := prefix_bytes + line_selection_end - base_byte_offset
+		start_advance := CTLineGetOffsetForStringIndex(
+			run.line,
+			utf16_index_for_byte_offset(text, local_start),
+			nil,
+		) / ui.scale
+		end_advance := CTLineGetOffsetForStringIndex(
+			run.line,
+			utf16_index_for_byte_offset(text, local_end),
+			nil,
+		) / ui.scale
+		selection_color := caret_color
+		selection_color[3] = 0.32
+		fill_overlay_rect(
+			ctx,
+			UI_Rect{
+				rect.x + inset + start_advance - ui.text_scroll_x,
+				rect.y + 4,
+				max(1 / ui.scale, end_advance - start_advance),
+				max(1, rect.h - 8),
+			},
+			selection_color,
+		)
+	}
 	if len(text) > 0 {draw_text_run(ctx, run, origin, text_color)}
-	caret_x := rect.x + inset + caret_advance - ui.text_scroll_x
-	fill_overlay_rect(ctx, UI_Rect{caret_x, rect.y + 5, max(1 / ui.scale, 0.5), max(1, rect.h - 10)}, caret_color)
+	if caret_in_line && ui.selection_anchor_byte == ui.caret_byte_offset {
+		caret_x := rect.x + inset + caret_advance - ui.text_scroll_x
+		fill_overlay_rect(
+			ctx,
+			UI_Rect{
+				caret_x,
+				rect.y + 5,
+				max(1 / ui.scale, 0.5),
+				max(1, rect.h - 10),
+			},
+			caret_color,
+		)
+	}
 	CGContextRestoreGState(ctx)
 }
 
-place_caret_in_text_field :: proc(text: string, rect: UI_Rect, point: Point, inset := 8.0, base_byte_offset := 0, prefix_bytes := 0) {
-	if len(text) == 0 {ui.caret_byte_offset = base_byte_offset; return}
+text_offset_at_point :: proc(
+	text: string,
+	rect: UI_Rect,
+	point: Point,
+	inset := 8.0,
+	base_byte_offset := 0,
+	prefix_bytes := 0,
+) -> int {
+	if len(text) == 0 {return base_byte_offset}
 	font_name := CFStringCreateWithCString(nil, UI_FONT_NAME, 0x08000100)
-	if font_name == nil {return}
+	if font_name == nil {return base_byte_offset}
 	font := CTFontCreateWithName(font_name, SMALL_FONT_SIZE * ui.scale, nil)
 	CFRelease(font_name)
-	if font == nil {return}
+	if font == nil {return base_byte_offset}
 	defer CFRelease(font)
 	run := make_text_run(font, text)
 	defer delete_text_run(&run)
-	if run.line == nil {return}
+	if run.line == nil {return base_byte_offset}
 	x := max(0, (point.x - rect.x - inset + ui.text_scroll_x) * ui.scale)
 	utf16_index := CTLineGetStringIndexForPosition(run.line, Point{x, 0})
 	if utf16_index < 0 {utf16_index = utf16_index_for_byte_offset(text, len(text))}
 	byte_offset := byte_offset_for_utf16_index(text, utf16_index)
-	ui.caret_byte_offset = base_byte_offset + max(0, byte_offset - prefix_bytes)
-	ui.needs_redraw = true
+	return base_byte_offset + max(0, byte_offset - prefix_bytes)
 }
 
 utf16_index_for_byte_offset :: proc(text: string, byte_offset: int) -> int {
@@ -4026,21 +4359,30 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		} else {
 			line_y := input.y + input.h - 30
 			lines := strings.split_lines(ui.url_input)
-			caret_line, line_start := 0, 0
+			caret_line := 0
 			for index in 0 ..< min(ui.caret_byte_offset, len(ui.url_input)) {
-				if ui.url_input[index] == '\n' {caret_line += 1; line_start = index + 1}
+				if ui.url_input[index] == '\n' {caret_line += 1}
 			}
 			first_line := min(max(0, caret_line - 9), max(0, len(lines) - 10))
 			visible_line_start := 0
 			for index in 0 ..< first_line {visible_line_start += len(lines[index]) + 1}
 			for line, visible_index in lines[first_line:] {
 				field := UI_Rect{input.x + 12, line_y, input.w - 24, 22}
-				line_index := first_line + visible_index
-				if ui.focus == .URL && line_index == caret_line {
-					saved_caret := ui.caret_byte_offset
-					ui.caret_byte_offset = 2 + saved_caret - line_start
-					draw_editable_text_field(ctx, small_font, fmt.tprintf("$ %s", line), "", field, .URL, ink, dim, orange, 0)
-					ui.caret_byte_offset = saved_caret
+				if ui.focus == .URL {
+					draw_editable_text_field(
+						ctx,
+						small_font,
+						fmt.tprintf("$ %s", line),
+						"",
+						field,
+						.URL,
+						ink,
+						dim,
+						orange,
+						0,
+						visible_line_start,
+						2,
+					)
 				} else {
 					draw_text_in_rect(ctx, small_font, fmt.tprintf("$ %s", line), field, .Start, .Center, ink)
 				}
@@ -4355,7 +4697,7 @@ add_ax_element :: proc(
 	}
 	#partial switch kind {
 	case .Command_Palette_Search, .URL, .Source_Search, .Transcript_Search, .Exercise_Search, .Exercise_Name, .Exercise_Rename:
-		flags += {.Editable}
+		flags += {.Editable, .Drag}
 	}
 	control := UI_Control {
 		id = ui_control_id(stable_name),
@@ -5419,6 +5761,7 @@ begin_command_palette :: proc() -> bool {
 	if ui.notification_modal_open {close_notification_history()}
 	ui.palette_previous_focus = ui.focus
 	ui.palette_previous_caret = ui.caret_byte_offset
+	ui.palette_previous_selection_anchor = ui.selection_anchor_byte
 	ui.palette_previous_text_scroll = ui.text_scroll_x
 	if ui.has_marked_text {
 		ui.has_marked_text = false
@@ -5429,7 +5772,7 @@ begin_command_palette :: proc() -> bool {
 	entries := build_command_palette_entries()
 	command_palette.open(&command_palette_state, entries[:], palette_active_context())
 	ui.focus = .Command_Palette
-	ui.caret_byte_offset = 0
+	collapse_text_selection(0)
 	ui.text_scroll_x = 0
 	ui.needs_redraw = true
 	return true
@@ -5446,12 +5789,14 @@ close_command_palette :: proc(restore_focus: bool) {
 	if restore_focus {
 		ui.focus = ui.palette_previous_focus
 		ui.caret_byte_offset = ui.palette_previous_caret
+		ui.selection_anchor_byte = ui.palette_previous_selection_anchor
 		ui.text_scroll_x = ui.palette_previous_text_scroll
 	} else {
 		ui.focus = .None
-		ui.caret_byte_offset = 0
+		collapse_text_selection(0)
 		ui.text_scroll_x = 0
 	}
+	ui.text_drag_active = false
 	ui.needs_redraw = true
 }
 
@@ -5470,6 +5815,7 @@ activate_command_palette_result :: proc(result_index: int) -> bool {
 	ui_set_string(&ui.command_palette_query, "")
 	ui.command_palette_scroll = 0
 	ui.focus = .None
+	ui.text_drag_active = false
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
 	if ui.exercise_rename_open {close_exercise_rename()}
@@ -6009,55 +6355,160 @@ activate_control :: proc(index: int) {
 	if control != nil && .Enabled in control.flags {_ = activate_ui_action(control.action)}
 }
 
-activate_registered_target_at_point :: proc(point: Point) -> bool {
+editable_action_for_focus :: proc(
+	focus: UI_Focus,
+) -> (UI_Action_Kind, bool) {
+	#partial switch focus {
+	case .Command_Palette: return .Command_Palette_Search, true
+	case .URL:              return .URL, true
+	case .Source_Search:    return .Source_Search, true
+	case .Transcript_Search:return .Transcript_Search, true
+	case .Exercise_Search:  return .Exercise_Search, true
+	case .Exercise_Name:    return .Exercise_Name, true
+	case .Exercise_Rename:  return .Exercise_Rename, true
+	}
+	return .Command_Palette_Search, false
+}
+
+text_line_for_offset :: proc(text: string, offset: int) -> int {
+	line := 0
+	for index in 0 ..< min(max(offset, 0), len(text)) {
+		if text[index] == '\n' {line += 1}
+	}
+	return line
+}
+
+editable_offset_at_point :: proc(
+	control: ^UI_Control,
+	focus: UI_Focus,
+	point: Point,
+) -> int {
+	target := focused_text()
+	if target == nil {return 0}
+	if focus == .Command_Palette {
+		return text_offset_at_point(target^, control.rect, point, 12)
+	}
+	if focus != .URL {
+		return text_offset_at_point(target^, control.rect, point)
+	}
+	lines := strings.split_lines(target^)
+	if len(lines) == 0 {return 0}
+	caret_line := text_line_for_offset(target^, ui.caret_byte_offset)
+	first_line := min(max(0, caret_line - 9), max(0, len(lines) - 10))
+	relative_line := int(max(
+		0,
+		min(
+			f64(min(9, len(lines) - first_line - 1)),
+			(control.rect.y + control.rect.h - 19 - point.y) / 23,
+		),
+	))
+	clicked_line := first_line + relative_line
+	line_start := 0
+	for index in 0 ..< clicked_line {line_start += len(lines[index]) + 1}
+	return text_offset_at_point(
+		fmt.tprintf("$ %s", lines[clicked_line]),
+		UI_Rect{
+			control.rect.x + 12,
+			control.rect.y,
+			control.rect.w - 24,
+			control.rect.h,
+		},
+		point,
+		0,
+		line_start,
+		2,
+	)
+}
+
+begin_text_selection_at_offset :: proc(
+	target: ^string,
+	focus: UI_Focus,
+	offset: int,
+	click_count: uint,
+) {
+	ui.text_drag_focus = focus
+	ui.text_drag_active = click_count < 3
+	if click_count >= 3 {
+		ui.text_drag_granularity = .All
+		ui.text_drag_origin_start = 0
+		ui.text_drag_origin_end = len(target^)
+		set_text_selection(0, len(target^), target^)
+		return
+	}
+	if click_count == 2 {
+		start, end := text_word_bounds(target^, offset)
+		ui.text_drag_granularity = .Word
+		ui.text_drag_origin_start = start
+		ui.text_drag_origin_end = end
+		set_text_selection(start, end, target^)
+		return
+	}
+	ui.text_drag_granularity = .Character
+	ui.text_drag_origin_start = offset
+	ui.text_drag_origin_end = offset
+	set_text_selection(offset, offset, target^)
+}
+
+begin_text_pointer_selection :: proc(
+	control: ^UI_Control,
+	focus: UI_Focus,
+	point: Point,
+	click_count: uint,
+) {
+	clear_marked_text()
+	focus_text_input(focus)
+	target := focused_text()
+	if target == nil {return}
+	offset := editable_offset_at_point(control, focus, point)
+	begin_text_selection_at_offset(target, focus, offset, click_count)
+}
+
+update_text_pointer_selection :: proc(point: Point) -> bool {
+	if !ui.text_drag_active || ui.focus != ui.text_drag_focus {return false}
+	kind, valid_kind := editable_action_for_focus(ui.text_drag_focus)
+	if !valid_kind {return false}
+	control := find_ui_control_by_action(kind)
+	target := focused_text()
+	if control == nil || target == nil {return false}
+	offset := editable_offset_at_point(control, ui.text_drag_focus, point)
+	switch ui.text_drag_granularity {
+	case .Character:
+		set_text_selection(ui.text_drag_origin_start, offset, target^)
+	case .Word:
+		start, end := text_word_bounds(target^, offset)
+		if offset < ui.text_drag_origin_start {
+			set_text_selection(ui.text_drag_origin_end, start, target^)
+		} else {
+			set_text_selection(ui.text_drag_origin_start, end, target^)
+		}
+	case .All:
+		set_text_selection(0, len(target^), target^)
+	}
+	return true
+}
+
+activate_registered_target_at_point :: proc(
+	point: Point,
+	click_count: uint = 1,
+) -> bool {
 	control := find_ui_control_at_point(ui_build.controls[:], point, .Primary_Press)
 	if control == nil {return false}
 	#partial switch control.action.kind {
 	case .Command_Palette_Search:
-		clear_marked_text()
-		focus_text_input(.Command_Palette)
-		place_caret_in_text_field(ui.command_palette_query, control.rect, point, 12)
+		begin_text_pointer_selection(control, .Command_Palette, point, click_count)
 	case .URL:
 		if ui.source_modal_refetch_index >= 0 {return true}
-		focus_text_input(.URL)
-		lines := strings.split_lines(ui.url_input)
-		caret_line := 0
-		for index in 0 ..< min(ui.caret_byte_offset, len(ui.url_input)) {
-			if ui.url_input[index] == '\n' {caret_line += 1}
-		}
-		first_line := min(max(0, caret_line - 9), max(0, len(lines) - 10))
-		clicked_line := first_line + int(max(
-			0,
-			min(
-				f64(len(lines) - first_line - 1),
-				(control.rect.y + control.rect.h - 19 - point.y) / 23,
-			),
-		))
-		line_start := 0
-		for index in 0 ..< clicked_line {line_start += len(lines[index]) + 1}
-		place_caret_in_text_field(
-			fmt.tprintf("$ %s", lines[clicked_line]),
-			UI_Rect{control.rect.x + 12, control.rect.y, control.rect.w - 24, control.rect.h},
-			point,
-			0,
-			line_start,
-			2,
-		)
+		begin_text_pointer_selection(control, .URL, point, click_count)
 	case .Source_Search:
-		focus_text_input(.Source_Search)
-		place_caret_in_text_field(ui.source_search, control.rect, point)
+		begin_text_pointer_selection(control, .Source_Search, point, click_count)
 	case .Transcript_Search:
-		focus_text_input(.Transcript_Search)
-		place_caret_in_text_field(ui.transcript_search, control.rect, point)
+		begin_text_pointer_selection(control, .Transcript_Search, point, click_count)
 	case .Exercise_Search:
-		focus_text_input(.Exercise_Search)
-		place_caret_in_text_field(ui.exercise_search, control.rect, point)
+		begin_text_pointer_selection(control, .Exercise_Search, point, click_count)
 	case .Exercise_Name:
-		focus_text_input(.Exercise_Name)
-		place_caret_in_text_field(ui.exercise_name, control.rect, point)
+		begin_text_pointer_selection(control, .Exercise_Name, point, click_count)
 	case .Exercise_Rename:
-		focus_text_input(.Exercise_Rename)
-		place_caret_in_text_field(ui.exercise_rename, control.rect, point)
+		begin_text_pointer_selection(control, .Exercise_Rename, point, click_count)
 	case .Source_Timeline:
 		ui.source_scrubbing = true
 		seek_player_timeline_rect(point, control.rect)
@@ -6067,60 +6518,71 @@ activate_registered_target_at_point :: proc(point: Point) -> bool {
 	return true
 }
 
-dispatch_click :: proc(point: Point) {
+dispatch_click :: proc(point: Point, click_count: uint = 1) {
 	cancel_ui_flash()
+	ui.text_drag_active = false
 	if command_palette.is_open(&command_palette_state) {
 		modal := command_palette_rect()
 		if !contains(modal, point) {close_command_palette(true); return}
-		_ = activate_registered_target_at_point(point)
+		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
 	clear_marked_text()
 	if ui.notification_modal_open {
 		modal := notification_modal_rect()
 		if !contains(modal, point) {close_notification_history(); return}
-		_ = activate_registered_target_at_point(point)
+		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
 	if ui.data_modal_open {
 		modal := data_modal_rect()
 		if !contains(modal, point) {close_data_modal(); return}
-		_ = activate_registered_target_at_point(point)
+		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
 	if ui.exercise_metadata_open {
 		modal := exercise_metadata_modal_rect()
 		if !contains(modal, point) {close_exercise_metadata(); return}
-		_ = activate_registered_target_at_point(point)
+		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
 	if ui.exercise_rename_open {
 		modal := exercise_rename_modal_rect()
 		if !contains(modal, point) {close_exercise_rename(); return}
-		_ = activate_registered_target_at_point(point)
+		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
 	if ui.source_details_open {
 		modal := source_details_rect()
 		if !contains(modal, point) {close_source_details(); return}
-		_ = activate_registered_target_at_point(point)
+		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
 	if ui.source_modal_open {
 		modal := source_modal_rect()
 		if !contains(modal, point) {close_source_modal(); return}
-		_ = activate_registered_target_at_point(point)
+		_ = activate_registered_target_at_point(point, click_count)
+		return
+	}
+	clicked_control := find_ui_control_at_point(
+		ui_build.controls[:],
+		point,
+		.Primary_Press,
+	)
+	if clicked_control != nil && .Editable in clicked_control.flags {
+		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
 	ui.focus = .None
+	ui.text_drag_active = false
 	if ui.source_hint_menu_open {
-		control := find_ui_control_at_point(ui_build.controls[:], point, .Primary_Press)
-		if control == nil ||
-		   (control.action.kind != .Source_Hint_Menu && control.action.kind != .Source_Hint) {
+		if clicked_control == nil ||
+		   (clicked_control.action.kind != .Source_Hint_Menu &&
+		    clicked_control.action.kind != .Source_Hint) {
 			ui.source_hint_menu_open = false
 		}
 	}
-	if activate_registered_target_at_point(point) {return}
+	if activate_registered_target_at_point(point, click_count) {return}
 }
 
 on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
@@ -6133,20 +6595,21 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		window_point,
 		nil,
 	)
+	click_count := msg_uint(event, sel_registerName("clickCount"))
 	if !command_palette.is_open(&command_palette_state) &&
 	   !ui.source_modal_open && !ui.source_details_open &&
 	   !ui.exercise_rename_open && !ui.exercise_metadata_open &&
 	   !ui.data_modal_open && !ui.notification_modal_open &&
 	   contains(app_header_rect(), ui.mouse) &&
 	   !contains(ui_control_rect(.Mode_Toggle), ui.mouse) {
-		if msg_uint(event, sel_registerName("clickCount")) >= 2 {
+		if click_count >= 2 {
 			msg_void_id(state.window, sel_registerName("performZoom:"), nil)
 		} else {
 			msg_void_id(state.window, sel_registerName("performWindowDragWithEvent:"), event)
 		}
 		return
 	}
-	dispatch_click(ui.mouse)
+	dispatch_click(ui.mouse, click_count)
 	ui.needs_redraw = true
 }
 
@@ -6191,6 +6654,10 @@ on_metal_mouse_dragged :: proc "c" (self: Id, command: Sel, event: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	ui.mouse = msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
+	if update_text_pointer_selection(ui.mouse) {
+		ui.needs_redraw = true
+		return
+	}
 	if ui.source_scrubbing {
 		control := find_ui_control_by_action(.Source_Timeline)
 		if control != nil && .Drag in control.flags {seek_player_timeline_rect(ui.mouse, control.rect)}
@@ -6200,6 +6667,7 @@ on_metal_mouse_dragged :: proc "c" (self: Id, command: Sel, event: Id) {
 
 on_metal_mouse_up :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
+	ui.text_drag_active = false
 	if ui.source_scrubbing {
 		ui.source_scrubbing = false
 		ui.needs_redraw = true
@@ -6313,6 +6781,47 @@ on_metal_insert_text :: proc "c" (self: Id, command: Sel, value: Id, replacement
 	ui.needs_redraw = true
 }
 
+copy_focused_text_selection :: proc() -> bool {
+	target := focused_text()
+	if target == nil {return false}
+	start, end := text_selection_bounds(target^)
+	if start == end {return false}
+	pasteboard := msg_id(
+		objc_getClass("NSPasteboard"),
+		sel_registerName("generalPasteboard"),
+	)
+	if pasteboard == nil {return false}
+	_ = msg_i64(pasteboard, sel_registerName("clearContents"))
+	return msg_bool_id_id(
+		pasteboard,
+		sel_registerName("setString:forType:"),
+		nsstring(target^[start:end]),
+		nsstring("public.utf8-plain-text"),
+	)
+}
+
+on_metal_copy :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	_ = copy_focused_text_selection()
+}
+
+on_metal_cut :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	target := focused_text()
+	if target == nil || !copy_focused_text_selection() {return}
+	if remove_text_selection(target) {focused_text_changed(target)}
+	ui.needs_redraw = true
+}
+
+on_metal_select_all :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	target := focused_text()
+	if target == nil {return}
+	set_text_selection(0, len(target^), target^)
+}
+
 on_metal_paste :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -6345,13 +6854,107 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 	} else if selector == sel_registerName("deleteWordBackward:") {
 		if target != nil {remove_marked_text(target); remove_word_before_caret(target); focused_text_changed(target)}
 	} else if selector == sel_registerName("moveLeft:") {
-		if target != nil {clear_marked_text(); ui.caret_byte_offset = previous_character_offset(target^, ui.caret_byte_offset)}
+		if target != nil {clear_marked_text(); move_text_left(target, false)}
 	} else if selector == sel_registerName("moveRight:") {
-		if target != nil {clear_marked_text(); ui.caret_byte_offset = next_character_offset(target^, ui.caret_byte_offset)}
-	} else if selector == sel_registerName("moveToBeginningOfLine:") {
-		if target != nil {clear_marked_text(); ui.caret_byte_offset = line_start_for_offset(target^, ui.caret_byte_offset)}
-	} else if selector == sel_registerName("moveToEndOfLine:") {
-		if target != nil {clear_marked_text(); ui.caret_byte_offset = line_end_for_offset(target^, ui.caret_byte_offset)}
+		if target != nil {clear_marked_text(); move_text_right(target, false)}
+	} else if selector == sel_registerName("moveLeftAndModifySelection:") {
+		if target != nil {clear_marked_text(); move_text_left(target, true)}
+	} else if selector == sel_registerName("moveRightAndModifySelection:") {
+		if target != nil {clear_marked_text(); move_text_right(target, true)}
+	} else if selector == sel_registerName("moveWordLeft:") ||
+	          selector == sel_registerName("moveWordBackward:") {
+		if target != nil {clear_marked_text(); move_text_word_left(target, false)}
+	} else if selector == sel_registerName("moveWordRight:") ||
+	          selector == sel_registerName("moveWordForward:") {
+		if target != nil {clear_marked_text(); move_text_word_right(target, false)}
+	} else if selector == sel_registerName("moveWordLeftAndModifySelection:") ||
+	          selector == sel_registerName("moveWordBackwardAndModifySelection:") {
+		if target != nil {clear_marked_text(); move_text_word_left(target, true)}
+	} else if selector == sel_registerName("moveWordRightAndModifySelection:") ||
+	          selector == sel_registerName("moveWordForwardAndModifySelection:") {
+		if target != nil {clear_marked_text(); move_text_word_right(target, true)}
+	} else if selector == sel_registerName("moveUp:") {
+		if target != nil {
+			clear_marked_text()
+			move_text_selection(
+				target,
+				vertical_text_offset(target^, ui.caret_byte_offset, -1),
+				false,
+			)
+		}
+	} else if selector == sel_registerName("moveDown:") {
+		if target != nil {
+			clear_marked_text()
+			move_text_selection(
+				target,
+				vertical_text_offset(target^, ui.caret_byte_offset, 1),
+				false,
+			)
+		}
+	} else if selector == sel_registerName("moveUpAndModifySelection:") {
+		if target != nil {
+			clear_marked_text()
+			move_text_selection(
+				target,
+				vertical_text_offset(target^, ui.caret_byte_offset, -1),
+				true,
+			)
+		}
+	} else if selector == sel_registerName("moveDownAndModifySelection:") {
+		if target != nil {
+			clear_marked_text()
+			move_text_selection(
+				target,
+				vertical_text_offset(target^, ui.caret_byte_offset, 1),
+				true,
+			)
+		}
+	} else if selector == sel_registerName("moveToBeginningOfLine:") ||
+	          selector == sel_registerName("moveToLeftEndOfLine:") {
+		if target != nil {
+			clear_marked_text()
+			move_text_selection(
+				target,
+				line_start_for_offset(target^, ui.caret_byte_offset),
+				false,
+			)
+		}
+	} else if selector == sel_registerName("moveToEndOfLine:") ||
+	          selector == sel_registerName("moveToRightEndOfLine:") {
+		if target != nil {
+			clear_marked_text()
+			move_text_selection(
+				target,
+				line_end_for_offset(target^, ui.caret_byte_offset),
+				false,
+			)
+		}
+	} else if selector == sel_registerName("moveToBeginningOfLineAndModifySelection:") ||
+	          selector == sel_registerName("moveToLeftEndOfLineAndModifySelection:") {
+		if target != nil {
+			clear_marked_text()
+			move_text_selection(
+				target,
+				line_start_for_offset(target^, ui.caret_byte_offset),
+				true,
+			)
+		}
+	} else if selector == sel_registerName("moveToEndOfLineAndModifySelection:") ||
+	          selector == sel_registerName("moveToRightEndOfLineAndModifySelection:") {
+		if target != nil {
+			clear_marked_text()
+			move_text_selection(
+				target,
+				line_end_for_offset(target^, ui.caret_byte_offset),
+				true,
+			)
+		}
+	} else if selector == sel_registerName("selectAll:") {
+		on_metal_select_all(self, selector, nil)
+	} else if selector == sel_registerName("copy:") {
+		on_metal_copy(self, selector, nil)
+	} else if selector == sel_registerName("cut:") {
+		on_metal_cut(self, selector, nil)
 	} else if selector == sel_registerName("paste:") {
 		on_metal_paste(self, selector, nil)
 	} else if selector == sel_registerName("insertNewline:") {
@@ -6365,24 +6968,26 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 		          ui.focus == .Exercise_Search ||
 		          ui.focus == .Exercise_Name {
 			ui.focus = .None
+			ui.text_drag_active = false
 		}
 	} else if selector == sel_registerName("insertTab:") {
 		if ui.exercise_rename_open {
-			ui.focus = .Exercise_Rename
+			focus_text_input(.Exercise_Rename)
 		} else if ui.source_modal_open {
-			ui.focus = .URL
+			focus_text_input(.URL)
 		} else if ui.mode == .Play {
-			ui.focus = .Exercise_Search
+			focus_text_input(.Exercise_Search)
 		} else {
 			#partial switch ui.focus {
 			case .None:
-				ui.focus = .Source_Search
+				focus_text_input(.Source_Search)
 			case .Source_Search:
-				ui.focus = .Transcript_Search
+				focus_text_input(.Transcript_Search)
 			case .Transcript_Search:
-				ui.focus = .Exercise_Name
+				focus_text_input(.Exercise_Name)
 			case:
 				ui.focus = .None
+				ui.text_drag_active = false
 			}
 		}
 	}
@@ -6468,6 +7073,18 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if key == 53 && unfocus_text_input() {return}
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
 	if ui.source_details_open && key == 53 {close_source_details(); return}
+	if focused_text() != nil && is_copy_shortcut(key, modifiers) {
+		on_metal_copy(self, sel_registerName("copy:"), nil)
+		return
+	}
+	if focused_text() != nil && is_cut_shortcut(key, modifiers) {
+		on_metal_cut(self, sel_registerName("cut:"), nil)
+		return
+	}
+	if focused_text() != nil && is_select_all_shortcut(key, modifiers) {
+		on_metal_select_all(self, sel_registerName("selectAll:"), nil)
+		return
+	}
 	if is_paste_shortcut(key, modifiers) {
 		on_metal_paste(self, sel_registerName("paste:"), nil)
 		return
@@ -6527,8 +7144,9 @@ on_metal_set_marked :: proc "c" (
 	remove_marked_text(target)
 	text, ok := text_input_string(value)
 	if !ok {return}
+	selection_start, _ := text_selection_bounds(target^)
 	ui_set_string(&ui.marked_text, text)
-	ui.marked_start_byte = ui.caret_byte_offset
+	ui.marked_start_byte = selection_start
 	insert_text_at_caret(target, ui.marked_text)
 	focused_text_changed(target)
 	ui.has_marked_text = true
@@ -6552,7 +7170,10 @@ on_metal_range :: proc "c" (self: Id, command: Sel) -> NS_Range {
 		marked := utf16_index_for_byte_offset(ui.marked_text, len(ui.marked_text))
 		return NS_Range{uint(total), uint(marked)}
 	}
-	return NS_Range{uint(utf16_index_for_byte_offset(target^, ui.caret_byte_offset)), 0}
+	start, end := text_selection_bounds(target^)
+	utf16_start := utf16_index_for_byte_offset(target^, start)
+	utf16_end := utf16_index_for_byte_offset(target^, end)
+	return NS_Range{uint(utf16_start), uint(utf16_end - utf16_start)}
 }
 on_metal_valid_attributes :: proc "c" (self: Id, command: Sel) -> Id {
 	context = runtime.default_context()
@@ -6691,7 +7312,15 @@ register_metal_view_class :: proc() -> Id {
 	class_addMethod(class, sel_registerName("mouseUp:"), rawptr(on_metal_mouse_up), "v@:@")
 	class_addMethod(class, sel_registerName("scrollWheel:"), rawptr(on_metal_scroll), "v@:@")
 	class_addMethod(class, sel_registerName("keyDown:"), rawptr(on_metal_key_down), "v@:@")
+	class_addMethod(class, sel_registerName("copy:"), rawptr(on_metal_copy), "v@:@")
+	class_addMethod(class, sel_registerName("cut:"), rawptr(on_metal_cut), "v@:@")
 	class_addMethod(class, sel_registerName("paste:"), rawptr(on_metal_paste), "v@:@")
+	class_addMethod(
+		class,
+		sel_registerName("selectAll:"),
+		rawptr(on_metal_select_all),
+		"v@:@",
+	)
 	class_addMethod(class, sel_registerName("insertText:"), rawptr(on_metal_insert_text_simple), "v@:@")
 	class_addMethod(
 		class,

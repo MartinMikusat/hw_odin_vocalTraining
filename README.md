@@ -117,6 +117,13 @@ click, scroll, or resize the window to cancel label mode. A slash typed in a
 focused text field remains normal text. Press **Escape** to leave a focused
 text field and make Flash navigation available again.
 
+Drag across text to select a range. Double-click to select a word, or
+triple-click to select the complete field. The selection supports replacement,
+deletion, clipboard commands, and Shift-arrow extension. Hold **Option** with
+Left Arrow or Right Arrow to move by words, and add **Shift** to extend the
+selection. Hold **Command** to move to a line boundary. Option-Backspace
+deletes the previous word.
+
 Download and export diagnostics are stored as `yt-dlp.log` and `ffmpeg.log` in
 the application-support directory. Use the **Data** control to open the library
 data dialog. The dialog can open that directory in Finder, export portable
