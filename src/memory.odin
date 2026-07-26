@@ -23,6 +23,7 @@ Memory_State :: struct {
 Transcript_Generation :: struct {
 	arena: ^mem_virtual.Arena,
 	segments: [dynamic]Transcript_Segment,
+	source_spans: [dynamic]Transcript_Source_Span,
 }
 
 memory: Memory_State
@@ -92,7 +93,16 @@ transcript_generation_create :: proc(capacity: int = 0) -> (Transcript_Generatio
 		growing_arena_destroy(arena)
 		return {}, false
 	}
-	return Transcript_Generation{arena=arena, segments=segments}, true
+	source_spans, span_error := make([dynamic]Transcript_Source_Span, 0, 0, allocator)
+	if span_error != nil {
+		growing_arena_destroy(arena)
+		return {}, false
+	}
+	return Transcript_Generation{
+		arena=arena,
+		segments=segments,
+		source_spans=source_spans,
+	}, true
 }
 
 transcript_generation_destroy :: proc(generation: ^Transcript_Generation) {
@@ -101,7 +111,39 @@ transcript_generation_destroy :: proc(generation: ^Transcript_Generation) {
 	generation^ = {}
 }
 
+transcript_source_span_index :: proc(
+	generation: ^Transcript_Generation,
+	source_id: string,
+) -> int {
+	if generation == nil { return -1 }
+	for span, index in generation.source_spans {
+		if span.source_id == source_id { return index }
+	}
+	return -1
+}
+
+transcript_source_segments :: proc(
+	generation: ^Transcript_Generation,
+	source_id: string,
+) -> (
+	segments: []Transcript_Segment,
+	base_index: int,
+	found: bool,
+) {
+	span_index := transcript_source_span_index(generation, source_id)
+	if span_index < 0 { return nil, -1, false }
+	span := generation.source_spans[span_index]
+	return generation.segments[span.start:span.start+span.count], span.start, true
+}
+
 transcript_append_copy :: proc(generation: ^Transcript_Generation, segment: Transcript_Segment) -> bool {
+	if len(generation.source_spans) > 0 {
+		last_span := generation.source_spans[len(generation.source_spans)-1]
+		if last_span.source_id != segment.source_id &&
+		   transcript_source_span_index(generation, segment.source_id) >= 0 {
+			return false
+		}
+	}
 	allocator := mem_virtual.arena_allocator(generation.arena)
 	id, id_error := strings.clone(segment.id, allocator)
 	if id_error != nil { return false }
@@ -116,6 +158,16 @@ transcript_append_copy :: proc(generation: ^Transcript_Generation, segment: Tran
 		duration_seconds=segment.duration_seconds,
 		text=text,
 	})
+	if len(generation.source_spans) > 0 &&
+	   generation.source_spans[len(generation.source_spans)-1].source_id == source_id {
+		generation.source_spans[len(generation.source_spans)-1].count += 1
+	} else {
+		append(&generation.source_spans, Transcript_Source_Span{
+			source_id=source_id,
+			start=len(generation.segments)-1,
+			count=1,
+		})
+	}
 	return true
 }
 
@@ -123,9 +175,13 @@ transcript_generation_copy :: proc(segments: []Transcript_Segment) -> (Transcrip
 	generation, ok := transcript_generation_create(len(segments))
 	if !ok { return {}, false }
 	for segment in segments {
-		if !transcript_append_copy(&generation, segment) {
-			transcript_generation_destroy(&generation)
-			return {}, false
+		if transcript_source_span_index(&generation, segment.source_id) >= 0 { continue }
+		for candidate in segments {
+			if candidate.source_id != segment.source_id { continue }
+			if !transcript_append_copy(&generation, candidate) {
+				transcript_generation_destroy(&generation)
+				return {}, false
+			}
 		}
 	}
 	return generation, true

@@ -63,6 +63,12 @@ Transcript_Segment :: struct {
 	text: string,
 }
 
+Transcript_Source_Span :: struct {
+	source_id: string,
+	start: int,
+	count: int,
+}
+
 Import_Hint :: struct {
 	source_id: string,
 	seconds: f64,

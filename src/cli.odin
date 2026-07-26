@@ -391,18 +391,25 @@ cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
 cli_transcript_get :: proc(request: CLI_Request) -> CLI_Result {
 	source := cli_find_source(request.source_id)
 	if source == nil {return cli_error(request.command, .Invalid, "source_not_found", "The source does not exist")}
-	count := 0
-	for segment in state.transcripts.segments {if segment.source_id == source.id {count += 1}}
-	if count == 0 {
-		count = load_youtube_transcript(source)
-		if count == 0 {return cli_error(request.command, .Invalid, "captions_unavailable", "No usable YouTube caption track is available for this source")}
+	segments, _, found := transcript_source_segments(&state.transcripts, source.id)
+	if !found {
+		count := load_youtube_transcript(source)
+		if count == 0 {
+			return cli_error(request.command, .Invalid, "captions_unavailable", "No usable YouTube caption track is available for this source")
+		}
+		segments, _, found = transcript_source_segments(&state.transcripts, source.id)
+		if !found {
+			return cli_error(request.command, .Storage, "transcript_missing", "The loaded transcript is not available")
+		}
 	}
-	outputs := make([]CLI_Transcript_Segment_Output, count, context.temp_allocator)
-	index := 0
-	for segment in state.transcripts.segments {
-		if segment.source_id != source.id {continue}
-		outputs[index] = CLI_Transcript_Segment_Output{id=segment.id, start_seconds=segment.start_seconds, duration_seconds=segment.duration_seconds, text=segment.text}
-		index += 1
+	outputs := make([]CLI_Transcript_Segment_Output, len(segments), context.temp_allocator)
+	for segment, index in segments {
+		outputs[index] = CLI_Transcript_Segment_Output{
+			id=segment.id,
+			start_seconds=segment.start_seconds,
+			duration_seconds=segment.duration_seconds,
+			text=segment.text,
+		}
 	}
 	response := CLI_Transcript_Response{ok=true, command=cli_command_name(request.command), data=CLI_Transcript_Data{source_id=source.id, segments=outputs}}
 	return CLI_Result{output=cli_encode(response), exit_code=.Success}

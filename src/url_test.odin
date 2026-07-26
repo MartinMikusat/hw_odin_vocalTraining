@@ -159,18 +159,30 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	}
 	testing.expect_value(t, len(loaded.sources), source_count)
 	testing.expect_value(t, len(loaded.transcripts.segments), segment_count)
+	testing.expect_value(t, len(loaded.transcripts.source_spans), source_count)
 	testing.expect_value(t, len(loaded.hints), hint_count)
 	testing.expect_value(t, len(loaded.exercises), exercise_count)
+	next_segment := 0
+	for span in loaded.transcripts.source_spans {
+		testing.expect_value(t, span.start, next_segment)
+		testing.expect(t, span.count > 0)
+		for segment in loaded.transcripts.segments[span.start:span.start+span.count] {
+			testing.expect_value(t, segment.source_id, span.source_id)
+		}
+		next_segment += span.count
+	}
+	testing.expect_value(t, next_segment, segment_count)
 	for source in loaded.sources {
 		testing.expect(t, filepath.is_abs(source.media_path))
-		found_segment := false
-		for segment in loaded.transcripts.segments {
-			if segment.source_id == source.id {
-				found_segment = true
-				break
-			}
+		segments, base_index, found := transcript_source_segments(
+			&loaded.transcripts,
+			source.id,
+		)
+		testing.expect(t, found)
+		testing.expect(t, base_index >= 0)
+		for segment in segments {
+			testing.expect_value(t, segment.source_id, source.id)
 		}
-		testing.expect(t, found_segment)
 	}
 	for exercise in loaded.exercises {
 		source_found := false
@@ -1060,11 +1072,64 @@ transcript_generation_owns_all_reachable_strings_test :: proc(t: ^testing.T) {
 	generation, ok := transcript_generation_copy(input[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, len(generation.segments), 2)
+	testing.expect_value(t, len(generation.source_spans), 2)
 	testing.expect_value(t, generation.segments[0].text, "Warm up")
 	testing.expect(t, generation.arena.total_used > 0)
 	transcript_generation_destroy(&generation)
 	testing.expect(t, generation.arena == nil)
 	testing.expect_value(t, len(generation.segments), 0)
+	testing.expect_value(t, len(generation.source_spans), 0)
+}
+
+@(test)
+transcript_generation_groups_interleaved_sources_into_stable_spans_test :: proc(t: ^testing.T) {
+	input := [4]Transcript_Segment{
+		{id="a-1", source_id="a", start_seconds=1, text="First A"},
+		{id="b-1", source_id="b", start_seconds=2, text="First B"},
+		{id="a-2", source_id="a", start_seconds=3, text="Second A"},
+		{id="b-2", source_id="b", start_seconds=4, text="Second B"},
+	}
+	generation, ok := transcript_generation_copy(input[:])
+	testing.expect(t, ok)
+	if !ok { return }
+	defer transcript_generation_destroy(&generation)
+
+	testing.expect_value(t, len(generation.source_spans), 2)
+	testing.expect_value(t, generation.source_spans[0], Transcript_Source_Span{
+		source_id="a",
+		start=0,
+		count=2,
+	})
+	testing.expect_value(t, generation.source_spans[1], Transcript_Source_Span{
+		source_id="b",
+		start=2,
+		count=2,
+	})
+	testing.expect_value(t, generation.segments[0].id, "a-1")
+	testing.expect_value(t, generation.segments[1].id, "a-2")
+	testing.expect_value(t, generation.segments[2].id, "b-1")
+	testing.expect_value(t, generation.segments[3].id, "b-2")
+
+	a_segments, a_base, a_found := transcript_source_segments(&generation, "a")
+	testing.expect(t, a_found)
+	testing.expect_value(t, a_base, 0)
+	testing.expect_value(t, len(a_segments), 2)
+	missing, missing_base, missing_found := transcript_source_segments(
+		&generation,
+		"missing",
+	)
+	testing.expect(t, !missing_found)
+	testing.expect_value(t, len(missing), 0)
+	testing.expect_value(t, missing_base, -1)
+
+	direct, direct_ok := transcript_generation_create(3)
+	testing.expect(t, direct_ok)
+	if !direct_ok { return }
+	defer transcript_generation_destroy(&direct)
+	testing.expect(t, transcript_append_copy(&direct, input[0]))
+	testing.expect(t, transcript_append_copy(&direct, input[1]))
+	testing.expect(t, !transcript_append_copy(&direct, input[2]))
+	testing.expect_value(t, len(direct.segments), 2)
 }
 
 @(test)
@@ -1334,14 +1399,13 @@ transcript_search_ranks_matches_and_returns_original_indices_test :: proc(t: ^te
 	segments := []Transcript_Segment{
 		{source_id="a", text="voice warmup routine"},
 		{source_id="a", text="warmup"},
-		{source_id="b", text="warmup"},
 	}
-	indices := transcript_ranked_indices(&search, segments, "a", "warmup")
+	indices := transcript_ranked_indices(&search, segments, 4, "warmup")
 	defer delete(indices)
 	testing.expect_value(t, len(indices), 2)
-	testing.expect_value(t, indices[0], 1)
-	testing.expect_value(t, indices[1], 0)
-	missing := transcript_ranked_indices(&search, segments, "a", "zzzz")
+	testing.expect_value(t, indices[0], 5)
+	testing.expect_value(t, indices[1], 4)
+	missing := transcript_ranked_indices(&search, segments, 4, "zzzz")
 	defer delete(missing)
 	testing.expect_value(t, len(missing), 0)
 }
@@ -1353,14 +1417,13 @@ empty_transcript_search_keeps_active_source_in_chronological_order_test :: proc(
 	defer match_sorter.search_context_destroy(&search)
 	segments := []Transcript_Segment{
 		{source_id="a", text="first"},
-		{source_id="b", text="other"},
 		{source_id="a", text="second"},
 	}
-	indices := transcript_ranked_indices(&search, segments, "a", "")
+	indices := transcript_ranked_indices(&search, segments, 8, "")
 	defer delete(indices)
 	testing.expect_value(t, len(indices), 2)
-	testing.expect_value(t, indices[0], 0)
-	testing.expect_value(t, indices[1], 2)
+	testing.expect_value(t, indices[0], 8)
+	testing.expect_value(t, indices[1], 9)
 }
 
 @(test)

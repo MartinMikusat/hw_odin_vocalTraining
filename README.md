@@ -227,8 +227,10 @@ Each import or export worker owns a private growing arena and never reads the
 mutable UI or application arrays. The main thread joins the worker, clones its
 small durable records into the heap, swaps any completed transcript generation
 into `App_State`, and destroys the worker arena. Transcript segments and every
-string reachable from them share one generation arena, so replacement installs
-the new generation before destroying the old one.
+string reachable from them share one generation arena. The generation also
+stores one contiguous segment span for each source. Search and transcript
+retrieval pass the active source slice directly to their consumers.
+Replacement installs the new generation before destroying the old one.
 
 Sources, import hints, exercises, and mutable UI strings remain individually
 heap-owned because they change independently. Core Foundation, Objective-C,

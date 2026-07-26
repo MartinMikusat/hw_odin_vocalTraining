@@ -1359,19 +1359,15 @@ transcript_text_value :: proc(segment: ^Transcript_Segment) -> match_sorter.Extr
 transcript_ranked_indices :: proc(
 	search: ^match_sorter.Search_Context,
 	segments: []Transcript_Segment,
-	source_id, query: string,
+	base_index: int,
+	query: string,
 	allocator := context.allocator,
 ) -> []int {
-	active := make([dynamic]Transcript_Segment, context.temp_allocator)
-	global_indices := make([dynamic]int, context.temp_allocator)
-	for segment, index in segments {
-		if segment.source_id != source_id {continue}
-		append(&active, segment)
-		append(&global_indices, index)
-	}
 	if len(query) == 0 {
-		result := make([]int, len(global_indices), allocator)
-		copy(result, global_indices[:])
+		result := make([]int, len(segments), allocator)
+		for &index, local_index in result {
+			index = base_index+local_index
+		}
 		return result
 	}
 	previous_temp := context.temp_allocator
@@ -1379,13 +1375,15 @@ transcript_ranked_indices :: proc(
 	keys := []match_sorter.Typed_Key(Transcript_Segment){{getter=transcript_text_value}}
 	ranked := match_sorter.match_indices(
 		search,
-		active[:],
+		segments,
 		query,
 		match_sorter.Typed_Options(Transcript_Segment){keys=keys},
 		context.temp_allocator,
 	)
 	result := make([]int, len(ranked), allocator)
-	for active_index, result_index in ranked {result[result_index] = global_indices[active_index]}
+	for local_index, result_index in ranked {
+		result[result_index] = base_index+local_index
+	}
 	return result
 }
 
@@ -1401,14 +1399,20 @@ ensure_transcript_matches :: proc() {
 	if !ui.transcript_matches_dirty {return}
 	clear(&ui.transcript_matches)
 	if state.active_source >= 0 && state.active_source < len(state.sources) {
-		indices := transcript_ranked_indices(
-			&transcript_search_context,
-			state.transcripts.segments[:],
+		segments, base_index, found := transcript_source_segments(
+			&state.transcripts,
 			state.sources[state.active_source].id,
-			ui.transcript_search,
-			context.temp_allocator,
 		)
-		append(&ui.transcript_matches, ..indices)
+		if found {
+			indices := transcript_ranked_indices(
+				&transcript_search_context,
+				segments,
+				base_index,
+				ui.transcript_search,
+				context.temp_allocator,
+			)
+			append(&ui.transcript_matches, ..indices)
+		}
 	}
 	ui.transcript_matches_dirty = false
 }

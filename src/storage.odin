@@ -459,7 +459,13 @@ database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bo
 	}
 	sqlite3_finalize(statement)
 
-	statement, ok = sqlite_prepare(database, "SELECT id, source_id, start_seconds, duration_seconds, text FROM transcript_segments ORDER BY position")
+	statement, ok = sqlite_prepare(database, `
+		SELECT transcript.id, transcript.source_id, transcript.start_seconds,
+		       transcript.duration_seconds, transcript.text
+		FROM transcript_segments AS transcript
+		JOIN sources AS source ON source.id = transcript.source_id
+		ORDER BY source.position, transcript.position
+	`)
 	if !ok {return false}
 	for sqlite3_step(statement) == SQLITE_ROW {
 		segment := Transcript_Segment{start_seconds=sqlite3_column_double(statement, 2), duration_seconds=sqlite3_column_double(statement, 3)}
