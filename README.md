@@ -366,9 +366,10 @@ Run the dependency-free watcher during development:
 ```
 
 It fingerprints the source, build scripts, and `Info.plist` every half-second.
-A successful change rebuilds and relaunches the debug app; a failed build
-leaves the currently running app untouched. Metal validation is enabled.
-Press `Ctrl-C` to stop the watcher and app.
+A successful change rebuilds and relaunches the debug app behind the active
+application. The initial launch activates normally. A failed build leaves the
+current app running. Metal validation is enabled. Press `Ctrl-C` to stop the
+watcher and app.
 
 The watcher initializes `build/dev-support/library.sqlite3` from the canonical
 development library. It preserves this working copy between launches.

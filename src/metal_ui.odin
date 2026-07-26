@@ -7416,6 +7416,10 @@ register_accessibility_class :: proc() {
 	objc_registerClassPair(class)
 }
 
+launch_should_activate :: proc(value: cstring) -> bool {
+	return value == nil || string(value) != "0"
+}
+
 build_metal_window :: proc() {
 	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
 	msg_void_i(app, sel_registerName("setActivationPolicy:"), 0)
@@ -7517,8 +7521,12 @@ build_metal_window :: proc() {
 		true,
 	)
 	msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
-	msg_void_id(state.window, sel_registerName("makeKeyAndOrderFront:"), nil)
-	msg_void_i(app, sel_registerName("activateIgnoringOtherApps:"), 1)
+	if launch_should_activate(getenv("VT_ACTIVATE_ON_LAUNCH")) {
+		msg_void_id(state.window, sel_registerName("makeKeyAndOrderFront:"), nil)
+		msg_void_i(app, sel_registerName("activateIgnoringOtherApps:"), 1)
+	} else {
+		msg_void_id(state.window, sel_registerName("orderFront:"), nil)
+	}
 	if !cli_ipc_server_start() {set_text(state.status, "CLI control socket is unavailable")}
 	validate_startup_helpers()
 	request_next_missing_source_metadata()

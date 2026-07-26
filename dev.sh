@@ -59,6 +59,8 @@ check_app() {
 }
 
 launch_app() {
+  VT_ACTIVATE_ON_LAUNCH=$1
+  export VT_ACTIVATE_ON_LAUNCH
   case "$MEMORY_PROFILE" in
     none)
       env MTL_DEBUG_LAYER=1 "$EXECUTABLE" &
@@ -91,14 +93,14 @@ rebuild_and_launch() {
   fi
 
   stop_app
-  if launch_app; then
+  if launch_app "$1"; then
     printf '[vocal-training] relaunched pid %s (%s, memory profile: %s)\n' "$APP_PID" "$MODE" "$MEMORY_PROFILE"
   fi
 }
 
 trap 'stop_app; exit 0' INT TERM EXIT
 
-rebuild_and_launch
+rebuild_and_launch 1
 LAST_FINGERPRINT=$(fingerprint)
 
 while :; do
@@ -107,6 +109,6 @@ while :; do
   CURRENT_FINGERPRINT=$(fingerprint)
   if [ "$CURRENT_FINGERPRINT" != "$LAST_FINGERPRINT" ]; then
     LAST_FINGERPRINT=$CURRENT_FINGERPRINT
-    rebuild_and_launch
+    rebuild_and_launch 0
   fi
 done

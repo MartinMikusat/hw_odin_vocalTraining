@@ -13,6 +13,13 @@ import flash "flash:."
 import match_sorter "match_sorter:."
 
 @(test)
+launch_activation_defaults_to_foreground_test :: proc(t: ^testing.T) {
+	testing.expect(t, launch_should_activate(nil))
+	testing.expect(t, launch_should_activate(cstring("1")))
+	testing.expect(t, !launch_should_activate(cstring("0")))
+}
+
+@(test)
 parse_standard_youtube_url_test :: proc(t: ^testing.T) {
 	id, ok := parse_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1m20s")
 	testing.expect(t, ok)
