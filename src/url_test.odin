@@ -1161,11 +1161,27 @@ mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, control_action_for_slot(.Play, 0), 3)
 	testing.expect_value(t, control_action_for_slot(.Play, 1), 4)
 	testing.expect_value(t, control_action_for_slot(.Play, 2), 7)
-	testing.expect_value(t, control_action_for_slot(.Play, 3), -1)
+	testing.expect_value(t, control_action_for_slot(.Play, 3), 8)
+	testing.expect_value(t, control_action_for_slot(.Play, 4), -1)
 	testing.expect_value(t, control_slot_for_action(.Play, 3), 0)
 	testing.expect_value(t, control_slot_for_action(.Play, 4), 1)
 	testing.expect_value(t, control_slot_for_action(.Play, 7), 2)
+	testing.expect_value(t, control_slot_for_action(.Play, 8), 3)
 	testing.expect_value(t, control_slot_for_action(.Play, 0), -1)
+}
+
+@(test)
+exercise_rename_modal_keeps_original_name_above_input_test :: proc(t: ^testing.T) {
+	modal := exercise_rename_modal_rect_for_size(1100, 720)
+	input := exercise_rename_input_rect(modal)
+	cancel := exercise_rename_cancel_rect(modal)
+	confirm := exercise_rename_confirm_rect(modal)
+	original_name_bottom := modal.y + modal.h - 130
+	testing.expect(t, original_name_bottom > input.y + input.h)
+	testing.expect(t, input.y > cancel.y + cancel.h)
+	testing.expect(t, input.y > confirm.y + confirm.h)
+	testing.expect(t, cancel.x >= modal.x && cancel.x + cancel.w <= modal.x + modal.w)
+	testing.expect(t, confirm.x >= modal.x && confirm.x + confirm.w <= modal.x + modal.w)
 }
 
 @(test)
@@ -1389,6 +1405,75 @@ source_and_exercise_id_lookups_return_stable_indices_test :: proc(t: ^testing.T)
 	testing.expect_value(t, source_index_for_id(sources, "missing"), -1)
 	testing.expect_value(t, exercise_index_for_id(exercises, "exercise-a"), 0)
 	testing.expect_value(t, exercise_index_for_id(exercises, "missing"), -1)
+}
+
+@(test)
+rename_exercise_updates_memory_and_database_test :: proc(t: ^testing.T) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(path, &database, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, nil) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+
+	previous_state := state
+	previous_ui := ui
+	previous_database := library_database
+	previous_fallback := library_legacy_fallback
+	state = {}
+	state.sources = make([dynamic]Source_Video)
+	state.hints = make([dynamic]Import_Hint)
+	state.exercises = make([dynamic]Exercise)
+	defer {
+		for &source in state.sources {delete_source_video(&source)}
+		for &hint in state.hints {delete_import_hint(&hint)}
+		for &exercise in state.exercises {delete_exercise(&exercise)}
+		delete(state.sources)
+		delete(state.hints)
+		delete(state.exercises)
+		transcript_generation_destroy(&state.transcripts)
+		state = previous_state
+		ui = previous_ui
+		library_database = previous_database
+		library_legacy_fallback = previous_fallback
+	}
+	source, source_copied := clone_source_video(Source_Video{
+		id="source-1",
+		video_id="video-1",
+		title="Source",
+		url="https://example.test/source",
+		media_path="/tmp/source.mp4",
+		duration=30,
+	})
+	testing.expect(t, source_copied)
+	if !source_copied {return}
+	append(&state.sources, source)
+	exercise, exercise_copied := clone_exercise(Exercise{
+		id="exercise-1",
+		source_id="source-1",
+		name="Original",
+		start_seconds=2,
+		end_seconds=8,
+		clip_path="/tmp/exercise.mp4",
+	})
+	testing.expect(t, exercise_copied)
+	if !exercise_copied {return}
+	append(&state.exercises, exercise)
+	library_database = database
+	library_legacy_fallback = false
+
+	testing.expect(t, rename_exercise(0, "  Renamed  "))
+	testing.expect_value(t, state.exercises[0].name, "Renamed")
+	statement, prepared := sqlite_prepare(database, "SELECT name FROM exercises WHERE id = 'exercise-1'")
+	testing.expect(t, prepared)
+	if !prepared {return}
+	defer sqlite3_finalize(statement)
+	testing.expect_value(t, sqlite3_step(statement), SQLITE_ROW)
+	stored_name := sqlite3_column_text(statement, 0)
+	testing.expect(t, stored_name != nil)
+	if stored_name != nil {testing.expect_value(t, string(stored_name), "Renamed")}
 }
 
 @(test)

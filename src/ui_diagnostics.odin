@@ -87,6 +87,7 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 	overlay := "none"
 	switch {
 	case command_palette.is_open(&command_palette_state): overlay = "command-palette"
+	case ui.exercise_rename_open: overlay = "exercise-rename"
 	case ui.source_modal_open: overlay = "source-modal"
 	case ui.source_details_open: overlay = "source-details"
 	}

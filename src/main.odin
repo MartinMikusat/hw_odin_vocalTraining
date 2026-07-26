@@ -612,6 +612,26 @@ exercise_index_for_id :: proc(exercises: []Exercise, exercise_id: string) -> int
 	return -1
 }
 
+rename_exercise :: proc(index: int, name: string) -> bool {
+	if index < 0 || index >= len(state.exercises) {return false}
+	trimmed := strings.trim_space(name)
+	if len(trimmed) == 0 {return false}
+	exercise := &state.exercises[index]
+	if exercise.name == trimmed {return true}
+	replacement, err := strings.clone(trimmed)
+	if err != nil {return false}
+	original := exercise.name
+	exercise.name = replacement
+	if !save_library() {
+		exercise.name = original
+		delete(replacement)
+		return false
+	}
+	delete(original)
+	refresh_exercises()
+	return true
+}
+
 seek_video_seconds :: proc(seconds: f64) {
 	if state.player == nil { return }
 	t := CMTime{value=i64(seconds*600), timescale=600, flags=1}

@@ -79,6 +79,7 @@ UI_Focus :: enum {
 	Transcript_Search,
 	Exercise_Search,
 	Exercise_Name,
+	Exercise_Rename,
 }
 
 UI_Mode :: enum {
@@ -135,11 +136,14 @@ UI_State :: struct {
 	source_modal_refetch_index: int,
 	source_details_open: bool,
 	source_details_index: int,
+	exercise_rename_open: bool,
+	exercise_rename_index: int,
 	url_input:          string,
 	source_search:      string,
 	transcript_search:  string,
 	exercise_search:    string,
 	exercise_name:      string,
+	exercise_rename:    string,
 	command_palette_query: string,
 	command_palette_scroll: f64,
 	status:             string,
@@ -251,6 +255,9 @@ UI_Action_Kind :: enum {
 	Exercise_Search,
 	Exercise,
 	Exercise_Name,
+	Cancel_Exercise_Rename,
+	Confirm_Exercise_Rename,
+	Exercise_Rename,
 	Volume_Down,
 	Volume_Up,
 	Speed_Down,
@@ -270,6 +277,7 @@ UI_Action_Kind :: enum {
 	Captions,
 	Preview,
 	Data,
+	Rename,
 }
 
 AX_Action :: struct {
@@ -316,7 +324,7 @@ UI_Build_Output :: struct {
 	frame:              int,
 }
 
-ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1, transcript_active_match = -1}
+ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1, exercise_rename_index = -1, transcript_active_match = -1}
 ui_event_tag: int
 ax_actions: [dynamic]AX_Action
 ui_build: UI_Build_Output
@@ -671,6 +679,8 @@ focused_text :: proc() -> ^string {
 		return &ui.exercise_search
 	case .Exercise_Name:
 		return &ui.exercise_name
+	case .Exercise_Rename:
+		return &ui.exercise_rename
 	}
 	return nil
 }
@@ -870,6 +880,28 @@ source_details_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + modal.h - 142 - f64(row) * 31, modal.w - 48, 30}
 }
 
+exercise_rename_modal_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
+	width := min(max(560, view_width * 0.52), 720)
+	height := min(max(300, view_height * 0.42), 380)
+	return UI_Rect{(view_width - width) / 2, (view_height - height) / 2, width, height}
+}
+
+exercise_rename_modal_rect :: proc() -> UI_Rect {
+	return exercise_rename_modal_rect_for_size(ui.width, ui.height)
+}
+
+exercise_rename_input_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 82, modal.w - 48, 36}
+}
+
+exercise_rename_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 24, 124, 34}
+}
+
+exercise_rename_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + modal.w - 180, modal.y + 24, 156, 34}
+}
+
 close_source_details :: proc() {
 	cancel_ui_flash()
 	ui.source_details_open = false
@@ -896,6 +928,42 @@ open_source_details :: proc(source_index: int) {
 	ui.needs_redraw = true
 	source := &state.sources[source_index]
 	request_source_metadata(source.video_id, source.media_path)
+}
+
+open_exercise_rename :: proc() {
+	cancel_ui_flash()
+	if ui.active_exercise < 0 || ui.active_exercise >= len(state.exercises) {return}
+	ui.exercise_rename_index = ui.active_exercise
+	ui.exercise_rename_open = true
+	ui_set_string(&ui.exercise_rename, state.exercises[ui.exercise_rename_index].name)
+	focus_text_input(.Exercise_Rename)
+}
+
+close_exercise_rename :: proc() {
+	cancel_ui_flash()
+	ui.exercise_rename_open = false
+	ui.exercise_rename_index = -1
+	ui.focus = .None
+	ui.has_marked_text = false
+	ui_set_string(&ui.marked_text, "")
+	ui_set_string(&ui.exercise_rename, "")
+	ui.needs_redraw = true
+}
+
+confirm_exercise_rename :: proc() {
+	name := strings.trim_space(ui.exercise_rename)
+	if len(name) == 0 {
+		set_error_status("Enter a name for the exercise")
+		return
+	}
+	index := ui.exercise_rename_index
+	if !rename_exercise(index, name) {
+		set_error_status("Unable to rename the exercise")
+		return
+	}
+	renamed := state.exercises[index].name
+	close_exercise_rename()
+	set_success_status(fmt.tprintf("Renamed exercise to %s", renamed))
 }
 
 open_source_modal :: proc() {
@@ -944,6 +1012,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	cancel_ui_flash()
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
+	if ui.exercise_rename_open {close_exercise_rename()}
 	ui.source_scrubbing = false
 	ui.source_hint_menu_open = false
 	if mode == .Play {
@@ -1028,6 +1097,8 @@ control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
 		return 4
 	case 2:
 		return 7
+	case 3:
+		return 8
 	}
 	return -1
 }
@@ -1041,6 +1112,8 @@ control_slot_for_action :: proc(mode: UI_Mode, action: int) -> int {
 		return 1
 	case 7:
 		return 2
+	case 8:
+		return 3
 	}
 	return -1
 }
@@ -1141,7 +1214,7 @@ control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
 	slot := control_slot_for_action(ui.mode, action)
 	if slot < 0 {return {}}
 	count := 8
-	if ui.mode == .Play {count = 3}
+	if ui.mode == .Play {count = 4}
 	gap := 6.0
 	cell_w := (controls.w - gap * f64(count - 1)) / f64(count)
 	return UI_Rect{controls.x + f64(slot) * (cell_w + gap), controls.y, cell_w, controls.h}
@@ -2081,6 +2154,40 @@ draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan
 	)
 }
 
+draw_exercise_rename :: proc(ctx, font: rawptr, bright, muted, dim, orange: [4]f64) {
+	if !ui.exercise_rename_open ||
+	   ui.exercise_rename_index < 0 ||
+	   ui.exercise_rename_index >= len(state.exercises) {
+		return
+	}
+	modal := exercise_rename_modal_rect()
+	input := ui_control_rect(.Exercise_Rename)
+	cancel := ui_control_rect(.Cancel_Exercise_Rename)
+	confirm := ui_control_rect(.Confirm_Exercise_Rename)
+	exercise := &state.exercises[ui.exercise_rename_index]
+	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, [4]f64{0.008, 0.009, 0.009, 0.88})
+	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
+	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	draw_text_in_rect(ctx, font, "RENAME EXERCISE", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
+	draw_text_in_rect(ctx, font, "ORIGINAL NAME", UI_Rect{modal.x + 24, modal.y + modal.h - 96, modal.w - 48, 22}, .Start, .Center, muted)
+	draw_text_in_rect(ctx, font, exercise.name, UI_Rect{modal.x + 24, modal.y + modal.h - 130, modal.w - 48, 28}, .Start, .Center, bright)
+	draw_text_in_rect(ctx, font, "NEW NAME", UI_Rect{input.x, input.y + input.h + 8, input.w, 22}, .Start, .Center, muted)
+	fill_overlay_rect(ctx, input, [4]f64{0.020, 0.022, 0.021, 1})
+	if ui.focus == .Exercise_Rename {fill_overlay_border(ctx, input, orange)}
+	draw_editable_text_field(ctx, font, ui.exercise_rename, "Enter a new exercise name", input, .Exercise_Rename, bright, dim, orange, 10)
+	cancel_color := [4]f64{0.052, 0.055, 0.052, 1}
+	if contains(cancel, ui.mouse) {cancel_color = [4]f64{0.09, 0.095, 0.09, 1}}
+	fill_overlay_rect(ctx, cancel, cancel_color)
+	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
+	confirm_control := find_ui_control_by_action(.Confirm_Exercise_Rename)
+	confirm_enabled := confirm_control != nil && .Enabled in confirm_control.flags
+	confirm_color := confirm_enabled ? [4]f64{0.91, 0.31, 0.075, 1} : [4]f64{0.052, 0.055, 0.052, 1}
+	if confirm_enabled && contains(confirm, ui.mouse) {confirm_color = [4]f64{1.0, 0.42, 0.10, 1}}
+	fill_overlay_rect(ctx, confirm, confirm_color)
+	draw_text_in_rect(ctx, font, "RENAME", confirm, .Center, .Center, confirm_enabled ? bright : dim)
+}
+
 draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	if !ui.source_details_open || ui.source_details_index < 0 || ui.source_details_index >= len(state.sources) {return}
 	modal := source_details_rect()
@@ -2315,7 +2422,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 	}
 
-	control_kinds := [8]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data}
+	control_kinds := [9]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename}
 	for kind, index in control_kinds {
 		rect := ui_control_rect(kind)
 		if rect.w <= 0 {continue}
@@ -2925,7 +3032,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		CGContextRestoreGState(ctx)
 	}
 
-	labels := [8]string {
+	labels := [9]string {
 		"MARK IN",
 		"MARK OUT",
 		"COMMIT",
@@ -2934,8 +3041,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		"CAPTIONS",
 		"AUDITION",
 		"DATA",
+		"RENAME",
 	}
-	control_kinds := [8]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data}
+	control_kinds := [9]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename}
 	for label, i in labels {
 		rect := ui_control_rect(control_kinds[i])
 		slot := control_slot_for_action(ui.mode, i)
@@ -3015,6 +3123,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(ctx, small_font, "VIEW SOURCE", view_source, .Center, .Center, cyan)
 	}
 	draw_source_details(ctx, small_font, bright, muted, cyan)
+	draw_exercise_rename(ctx, small_font, bright, muted, dim, orange)
 
 	if ui.source_modal_open {
 		modal := source_modal_rect()
@@ -3326,6 +3435,16 @@ ui_controls_valid :: proc(controls: []UI_Control) -> bool {
 
 ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Command_Palette_Disabled {return false}
+	if kind == .Rename {
+		return import_job == nil &&
+		       ui.active_exercise >= 0 &&
+		       ui.active_exercise < len(state.exercises)
+	}
+	if kind == .Confirm_Exercise_Rename {
+		return ui.exercise_rename_index >= 0 &&
+		       ui.exercise_rename_index < len(state.exercises) &&
+		       len(strings.trim_space(ui.exercise_rename)) > 0
+	}
 	if import_job == nil {return true}
 	#partial switch kind {
 	case .Open_Source_Modal,
@@ -3374,7 +3493,7 @@ add_ax_element :: proc(
 		flags += {.Secondary_Press}
 	}
 	#partial switch kind {
-	case .Command_Palette_Search, .URL, .Source_Search, .Transcript_Search, .Exercise_Search, .Exercise_Name:
+	case .Command_Palette_Search, .URL, .Source_Search, .Transcript_Search, .Exercise_Search, .Exercise_Name, .Exercise_Rename:
 		flags += {.Editable}
 	}
 	control := UI_Control {
@@ -3490,6 +3609,38 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				functional_name = fmt.tprintf("palette result %d", result.entry.id),
 			)
 		}
+		validate_ui_controls()
+		return
+	}
+	if ui.exercise_rename_open {
+		modal := exercise_rename_modal_rect()
+		add_ax_element(
+			array,
+			element_class,
+			"New exercise name",
+			"AXTextField",
+			exercise_rename_input_rect(modal),
+			.Exercise_Rename,
+			flash_label = "new exercise name",
+		)
+		add_ax_element(
+			array,
+			element_class,
+			"Cancel exercise rename",
+			"AXButton",
+			exercise_rename_cancel_rect(modal),
+			.Cancel_Exercise_Rename,
+			flash_label = "cancel rename",
+		)
+		add_ax_element(
+			array,
+			element_class,
+			"Rename exercise",
+			"AXButton",
+			exercise_rename_confirm_rect(modal),
+			.Confirm_Exercise_Rename,
+			flash_label = "confirm rename",
+		)
 		validate_ui_controls()
 		return
 	}
@@ -3742,8 +3893,8 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			flash_label = "louder",
 		)
 	}
-	kinds := [8]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data}
-	labels := [8]string {
+	kinds := [9]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename}
+	labels := [9]string {
 		"Set start",
 		"Set end",
 		"Save exercise",
@@ -3752,8 +3903,9 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		"Load captions",
 		"Preview range",
 		"Open data folder",
+		"Rename exercise",
 	}
-	flash_labels := [8]string{"mark in", "mark out", "commit", "run", "hold", "captions", "audition", "data"}
+	flash_labels := [9]string{"mark in", "mark out", "commit", "run", "hold", "captions", "audition", "data", "rename exercise"}
 	for kind, index in kinds {
 		rect := control_rect(controls, index)
 		if rect.w > 0 {add_ax_element(array, element_class, labels[index], "AXButton", rect, kind, flash_label = flash_labels[index])}
@@ -3867,6 +4019,12 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		on_play_exercise(nil, nil, nil)
 	case .Exercise_Name:
 		focus_text_input(.Exercise_Name)
+	case .Cancel_Exercise_Rename:
+		close_exercise_rename()
+	case .Confirm_Exercise_Rename:
+		confirm_exercise_rename()
+	case .Exercise_Rename:
+		focus_text_input(.Exercise_Rename)
 	case .Volume_Down:
 		adjust_player_volume(-0.1)
 	case .Volume_Up:
@@ -3906,6 +4064,8 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		on_preview(nil, nil, nil)
 	case .Data:
 		on_open_data_folder(nil, nil, nil)
+	case .Rename:
+		open_exercise_rename()
 	}
 	ui.needs_redraw = true
 	return true
@@ -4208,6 +4368,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 begin_command_palette :: proc() -> bool {
 	if command_palette.is_open(&command_palette_state) {return true}
 	cancel_ui_flash()
+	if ui.exercise_rename_open {close_exercise_rename()}
 	ui.palette_previous_focus = ui.focus
 	ui.palette_previous_caret = ui.caret_byte_offset
 	ui.palette_previous_text_scroll = ui.text_scroll_x
@@ -4263,6 +4424,7 @@ activate_command_palette_result :: proc(result_index: int) -> bool {
 	ui.focus = .None
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
+	if ui.exercise_rename_open {close_exercise_rename()}
 	if action.kind == .Source {set_ui_mode(.Create)}
 	if action.kind == .Exercise {set_ui_mode(.Play)}
 	return activate_ui_action(action)
@@ -4298,6 +4460,8 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 		return nsstring(ui.exercise_search)
 	case .Exercise_Name:
 		return nsstring(ui.exercise_name)
+	case .Exercise_Rename:
+		return nsstring(ui.exercise_rename)
 	}
 	return nil
 }
@@ -4327,6 +4491,8 @@ on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
 		ui_set_string(&ui.exercise_search, text)
 	case .Exercise_Name:
 		ui_set_string(&ui.exercise_name, text)
+	case .Exercise_Rename:
+		ui_set_string(&ui.exercise_rename, text)
 	case:
 		return
 	}
@@ -4489,6 +4655,7 @@ ui_memory_destroy :: proc() {
 	delete(ui.transcript_search)
 	delete(ui.exercise_search)
 	delete(ui.exercise_name)
+	delete(ui.exercise_rename)
 	delete(ui.command_palette_query)
 	delete(ui.status)
 	delete(ui.status_source_video_id)
@@ -4784,7 +4951,7 @@ metal_player_load :: proc(path: string) -> bool {
 }
 
 activate_control :: proc(index: int) {
-	kinds := [8]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data}
+	kinds := [9]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename}
 	if index < 0 || index >= len(kinds) {return}
 	control := find_ui_control_by_action(kinds[index])
 	if control != nil && .Enabled in control.flags {_ = activate_ui_action(control.action)}
@@ -4836,6 +5003,9 @@ activate_registered_target_at_point :: proc(point: Point) -> bool {
 	case .Exercise_Name:
 		focus_text_input(.Exercise_Name)
 		place_caret_in_text_field(ui.exercise_name, control.rect, point)
+	case .Exercise_Rename:
+		focus_text_input(.Exercise_Rename)
+		place_caret_in_text_field(ui.exercise_rename, control.rect, point)
 	case .Source_Timeline:
 		ui.source_scrubbing = true
 		seek_player_timeline_rect(point, control.rect)
@@ -4854,6 +5024,12 @@ dispatch_click :: proc(point: Point) {
 		return
 	}
 	clear_marked_text()
+	if ui.exercise_rename_open {
+		modal := exercise_rename_modal_rect()
+		if !contains(modal, point) {close_exercise_rename(); return}
+		_ = activate_registered_target_at_point(point)
+		return
+	}
 	if ui.source_details_open {
 		modal := source_details_rect()
 		if !contains(modal, point) {close_source_details(); return}
@@ -4888,7 +5064,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		nil,
 	)
 	if !command_palette.is_open(&command_palette_state) &&
-	   !ui.source_modal_open && !ui.source_details_open &&
+	   !ui.source_modal_open && !ui.source_details_open && !ui.exercise_rename_open &&
 	   contains(app_header_rect(), ui.mouse) &&
 	   !contains(ui_control_rect(.Mode_Toggle), ui.mouse) {
 		if msg_uint(event, sel_registerName("clickCount")) >= 2 {
@@ -4907,7 +5083,7 @@ on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	cancel_ui_flash()
 	if command_palette.is_open(&command_palette_state) {return}
-	if ui.source_modal_open || ui.source_details_open || ui.mode != .Create { return }
+	if ui.source_modal_open || ui.source_details_open || ui.exercise_rename_open || ui.mode != .Create { return }
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
 	ui.mouse = point
@@ -4966,7 +5142,7 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 		ui.needs_redraw = true
 		return
 	}
-	if ui.source_modal_open || ui.source_details_open {return}
+	if ui.source_modal_open || ui.source_details_open || ui.exercise_rename_open {return}
 	delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(
@@ -5089,10 +5265,21 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 	} else if selector == sel_registerName("paste:") {
 		on_metal_paste(self, selector, nil)
 	} else if selector == sel_registerName("insertNewline:") {
-		if ui.focus ==
-		   .URL {insert_text_at_caret(&ui.url_input, "\n"); schedule_source_probe(1)} else if ui.focus == .Source_Search || ui.focus == .Transcript_Search || ui.focus == .Exercise_Search {ui.focus = .None} else if ui.focus == .Exercise_Name {ui.focus = .None}
+		if ui.focus == .URL {
+			insert_text_at_caret(&ui.url_input, "\n")
+			schedule_source_probe(1)
+		} else if ui.focus == .Exercise_Rename {
+			confirm_exercise_rename()
+		} else if ui.focus == .Source_Search ||
+		          ui.focus == .Transcript_Search ||
+		          ui.focus == .Exercise_Search ||
+		          ui.focus == .Exercise_Name {
+			ui.focus = .None
+		}
 	} else if selector == sel_registerName("insertTab:") {
-		if ui.source_modal_open {
+		if ui.exercise_rename_open {
+			ui.focus = .Exercise_Rename
+		} else if ui.source_modal_open {
 			ui.focus = .URL
 		} else if ui.mode == .Play {
 			ui.focus = .Exercise_Search
@@ -5179,6 +5366,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		_ = begin_ui_flash()
 		return
 	}
+	if ui.exercise_rename_open && key == 53 {close_exercise_rename(); return}
 	if key == 53 && unfocus_text_input() {return}
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
 	if ui.source_details_open && key == 53 {close_source_details(); return}
@@ -5502,6 +5690,7 @@ build_metal_window :: proc() {
 	ui_set_string(&ui.status, "Ready")
 	ui.scale = 1
 	ui.active_exercise = -1
+	ui.exercise_rename_index = -1
 	ui.transcript_matches_dirty = true
 	ui.needs_redraw = true
 	flash.state_init(&flash_state)
