@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:encoding/json"
+import "core:mem"
 import "core:os"
 import os2 "core:os/os2"
 import "core:path/filepath"
@@ -14,6 +15,9 @@ import match_sorter "match_sorter:."
 
 Id  :: rawptr
 Sel :: rawptr
+
+SEARCH_RESERVE_SIZE :: uint(64 * mem.Megabyte)
+SEARCH_COMMIT_SIZE :: uint(64 * mem.Kilobyte)
 
 foreign import objc "system:objc"
 foreign objc {
@@ -1542,7 +1546,11 @@ main :: proc() {
 	if !memory_init() { fmt.eprintln("Unable to initialize memory arenas"); return }
 	defer memory_destroy()
 	defer cli_library_release()
-	if error := match_sorter.search_context_init(&transcript_search_context); error != nil {
+	if error := match_sorter.search_context_init(
+		&transcript_search_context,
+		SEARCH_RESERVE_SIZE,
+		SEARCH_COMMIT_SIZE,
+	); error != nil {
 		fmt.eprintln("Unable to initialize transcript search")
 		return
 	}

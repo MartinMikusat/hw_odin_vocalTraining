@@ -200,7 +200,9 @@ letter or digit, the app derives a fallback from the control action.
 The sibling `hw_odin_ui_commandPalette` package owns command-palette state,
 context evaluation, keyboard selection, and match-sorter ranking. The
 application supplies curated actions and data, renders the Metal modal, and
-executes the selected opaque identifier.
+executes the selected opaque identifier. One session arena owns each open
+entry snapshot. Query, result, and ranked-index buffers retain their capacity
+between edits and sessions.
 
 SQLite stores sources, transcript segments, hints, exercises, and source
 metadata. The main thread commits state changes in transactions. A startup
@@ -236,6 +238,10 @@ Sources, import hints, exercises, and mutable UI strings remain individually
 heap-owned because they change independently. Core Foundation, Objective-C,
 AVFoundation, and Metal objects retain explicit release calls; an arena reset
 never substitutes for framework reference counting.
+
+The command palette resets one growing arena when it closes. Its search context
+and the transcript search context each reserve 64 MiB of virtual address space
+and initially commit 64 KiB.
 
 ### Build
 

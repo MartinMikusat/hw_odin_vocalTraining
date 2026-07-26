@@ -5481,7 +5481,11 @@ build_metal_window :: proc() {
 	ui.transcript_matches_dirty = true
 	ui.needs_redraw = true
 	flash.state_init(&flash_state)
-	palette_error := command_palette.state_init(&command_palette_state)
+	palette_error := command_palette.state_init(
+		&command_palette_state,
+		search_reserve_size = SEARCH_RESERVE_SIZE,
+		search_commit_size = SEARCH_COMMIT_SIZE,
+	)
 	assert(palette_error == nil, "Unable to initialize the command palette")
 
 	frame := Rect{Point{120, 100}, Size{1100, 720}}
