@@ -1562,6 +1562,8 @@ main :: proc() {
 		if parsed {
 			if routed_result, routed := cli_ipc_try_request(request); routed {
 				result = routed_result
+			} else if cli_command_requires_gui(request.command) {
+				result = cli_error(request.command, .Busy, "gui_not_running", "The UI command requires a running application")
 			} else if !cli_library_try_acquire() {
 				result = cli_error(request.command, .Busy, "busy", "The app owns the library, but its CLI control socket is not ready")
 			} else {

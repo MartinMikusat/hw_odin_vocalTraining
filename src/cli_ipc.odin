@@ -119,6 +119,7 @@ cli_ipc_request_destroy :: proc(request: ^CLI_Request) {
 	delete(request.from_segment)
 	delete(request.to_segment)
 	delete(request.name)
+	delete(request.baseline_path)
 	request^ = {}
 }
 
@@ -127,9 +128,11 @@ on_cli_ipc_request :: proc "c" (self: Id, command: Sel, sender: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if cli_ipc_work == nil {return}
 	cli_ipc_work.result = cli_execute(cli_ipc_work.request)
-	refresh_sources()
-	refresh_exercises()
-	ui.needs_redraw = true
+	if cli_command_mutates_library(cli_ipc_work.request.command) {
+		refresh_sources()
+		refresh_exercises()
+		ui.needs_redraw = true
+	}
 }
 
 cli_ipc_serve_connection :: proc(fd: posix.FD) {

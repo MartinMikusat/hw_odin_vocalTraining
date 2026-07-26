@@ -2,6 +2,7 @@ package main
 
 import "core:testing"
 import "core:encoding/json"
+import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -222,6 +223,12 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
 	create_control_count := len(ui_build.controls)
 	testing.expect(t, create_control_count > 20)
+	idle_snapshot := ui_diagnostic_snapshot(
+		ui_build.controls[:],
+		ui_build.diagnostic_surface,
+		ui_build.frame,
+		context.temp_allocator,
+	)
 	ui_build.controls = nil
 	mem_virtual.arena_free_all(&frame_arena)
 
@@ -229,9 +236,50 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	previous_import_job := import_job
 	import_job = &busy_job
 	defer import_job = previous_import_job
+	ui.frame_tick += 1
 	build_ui_controls(false, frame_allocator)
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
 	testing.expect(t, len(ui_build.controls) > create_control_count)
+	busy_snapshot := ui_diagnostic_snapshot(
+		ui_build.controls[:],
+		ui_build.diagnostic_surface,
+		ui_build.frame,
+		context.temp_allocator,
+	)
+	busy_diff := ui_diagnostic_compare_background(
+		idle_snapshot,
+		busy_snapshot,
+		context.temp_allocator,
+	)
+	testing.expect(t, busy_diff.ok)
+	testing.expect_value(t, busy_diff.retained_count, len(idle_snapshot.controls))
+	testing.expect_value(t, len(busy_diff.added), 1)
+	testing.expect(t, len(busy_diff.disabled) > 0)
+	testing.expect_value(t, len(busy_diff.removed), 0)
+	testing.expect_value(t, len(busy_diff.changed), 0)
+	testing.expect_value(t, len(busy_diff.unexpected), 0)
+	broken_controls := make(
+		[dynamic]UI_Diagnostic_Control,
+		0,
+		len(busy_snapshot.controls),
+		context.temp_allocator,
+	)
+	for control in busy_snapshot.controls {
+		if strings.has_prefix(control.functional_name, "select source ") ||
+		   strings.has_prefix(control.functional_name, "transcript segment ") {
+			continue
+		}
+		append(&broken_controls, control)
+	}
+	broken_snapshot := busy_snapshot
+	broken_snapshot.controls = broken_controls[:]
+	broken_diff := ui_diagnostic_compare_background(
+		idle_snapshot,
+		broken_snapshot,
+		context.temp_allocator,
+	)
+	testing.expect(t, !broken_diff.ok)
+	testing.expect(t, len(broken_diff.removed) > 0)
 	stop := find_ui_control_by_action(.Stop_Download)
 	mode := find_ui_control_by_action(.Mode_Toggle)
 	source := find_ui_control_by_action(.Source)
@@ -365,6 +413,98 @@ cli_rejects_incomplete_clip_request_with_json_error_test :: proc(t: ^testing.T) 
 	testing.expect_value(t, result.exit_code, CLI_Exit.Usage)
 	testing.expect(t, strings.contains(result.output, `"ok":false`))
 	testing.expect(t, strings.contains(result.output, `"code":"usage"`))
+}
+
+@(test)
+cli_ui_commands_parse_and_require_the_running_gui_test :: proc(t: ^testing.T) {
+	snapshot, snapshot_result, snapshot_ok := cli_parse_request(
+		[]string{"ui", "snapshot"},
+	)
+	defer delete(snapshot_result.output)
+	testing.expect(t, snapshot_ok)
+	testing.expect_value(t, snapshot.command, CLI_Command.UI_Snapshot)
+	testing.expect(t, cli_command_requires_gui(snapshot.command))
+	testing.expect(t, !cli_command_mutates_library(snapshot.command))
+
+	check, check_result, check_ok := cli_parse_request(
+		[]string{"ui", "check", "--baseline", "/tmp/ui-baseline.json"},
+	)
+	defer delete(check_result.output)
+	testing.expect(t, check_ok)
+	testing.expect_value(t, check.command, CLI_Command.UI_Check)
+	testing.expect_value(t, check.baseline_path, "/tmp/ui-baseline.json")
+	testing.expect(t, cli_command_requires_gui(check.command))
+
+	_, missing_result, missing_ok := cli_parse_request([]string{"ui", "check"})
+	defer delete(missing_result.output)
+	testing.expect(t, !missing_ok)
+	testing.expect_value(t, missing_result.exit_code, CLI_Exit.Usage)
+}
+
+@(test)
+cli_ui_check_failure_encodes_compact_json_test :: proc(t: ^testing.T) {
+	response := CLI_UI_Check_Failure_Response{
+		ok = false,
+		command = "ui.check",
+		data = {
+			state = "create.importing",
+			controls = 55,
+			retained = 54,
+			removed = 1,
+			artifact = "/tmp/check.json",
+		},
+		error = {
+			code = "ui_contract_failed",
+			message = "UI continuity failed",
+			diagnostic_log = "/tmp/check.json",
+		},
+	}
+	encoded := cli_encode(response)
+	defer delete(encoded)
+	testing.expect(t, strings.contains(encoded, `"command":"ui.check"`))
+	testing.expect(t, strings.contains(encoded, `"code":"ui_contract_failed"`))
+	testing.expect(t, !strings.contains(encoded, `"internal_error"`))
+}
+
+@(test)
+ui_diagnostic_artifacts_keep_only_the_newest_twenty_files_test :: proc(
+	t: ^testing.T,
+) {
+	support, found := os.lookup_env("VT_APP_SUPPORT_DIR")
+	defer delete(support)
+	testing.expect(t, found)
+	if !found {return}
+	directory := fmt.tprintf("%s/ui-prune-test", support)
+	os.make_directory(directory)
+	json_contents := []byte{'{', '}'}
+	for index in 0..<23 {
+		path := fmt.tprintf("%s/snapshot-%02d.json", directory, index)
+		testing.expect(t, os.write_entire_file(path, json_contents))
+	}
+	unrelated := fmt.tprintf("%s/keep.txt", directory)
+	testing.expect(t, os.write_entire_file(unrelated, []byte{'k', 'e', 'e', 'p'}))
+	removed := ui_diagnostic_prune_artifacts(
+		directory,
+		UI_DIAGNOSTIC_ARTIFACT_RETENTION,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, removed, 3)
+	handle, open_error := os.open(directory)
+	testing.expect(t, open_error == nil)
+	if open_error != nil {return}
+	entries, read_error := os.read_dir(handle, -1, context.temp_allocator)
+	os.close(handle)
+	testing.expect(t, read_error == nil)
+	count := 0
+	for entry in entries {
+		if strings.has_prefix(entry.name, "snapshot-") &&
+		   strings.has_suffix(entry.name, ".json") {
+			count += 1
+		}
+	}
+	testing.expect_value(t, count, UI_DIAGNOSTIC_ARTIFACT_RETENTION)
+	testing.expect(t, os.exists(unrelated))
+	testing.expect(t, os.exists(fmt.tprintf("%s/snapshot-22.json", directory)))
 }
 
 @(test)
@@ -1474,6 +1614,101 @@ ui_control_validation_rejects_duplicate_names_and_identifiers_test :: proc(t: ^t
 	duplicate[1].id = ui_control_id(duplicate[1].functional_name)
 	duplicate[1].functional_name = duplicate[0].functional_name
 	testing.expect(t, !ui_controls_valid(duplicate))
+}
+
+@(test)
+ui_background_comparison_accepts_disabling_and_rejects_structural_changes_test :: proc(
+	t: ^testing.T,
+) {
+	enabled_flags := ui_diagnostic_flags(
+		UI_Control_Flags{.Accessibility, .Enabled, .Flash, .Primary_Press},
+	)
+	disabled_flags := ui_diagnostic_flags(UI_Control_Flags{.Accessibility})
+	baseline_controls := []UI_Diagnostic_Control{
+		{
+			id = 1,
+			functional_name = "save exercise",
+			action_kind = "Save",
+			rect = {x=10, y=20, w=30, h=40},
+			flags = enabled_flags,
+			accessibility_role = "AXButton",
+		},
+	}
+	current_controls := []UI_Diagnostic_Control{
+		{
+			id = 1,
+			functional_name = "save exercise",
+			action_kind = "Save",
+			rect = {x=10, y=20, w=30, h=40},
+			flags = disabled_flags,
+			accessibility_role = "AXButton",
+		},
+		{
+			id = 2,
+			functional_name = "stop download",
+			action_kind = "Stop_Download",
+			rect = {x=50, y=20, w=30, h=40},
+			flags = enabled_flags,
+			accessibility_role = "AXButton",
+		},
+	}
+	baseline := UI_Diagnostic_Snapshot{
+		schema_version = UI_DIAGNOSTIC_SCHEMA_VERSION,
+		process_id = 10,
+		frame = 1,
+		surface = {mode="create", overlay="none", background="none"},
+		controls = baseline_controls,
+	}
+	current := UI_Diagnostic_Snapshot{
+		schema_version = UI_DIAGNOSTIC_SCHEMA_VERSION,
+		process_id = 10,
+		frame = 2,
+		surface = {mode="create", overlay="none", background="import"},
+		controls = current_controls,
+	}
+	diff := ui_diagnostic_compare_background(baseline, current, context.temp_allocator)
+	testing.expect(t, diff.ok)
+	testing.expect_value(t, diff.retained_count, 1)
+	testing.expect_value(t, len(diff.added), 1)
+	testing.expect_value(t, len(diff.disabled), 1)
+
+	moved_controls := make([]UI_Diagnostic_Control, len(current_controls), context.temp_allocator)
+	copy(moved_controls, current_controls)
+	moved_controls[0].rect.x += 1
+	moved := current
+	moved.controls = moved_controls
+	moved_diff := ui_diagnostic_compare_background(
+		baseline,
+		moved,
+		context.temp_allocator,
+	)
+	testing.expect(t, !moved_diff.ok)
+	testing.expect_value(t, len(moved_diff.changed), 1)
+	testing.expect_value(t, moved_diff.changed[0].reason, "rectangle")
+
+	unexpected_controls := make(
+		[]UI_Diagnostic_Control,
+		len(current_controls) + 1,
+		context.temp_allocator,
+	)
+	copy(unexpected_controls, current_controls)
+	unexpected_controls[len(current_controls)] = UI_Diagnostic_Control{
+		id = 3,
+		functional_name = "surprise control",
+		action_kind = "Save",
+		rect = {x=90, y=20, w=30, h=40},
+		flags = enabled_flags,
+		accessibility_role = "AXButton",
+	}
+	unexpected := current
+	unexpected.controls = unexpected_controls
+	unexpected_diff := ui_diagnostic_compare_background(
+		baseline,
+		unexpected,
+		context.temp_allocator,
+	)
+	testing.expect(t, !unexpected_diff.ok)
+	testing.expect_value(t, len(unexpected_diff.unexpected), 1)
 }
 
 @(test)

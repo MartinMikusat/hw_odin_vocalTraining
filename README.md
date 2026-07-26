@@ -125,6 +125,21 @@ start plus its duration. The command saves the MP4 as an exercise.
 The GUI owns the library while it runs. CLI commands then use its private local
 socket. When the GUI is closed, the CLI locks and updates the library directly.
 
+Structural UI commands require the running development application. Capture a
+baseline before an interaction, then check the completed background state:
+
+```sh
+./scripts/dev-cli.sh ui snapshot
+./scripts/dev-cli.sh ui check --baseline '/absolute/path/from-the-snapshot-result.json'
+```
+
+Each command returns compact JSON. The snapshot result contains the baseline
+artifact path. The check result contains counts for retained, added, disabled,
+removed, changed, and unexpected controls. Complete artifacts stay in
+`build/dev-support/ui-checks/`. The app keeps the newest 20 artifacts and
+removes older files after each successful write. UI commands return
+`gui_not_running` when the development application is closed.
+
 ## Development guide
 
 ### Architecture
@@ -152,6 +167,13 @@ and capability flags. Pointer input, macOS accessibility, and Flash navigation
 consume the same records. Dynamic controls include a durable source, segment,
 or exercise identifier in their functional name. Static panels and labels stay
 outside the control registry.
+
+The structural UI checker rebuilds and serializes the current control registry
+on the main thread. A background-state check compares it with an idle baseline.
+It permits expected disabling and the import Stop control. It rejects removed
+controls, changed actions, changed rectangles, and unexpected additions. The
+checker writes full snapshots and diffs to application support, while the CLI
+returns only compact counts.
 
 The sibling `hw_odin_ui_flash` package consumes opaque control identifiers and
 Flash labels from the application registry. A control keeps its unique

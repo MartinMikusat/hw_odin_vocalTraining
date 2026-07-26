@@ -14,6 +14,7 @@ CLI_Exit :: enum i32 {
 	Busy = 4,
 	Media = 5,
 	Storage = 6,
+	Check = 7,
 }
 
 CLI_Command :: enum {
@@ -23,6 +24,8 @@ CLI_Command :: enum {
 	Transcript_Get,
 	Clip_Create,
 	Clip_List,
+	UI_Snapshot,
+	UI_Check,
 }
 
 CLI_Request :: struct {
@@ -33,6 +36,7 @@ CLI_Request :: struct {
 	to_segment: string,
 	name: string,
 	max_height: int,
+	baseline_path: string,
 }
 
 CLI_Result :: struct {
@@ -139,6 +143,45 @@ CLI_Clip_List_Response :: struct {
 	data: CLI_Clip_List_Data,
 }
 
+CLI_UI_Snapshot_Data :: struct {
+	state: string,
+	controls: int,
+	enabled: int,
+	frame: int,
+	artifact: string,
+}
+
+CLI_UI_Snapshot_Response :: struct {
+	ok: bool,
+	command: string,
+	data: CLI_UI_Snapshot_Data,
+}
+
+CLI_UI_Check_Data :: struct {
+	state: string,
+	controls: int,
+	retained: int,
+	added: int,
+	disabled: int,
+	removed: int,
+	changed: int,
+	unexpected: int,
+	artifact: string,
+}
+
+CLI_UI_Check_Response :: struct {
+	ok: bool,
+	command: string,
+	data: CLI_UI_Check_Data,
+}
+
+CLI_UI_Check_Failure_Response :: struct {
+	ok: bool,
+	command: string,
+	data: CLI_UI_Check_Data,
+	error: CLI_Error_Data,
+}
+
 cli_command_name :: proc(command: CLI_Command) -> string {
 	switch command {
 	case .Source_Add: return "source.add"
@@ -146,9 +189,19 @@ cli_command_name :: proc(command: CLI_Command) -> string {
 	case .Transcript_Get: return "transcript.get"
 	case .Clip_Create: return "clip.create"
 	case .Clip_List: return "clip.list"
+	case .UI_Snapshot: return "ui.snapshot"
+	case .UI_Check: return "ui.check"
 	case .None: return "unknown"
 	}
 	return "unknown"
+}
+
+cli_command_requires_gui :: proc(command: CLI_Command) -> bool {
+	return command == .UI_Snapshot || command == .UI_Check
+}
+
+cli_command_mutates_library :: proc(command: CLI_Command) -> bool {
+	return command == .Source_Add || command == .Clip_Create
 }
 
 cli_encode :: proc(value: $T) -> string {
@@ -186,6 +239,7 @@ cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string
 		case "--from-segment": request.from_segment = value
 		case "--to-segment": request.to_segment = value
 		case "--name": request.name = value
+		case "--baseline": request.baseline_path = value
 		case "--max-height":
 			height, ok := cli_parse_positive_int(value)
 			if !ok {return "--max-height must be a positive integer", false}
@@ -203,7 +257,7 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 		return request, {}, true
 	}
 	if len(args) < 2 {
-		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, or clip create|list"), false
+		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, or ui snapshot|check"), false
 	}
 	group, action := args[0], args[1]
 	remaining := args[2:]
@@ -225,8 +279,15 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 	case group == "clip" && action == "list":
 		request.command = .Clip_List
 		allowed = []string{"--source"}
+	case group == "ui" && action == "snapshot":
+		request.command = .UI_Snapshot
+		if len(remaining) != 0 {return {}, cli_error(request.command, .Usage, "usage", "ui snapshot does not accept options"), false}
+		return request, {}, true
+	case group == "ui" && action == "check":
+		request.command = .UI_Check
+		allowed = []string{"--baseline"}
 	case:
-		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, or clip create|list"), false
+		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, or ui snapshot|check"), false
 	}
 	if message, ok := cli_parse_flags(&request, remaining, allowed); !ok {
 		return {}, cli_error(request.command, .Usage, "usage", message), false
@@ -240,7 +301,9 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 		if len(strings.trim_space(request.source_id)) == 0 || len(strings.trim_space(request.from_segment)) == 0 || len(strings.trim_space(request.to_segment)) == 0 || len(strings.trim_space(request.name)) == 0 {
 			return {}, cli_error(request.command, .Usage, "usage", "clip create requires --source, --from-segment, --to-segment, and --name"), false
 		}
-	case .None, .Source_List, .Clip_List:
+	case .UI_Check:
+		if len(strings.trim_space(request.baseline_path)) == 0 {return {}, cli_error(request.command, .Usage, "usage", "ui check requires --baseline"), false}
+	case .None, .Source_List, .Clip_List, .UI_Snapshot:
 	}
 	return request, {}, true
 }
@@ -423,6 +486,106 @@ cli_clip_list :: proc(request: CLI_Request) -> CLI_Result {
 	return CLI_Result{output=cli_encode(response), exit_code=.Success}
 }
 
+cli_ui_snapshot :: proc(request: CLI_Request) -> CLI_Result {
+	snapshot, snapshot_ok := ui_diagnostic_capture_current(context.temp_allocator)
+	if !snapshot_ok {
+		return cli_error(request.command, .Busy, "ui_not_ready", "The running app has not completed a valid UI frame")
+	}
+	path := ui_diagnostic_artifact_path(
+		"snapshot",
+		snapshot.frame,
+		context.temp_allocator,
+	)
+	if !ui_diagnostic_write_artifact(path, snapshot, context.temp_allocator) {
+		return cli_error(request.command, .Storage, "snapshot_write_failed", "Unable to write the UI snapshot")
+	}
+	response := CLI_UI_Snapshot_Response{
+		ok = true,
+		command = cli_command_name(request.command),
+		data = CLI_UI_Snapshot_Data{
+			state = ui_diagnostic_state_name(snapshot.surface, context.temp_allocator),
+			controls = len(snapshot.controls),
+			enabled = ui_diagnostic_enabled_count(&snapshot),
+			frame = snapshot.frame,
+			artifact = path,
+		},
+	}
+	return CLI_Result{output=cli_encode(response), exit_code=.Success}
+}
+
+cli_ui_check :: proc(request: CLI_Request) -> CLI_Result {
+	baseline, baseline_ok := ui_diagnostic_read_snapshot(
+		request.baseline_path,
+		context.temp_allocator,
+	)
+	if !baseline_ok {
+		return cli_error(request.command, .Invalid, "invalid_baseline", "The baseline is not a valid UI snapshot")
+	}
+	current, current_ok := ui_diagnostic_capture_current(context.temp_allocator)
+	if !current_ok {
+		return cli_error(request.command, .Busy, "ui_not_ready", "The running app has not completed a valid UI frame")
+	}
+	diff := ui_diagnostic_compare_background(
+		baseline,
+		current,
+		context.temp_allocator,
+	)
+	artifact := UI_Diagnostic_Check_Artifact{
+		schema_version = UI_DIAGNOSTIC_SCHEMA_VERSION,
+		contract = "background-operation-continuity",
+		baseline = baseline,
+		current = current,
+		diff = diff,
+	}
+	path := ui_diagnostic_artifact_path(
+		"check",
+		current.frame,
+		context.temp_allocator,
+	)
+	if !ui_diagnostic_write_artifact(path, artifact, context.temp_allocator) {
+		return cli_error(request.command, .Storage, "snapshot_write_failed", "Unable to write the UI check artifact")
+	}
+	data := CLI_UI_Check_Data{
+		state = ui_diagnostic_state_name(current.surface, context.temp_allocator),
+		controls = len(current.controls),
+		retained = diff.retained_count,
+		added = len(diff.added),
+		disabled = len(diff.disabled),
+		removed = len(diff.removed),
+		changed = len(diff.changed),
+		unexpected = len(diff.unexpected),
+		artifact = path,
+	}
+	response := CLI_UI_Check_Response{
+		ok = diff.ok,
+		command = cli_command_name(request.command),
+		data = data,
+	}
+	exit_code := CLI_Exit.Success
+	if !diff.ok {
+		error_data := CLI_Error_Data{
+			code = "ui_contract_failed",
+			message = fmt.tprintf(
+				"UI continuity failed: removed=%d changed=%d unexpected=%d contract=%d",
+				len(diff.removed),
+				len(diff.changed),
+				len(diff.unexpected),
+				len(diff.contract_issues),
+			),
+			diagnostic_log = path,
+		}
+		exit_code = .Check
+		failure := CLI_UI_Check_Failure_Response{
+			ok = false,
+			command = cli_command_name(request.command),
+			data = data,
+			error = error_data,
+		}
+		return CLI_Result{output=cli_encode(failure), exit_code=exit_code}
+	}
+	return CLI_Result{output=cli_encode(response), exit_code=exit_code}
+}
+
 cli_execute :: proc(request: CLI_Request) -> CLI_Result {
 	switch request.command {
 	case .Source_Add: return cli_source_add(request)
@@ -430,6 +593,8 @@ cli_execute :: proc(request: CLI_Request) -> CLI_Result {
 	case .Transcript_Get: return cli_transcript_get(request)
 	case .Clip_Create: return cli_clip_create(request)
 	case .Clip_List: return cli_clip_list(request)
+	case .UI_Snapshot: return cli_ui_snapshot(request)
+	case .UI_Check: return cli_ui_check(request)
 	case .None: return cli_error(request.command, .Usage, "usage", "Unknown command")
 	}
 	return cli_error(request.command, .Usage, "usage", "Unknown command")

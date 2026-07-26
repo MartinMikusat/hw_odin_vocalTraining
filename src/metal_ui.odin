@@ -310,7 +310,9 @@ UI_Control :: struct {
 }
 
 UI_Build_Output :: struct {
-	controls: [dynamic]UI_Control,
+	controls:           [dynamic]UI_Control,
+	diagnostic_surface: UI_Diagnostic_Surface,
+	frame:              int,
 }
 
 ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1, transcript_active_match = -1}
@@ -3420,6 +3422,8 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 	defer context.temp_allocator = previous_temp
 	context.temp_allocator = allocator
 	ui_build.controls = make([dynamic]UI_Control, 0, 64, allocator)
+	ui_build.diagnostic_surface = ui_diagnostic_surface(allocator)
+	ui_build.frame = int(ui.frame_tick)
 	array: Id
 	if rebuild_accessibility {
 		clear(&ax_actions)
