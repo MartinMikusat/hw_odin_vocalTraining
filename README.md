@@ -5,7 +5,9 @@ lessons into reusable practice exercises.
 
 ## AI-assisted development disclosure
 
-**This application was built using GPT-5.6-Sol.**
+Models used:
+
+- **GPT-5.6-Sol**
 
 ## User guide
 
