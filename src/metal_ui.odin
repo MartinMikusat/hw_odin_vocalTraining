@@ -1210,6 +1210,21 @@ NSEventModifierFlagOption  :: uint(1 << 19)
 NSEventModifierFlagCommand :: uint(1 << 20)
 NSEventModifierFlagShift   :: uint(1 << 17)
 
+timeline_scrub_delta :: proc(key, modifiers: uint) -> (f64, bool) {
+	if key != 123 && key != 124 {return 0, false}
+	if modifiers & (NSEventModifierFlagOption | NSEventModifierFlagControl) != 0 {
+		return 0, false
+	}
+	step := 1.0
+	if modifiers & NSEventModifierFlagCommand != 0 {
+		step = 10
+	} else if modifiers & NSEventModifierFlagShift != 0 {
+		step = 0.1
+	}
+	if key == 123 {step = -step}
+	return step, true
+}
+
 command_palette_modifiers :: proc(modifiers: uint) -> command_palette.Modifier_Set {
 	result: command_palette.Modifier_Set
 	if modifiers & NSEventModifierFlagShift != 0 {result += {.Shift}}
@@ -5644,6 +5659,16 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		}
 	}
 	if ui.focus == .None {
+		if !ui.source_modal_open &&
+		   !ui.source_details_open &&
+		   !ui.exercise_rename_open &&
+		   !ui.exercise_metadata_open &&
+		   state.player != nil {
+			if delta, scrub := timeline_scrub_delta(key, modifiers); scrub {
+				scrub_player_by(delta)
+				return
+			}
+		}
 		if key == 49 {on_toggle_playback(nil, nil, nil); return}
 		key_codes := [8]uint{18, 19, 20, 21, 23, 22, 26, 28}
 		for control_key, slot in key_codes {

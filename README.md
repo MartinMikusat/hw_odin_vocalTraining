@@ -93,6 +93,8 @@ The speed controls adjust playback from `0.1x` to `2.0x` in `0.1x` steps.
 
 When no text field has focus, press **Space** to toggle playback or **1–8** to
 activate the matching numbered transport control.
+Press **Left Arrow** or **Right Arrow** to scrub by one second. Hold **Shift**
+to scrub by 0.1 seconds, or hold **Command** to scrub by 10 seconds.
 
 Press **Control-K** to open the command palette from any application state.
 Type to search commands, sources, and exercises in one list. Use the arrow

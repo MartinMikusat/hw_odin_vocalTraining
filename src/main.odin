@@ -675,6 +675,14 @@ seek_seconds :: proc(seconds: f64) {
 	metal_audio_seek(seconds, resume)
 }
 
+scrub_player_by :: proc(delta: f64) {
+	if state.player == nil {return}
+	seconds, ok := current_seconds()
+	if !ok {return}
+	seek_seconds(min(max(seconds + delta, 0), ui.player_duration))
+	ui.needs_redraw = true
+}
+
 start_loaded_playback_at :: proc(seconds: f64) {
 	if state.player == nil {return}
 	seek_seconds(seconds)

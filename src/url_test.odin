@@ -1228,6 +1228,34 @@ command_v_routes_to_paste_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+timeline_arrow_shortcuts_map_direction_and_modifier_step_test :: proc(t: ^testing.T) {
+	delta, ok := timeline_scrub_delta(123, 0)
+	testing.expect(t, ok)
+	testing.expect_value(t, delta, -1.0)
+	delta, ok = timeline_scrub_delta(124, 0)
+	testing.expect(t, ok)
+	testing.expect_value(t, delta, 1.0)
+	delta, ok = timeline_scrub_delta(124, NSEventModifierFlagShift)
+	testing.expect(t, ok)
+	testing.expect_value(t, delta, 0.1)
+	delta, ok = timeline_scrub_delta(123, NSEventModifierFlagCommand)
+	testing.expect(t, ok)
+	testing.expect_value(t, delta, -10.0)
+	delta, ok = timeline_scrub_delta(
+		124,
+		NSEventModifierFlagCommand | NSEventModifierFlagShift,
+	)
+	testing.expect(t, ok)
+	testing.expect_value(t, delta, 10.0)
+	_, ok = timeline_scrub_delta(124, NSEventModifierFlagOption)
+	testing.expect(t, !ok)
+	_, ok = timeline_scrub_delta(124, NSEventModifierFlagControl)
+	testing.expect(t, !ok)
+	_, ok = timeline_scrub_delta(125, 0)
+	testing.expect(t, !ok)
+}
+
+@(test)
 control_backspace_routes_to_word_deletion_test :: proc(t: ^testing.T) {
 	NSEventModifierFlagControl :: uint(1 << 18)
 	testing.expect(t, is_delete_word_shortcut(51, NSEventModifierFlagControl))
