@@ -143,6 +143,7 @@ UI_State :: struct {
 	command_palette_query: string,
 	command_palette_scroll: f64,
 	status:             string,
+	status_source_video_id: string,
 	status_success:     bool,
 	status_error:       bool,
 	source_scroll:      f64,
@@ -241,6 +242,7 @@ UI_Action_Kind :: enum {
 	Import,
 	Source_Quality,
 	Stop_Download,
+	View_Status_Source,
 	Source_Search,
 	Transcript_Search,
 	Source,
@@ -1114,6 +1116,22 @@ activity_spinner :: proc(tick: uint) -> string {
 
 import_cancel_rect :: proc() -> UI_Rect {
 	return UI_Rect{max(18, ui.width - 304), 3, 88, 24}
+}
+
+status_source_rect :: proc() -> UI_Rect {
+	return UI_Rect{332, 3, 112, 24}
+}
+
+footer_status_rect :: proc() -> UI_Rect {
+	footer := UI_Rect{18, 0, ui.width - 36, 30}
+	x := footer.x + 314
+	if len(ui.status_source_video_id) > 0 {
+		action := status_source_rect()
+		x = action.x + action.w + 6
+	}
+	rect := UI_Rect{x, footer.y, min(500, max(0, footer.x + footer.w - x)), footer.h}
+	if import_job != nil {rect.w = max(0, import_cancel_rect().x - rect.x - 6)}
+	return rect
 }
 
 control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
@@ -2113,11 +2131,18 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	if contains(close_button, ui.mouse) {close_color = [4]f64{0.09, 0.095, 0.09, 1}}
 	fill_overlay_rect(ctx, close_button, close_color)
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
-	refetch_color := [4]f64{0.91, 0.31, 0.075, 1}
-	if contains(refetch_button, ui.mouse) {refetch_color = [4]f64{1.0, 0.42, 0.10, 1}}
+	refetch_control := find_ui_control_by_action(.Refetch_Source_Details)
+	refetch_enabled := refetch_control != nil && .Enabled in refetch_control.flags
+	refetch_color := [4]f64{0.052, 0.055, 0.052, 1}
+	refetch_text_color := muted
+	if refetch_enabled {
+		refetch_color = [4]f64{0.91, 0.31, 0.075, 1}
+		refetch_text_color = [4]f64{0.08, 0.025, 0.01, 1}
+		if contains(refetch_button, ui.mouse) {refetch_color = [4]f64{1.0, 0.42, 0.10, 1}}
+	}
 	fill_overlay_rect(ctx, refetch_button, refetch_color)
-	fill_overlay_border(ctx, refetch_button, [4]f64{1.0, 0.45, 0.12, 1})
-	draw_text_in_rect(ctx, font, "REFETCH / SELECT QUALITY", refetch_button, .Center, .Center, [4]f64{0.08, 0.025, 0.01, 1})
+	if refetch_enabled {fill_overlay_border(ctx, refetch_button, [4]f64{1.0, 0.45, 0.12, 1})}
+	draw_text_in_rect(ctx, font, "REFETCH / SELECT QUALITY", refetch_button, .Center, .Center, refetch_text_color)
 }
 
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
@@ -2189,10 +2214,15 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	}
 	if ui.mode == .Create {
 		add_rect := ui_control_rect(.Open_Source_Modal)
-		add_color := [4]f32{0.15, 0.061, 0.032, 1}
-		if contains(add_rect, ui.mouse) {add_color = [4]f32{0.23, 0.083, 0.035, 1}}
+		add_control := find_ui_control_by_action(.Open_Source_Modal)
+		add_enabled := add_control != nil && .Enabled in add_control.flags
+		add_color := panel_alt
+		if add_enabled {
+			add_color = [4]f32{0.15, 0.061, 0.032, 1}
+			if contains(add_rect, ui.mouse) {add_color = [4]f32{0.23, 0.083, 0.035, 1}}
+		}
 		push_rect(vertices, add_rect, add_color)
-		push_border(vertices, add_rect, orange)
+		if add_enabled {push_border(vertices, add_rect, orange)}
 	}
 
 	if ui.mode == .Create {
@@ -2285,11 +2315,14 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		rect := ui_control_rect(kind)
 		if rect.w <= 0 {continue}
 		color := panel_alt
+		control := find_ui_control_by_action(kind)
+		enabled := control != nil && .Enabled in control.flags
 		if index == 0 && state.has_start {color = [4]f32{0.035, 0.16, 0.17, 1}}
 		if index == 1 && state.has_end {color = [4]f32{0.035, 0.16, 0.17, 1}}
 		if index == 2 {color = [4]f32{0.15, 0.061, 0.032, 1}}
-		if contains(rect, ui.mouse) {color = [4]f32{0.105, 0.112, 0.104, 1}}
-		if index == 2 && contains(rect, ui.mouse) {color = [4]f32{0.23, 0.083, 0.035, 1}}
+		if !enabled {color = field}
+		if enabled && contains(rect, ui.mouse) {color = [4]f32{0.105, 0.112, 0.104, 1}}
+		if enabled && index == 2 && contains(rect, ui.mouse) {color = [4]f32{0.23, 0.083, 0.035, 1}}
 		push_rect(vertices, rect, color)
 	}
 	focus_rect := UI_Rect{}
@@ -2393,7 +2426,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			10,
 		)
 		add_rect := ui_control_rect(.Open_Source_Modal)
-		draw_text_in_rect(ctx, small_font, "ADD", add_rect, .Center, .Center, bright)
+		add_control := find_ui_control_by_action(.Open_Source_Modal)
+		add_enabled := add_control != nil && .Enabled in add_control.flags
+		draw_text_in_rect(ctx, small_font, "ADD", add_rect, .Center, .Center, add_enabled ? bright : dim)
 		draw_text_in_rect(
 			ctx,
 			small_font,
@@ -2910,6 +2945,8 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		)
 		button_color := ink
 		if i == 2 {button_color = orange}
+		control := find_ui_control_by_action(control_kinds[i])
+		if control == nil || .Enabled not_in control.flags {button_color = dim}
 		draw_text_in_rect(
 			ctx,
 			small_font,
@@ -2939,8 +2976,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		.Center,
 		state.has_start && state.has_end ? cyan : muted,
 	)
-	status_rect := UI_Rect{footer.x + 314, footer.y, min(500, max(0, footer.w - 500)), footer.h}
-	if import_job != nil {status_rect.w = max(0, import_cancel_rect().x - status_rect.x - 6)}
+	status_rect := footer_status_rect()
 	status_text := fmt.tprintf("SYS / %s", ui.status)
 	status_color := ui.status_error ? danger : (ui.status_success ? success : muted)
 	if import_job != nil || export_job != nil {
@@ -2964,6 +3000,13 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		fill_overlay_rect(ctx, cancel, [4]f64{0.15, 0.035, 0.025, 1})
 		fill_overlay_border(ctx, cancel, orange)
 		draw_text_in_rect(ctx, small_font, "STOP", cancel, .Center, .Center, bright)
+	}
+	if len(ui.status_source_video_id) > 0 {
+		view_source := ui_control_rect(.View_Status_Source)
+		button_color := [4]f64{0.035, 0.12, 0.12, 1}
+		if contains(view_source, ui.mouse) {button_color = [4]f64{0.045, 0.18, 0.18, 1}}
+		fill_overlay_rect(ctx, view_source, button_color)
+		draw_text_in_rect(ctx, small_font, "VIEW SOURCE", view_source, .Center, .Center, cyan)
 	}
 	draw_source_details(ctx, small_font, bright, muted, cyan)
 
@@ -3275,6 +3318,24 @@ ui_controls_valid :: proc(controls: []UI_Control) -> bool {
 	return true
 }
 
+ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
+	if kind == .Command_Palette_Disabled {return false}
+	if import_job == nil {return true}
+	#partial switch kind {
+	case .Open_Source_Modal,
+	     .Refetch_Source_Details,
+	     .Import,
+	     .Source_Quality,
+	     .Source_Hint_Menu,
+	     .Source_Hint,
+	     .Save,
+	     .Captions,
+	     .Preview:
+		return false
+	}
+	return true
+}
+
 validate_ui_controls :: proc() {
 	when ODIN_DEBUG {
 		assert(ui_controls_valid(ui_build.controls[:]), "UI controls must have unique names, unique identifiers, and visible rectangles")
@@ -3298,7 +3359,8 @@ add_ax_element :: proc(
 	stable_name := functional_name
 	if len(stable_name) == 0 {stable_name = keyboard_label}
 	flags: UI_Control_Flags = {.Accessibility}
-	if kind != .Command_Palette_Disabled {
+	enabled := ui_action_enabled_for_current_job(kind)
+	if enabled {
 		flags += {.Enabled, .Flash, .Primary_Press}
 	}
 	if kind == .Open_Source_Details {
@@ -3326,6 +3388,7 @@ add_ax_element :: proc(
 	msg_void_id(element, sel_registerName("setAccessibilityParent:"), ui.view)
 	msg_void_id(element, sel_registerName("setAccessibilityRole:"), nsstring(role))
 	msg_void_id(element, sel_registerName("setAccessibilityLabel:"), nsstring(label))
+	msg_void_bool(element, sel_registerName("setAccessibilityEnabled:"), enabled)
 	msg_void_rect(element, sel_registerName("setAccessibilityFrame:"), ax_screen_rect(rect))
 	msg_void_id(array, sel_registerName("addObject:"), element)
 	append(
@@ -3341,11 +3404,13 @@ add_pointer_control :: proc(
 	kind: UI_Action_Kind,
 	flags: UI_Control_Flags,
 ) {
+	control_flags := flags
+	if ui_action_enabled_for_current_job(kind) {control_flags += {.Enabled}}
 	append(&ui_build.controls, UI_Control{
 		id = ui_control_id(functional_name),
 		functional_name = functional_name,
 		rect = rect,
-		flags = flags + {.Enabled},
+		flags = control_flags,
 		action = UI_Action{kind = kind},
 	})
 }
@@ -3366,6 +3431,26 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 	element_class := objc_getClass("VocalAccessibilityElement")
 	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
 		layout_rects()
+	if import_job != nil {
+		add_ax_element(array, element_class, "Stop download", "AXButton", import_cancel_rect(), .Stop_Download, flash_label = "stop download")
+	}
+	if len(ui.status_source_video_id) > 0 {
+		for source, index in state.sources {
+			if source.video_id != ui.status_source_video_id {continue}
+			add_ax_element(
+				array,
+				element_class,
+				fmt.tprintf("View refetched source, %s", source.title),
+				"AXButton",
+				status_source_rect(),
+				.View_Status_Source,
+				index,
+				flash_label = "view source",
+				functional_name = fmt.tprintf("view refetched source %s", source.id),
+			)
+			break
+		}
+	}
 	if command_palette.is_open(&command_palette_state) {
 		modal := command_palette_rect()
 		add_ax_element(
@@ -3397,11 +3482,6 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				functional_name = fmt.tprintf("palette result %d", result.entry.id),
 			)
 		}
-		validate_ui_controls()
-		return
-	}
-	if import_job != nil {
-		add_ax_element(array, element_class, "Stop download", "AXButton", import_cancel_rect(), .Stop_Download, flash_label = "stop download")
 		validate_ui_controls()
 		return
 	}
@@ -3749,6 +3829,10 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 			import_job_cancel(import_job)
 			set_text(state.status, "Stopping download...")
 		}
+	case .View_Status_Source:
+		set_ui_mode(.Create)
+		ui_event_tag = action.index
+		on_select_source(nil, nil, nil)
 	case .Source_Search:
 		focus_text_input(.Source_Search)
 	case .Transcript_Search:
@@ -4376,6 +4460,7 @@ ui_memory_destroy :: proc() {
 	delete(ui.exercise_name)
 	delete(ui.command_palette_query)
 	delete(ui.status)
+	delete(ui.status_source_video_id)
 	delete(ui.marked_text)
 	delete(ui.transcript_matches)
 	delete(ax_actions)

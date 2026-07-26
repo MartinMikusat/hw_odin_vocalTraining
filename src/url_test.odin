@@ -5,6 +5,7 @@ import "core:encoding/json"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "base:runtime"
 import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
 import flash "flash:."
@@ -109,7 +110,16 @@ source_context_file_size_uses_readable_units_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+completed_refetch_preserves_the_current_source_test :: proc(t: ^testing.T) {
+	testing.expect(t, should_load_completed_source(false, 2, 5))
+	testing.expect(t, should_load_completed_source(true, 5, 5))
+	testing.expect(t, !should_load_completed_source(true, 2, 5))
+	testing.expect(t, !should_load_completed_source(false, 2, -1))
+}
+
+@(test)
 canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^testing.T) {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	path, found := os.lookup_env("VT_TEST_LIBRARY")
 	defer delete(path)
 	testing.expect(t, found)
@@ -176,6 +186,12 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	previous_state := state
 	previous_ui := ui
 	previous_ui_build := ui_build
+	frame_arena: mem_virtual.Arena
+	frame_arena_error := mem_virtual.arena_init_static(&frame_arena, 1024*1024, 4096)
+	testing.expect(t, frame_arena_error == nil)
+	if frame_arena_error != nil {return}
+	defer mem_virtual.arena_destroy(&frame_arena)
+	frame_allocator := mem_virtual.arena_allocator(&frame_arena)
 	state = loaded
 	loaded = {}
 	defer {
@@ -187,7 +203,6 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 		delete(state.exercises)
 		transcript_generation_destroy(&state.transcripts)
 		delete(ui.transcript_matches)
-		delete(ui_build.controls)
 		state = previous_state
 		ui = previous_ui
 		ui_build = previous_ui_build
@@ -203,15 +218,62 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 		transcript_matches_dirty = true,
 	}
 	ui.mode = .Create
-	build_ui_controls(false)
+	build_ui_controls(false, frame_allocator)
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
 	create_control_count := len(ui_build.controls)
 	testing.expect(t, create_control_count > 20)
-	delete(ui_build.controls)
 	ui_build.controls = nil
+	mem_virtual.arena_free_all(&frame_arena)
+
+	busy_job: Import_Job
+	previous_import_job := import_job
+	import_job = &busy_job
+	defer import_job = previous_import_job
+	build_ui_controls(false, frame_allocator)
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	testing.expect(t, len(ui_build.controls) > create_control_count)
+	stop := find_ui_control_by_action(.Stop_Download)
+	mode := find_ui_control_by_action(.Mode_Toggle)
+	source := find_ui_control_by_action(.Source)
+	search := find_ui_control_by_action(.Source_Search)
+	add := find_ui_control_by_action(.Open_Source_Modal)
+	save := find_ui_control_by_action(.Save)
+	captions := find_ui_control_by_action(.Captions)
+	preview := find_ui_control_by_action(.Preview)
+	testing.expect(t, stop != nil && .Enabled in stop.flags)
+	testing.expect(t, mode != nil && .Enabled in mode.flags)
+	testing.expect(t, source != nil && .Enabled in source.flags)
+	testing.expect(t, search != nil && .Enabled in search.flags)
+	testing.expect(t, add != nil && .Enabled not_in add.flags)
+	testing.expect(t, save != nil && .Enabled not_in save.flags)
+	testing.expect(t, captions != nil && .Enabled not_in captions.flags)
+	testing.expect(t, preview != nil && .Enabled not_in preview.flags)
+	testing.expect(t, ui_action_enabled_for_current_job(.Source_Play_Pause))
+	testing.expect(t, ui_action_enabled_for_current_job(.Source_Timeline))
+	testing.expect(t, ui_action_enabled_for_current_job(.Volume_Down))
+	testing.expect(t, ui_action_enabled_for_current_job(.Speed_Up))
+	testing.expect(t, !ui_action_enabled_for_current_job(.Source_Hint))
+	ui_build.controls = nil
+	mem_virtual.arena_free_all(&frame_arena)
+	import_job = previous_import_job
+
+	ui_set_string(&ui.status_source_video_id, state.sources[1].video_id)
+	action_rect := status_source_rect()
+	status_rect := footer_status_rect()
+	testing.expect_value(t, status_rect.x, action_rect.x + action_rect.w + 6)
+	build_ui_controls(false, frame_allocator)
+	view_source := find_ui_control_by_action(.View_Status_Source)
+	testing.expect(t, view_source != nil)
+	if view_source != nil {
+		testing.expect_value(t, view_source.action.index, 1)
+		testing.expect(t, strings.contains(view_source.functional_name, state.sources[1].id))
+	}
+	ui_build.controls = nil
+	mem_virtual.arena_free_all(&frame_arena)
+	ui_set_string(&ui.status_source_video_id, "")
 
 	ui.mode = .Play
-	build_ui_controls(false)
+	build_ui_controls(false, frame_allocator)
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
 	testing.expect(t, len(ui_build.controls) > 4)
 }

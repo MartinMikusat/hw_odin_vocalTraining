@@ -256,6 +256,7 @@ set_text :: proc(control: Id, text: string) {
 	if control == state.status {
 		ui.status_success = false
 		ui.status_error = false
+		ui_set_string(&ui.status_source_video_id, "")
 		ui_set_string(&ui.status, text)
 		ui.needs_redraw = true
 		return
@@ -276,6 +277,15 @@ set_success_status :: proc(text: string) {
 set_error_status :: proc(text: string) {
 	set_text(state.status, text)
 	ui.status_error = true
+}
+
+set_status_source :: proc(video_id: string) {
+	ui_set_string(&ui.status_source_video_id, video_id)
+	ui.needs_redraw = true
+}
+
+should_load_completed_source :: proc(source_update: bool, active_source, completed_source: int) -> bool {
+	return completed_source >= 0 && (!source_update || active_source == completed_source)
 }
 
 import_success_status :: proc(new_sources, existing_sources, updated_hints: int, latest_hint := -1.0) -> string {
@@ -1074,7 +1084,13 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	}
 	if job.accepted > 0 {
 		if import_job_apply(job) {
-			if last_imported_source >= 0 {load_source_player(last_imported_source)}
+			if should_load_completed_source(
+				job.has_source_update,
+				state.active_source,
+				last_imported_source,
+			) {
+				load_source_player(last_imported_source)
+			}
 			refresh_sources()
 		} else {
 			set_text(state.status, "The import completed, but the library update failed")
@@ -1082,12 +1098,15 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		}
 	}
 	if job.failed > 0 {
+		if len(job.replace_video_id) > 0 &&
+		   should_load_completed_source(true, state.active_source, last_imported_source) {
+			load_source_player(last_imported_source)
+		}
 		if job.invalid_merged_media > 0 {
 			set_text(state.status, "Download failed validation: the staged MP4 did not contain compatible H.264 video and AAC audio. The previous source file was preserved.")
 		} else if job.missing_merged_media > 0 {
 			set_text(state.status, fmt.tprintf("Import failed: yt-dlp did not create the merged MP4. Check media helpers. Log: %s", diagnostic_log_path("yt-dlp")))
 		} else if len(job.replace_video_id) > 0 && last_imported_source >= 0 {
-			load_source_player(last_imported_source)
 			set_text(state.status, fmt.tprintf("Refetch failed. Log: %s", diagnostic_log_path("yt-dlp")))
 		} else {
 			set_text(state.status, fmt.tprintf("Imported %d; %d failed. Log: %s", job.accepted, job.failed, diagnostic_log_path("yt-dlp")))
@@ -1102,6 +1121,11 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		set_success_status(import_success_status(len(job.new_sources), job.existing_sources, job.updated_hints, job.latest_updated_hint))
 	} else if job.existing_sources > 0 {
 		set_success_status(import_success_status(0, job.existing_sources, job.updated_hints, job.latest_updated_hint))
+	}
+	if job.has_source_update {
+		set_status_source(job.updated_source.video_id)
+	} else if job.failed > 0 && len(job.replace_video_id) > 0 {
+		set_status_source(job.replace_video_id)
 	}
 }
 
