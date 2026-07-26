@@ -156,6 +156,9 @@ Import_Job :: struct {
 	has_process: bool,
 	cancelled: bool,
 	phase: Import_Phase,
+	notification_id: i64,
+	last_notification_phase: Import_Phase,
+	has_notification_phase: bool,
 	library_recovery_source: bool,
 	recovery_index: int,
 	recovery_total: int,
@@ -181,6 +184,7 @@ Export_Job :: struct {
 	exercise: Exercise,
 	source_path: string,
 	operation: Export_Operation,
+	notification_id: i64,
 	success: bool,
 }
 
@@ -195,6 +199,7 @@ Library_Recovery :: struct {
 	recovered: int,
 	failed:    int,
 	cancelled: bool,
+	notification_id: i64,
 }
 
 library_recovery: ^Library_Recovery
@@ -300,11 +305,7 @@ nsstring :: proc(s: string) -> Id {
 
 set_text :: proc(control: Id, text: string) {
 	if control == state.status {
-		ui.status_success = false
-		ui.status_error = false
-		ui_set_string(&ui.status_source_video_id, "")
-		ui_set_string(&ui.status, text)
-		ui.needs_redraw = true
+		_ = notification_post_info(text)
 		return
 	}
 	if control == state.exercise_name_input {
@@ -316,18 +317,19 @@ set_text :: proc(control: Id, text: string) {
 }
 
 set_success_status :: proc(text: string) {
-	set_text(state.status, text)
-	ui.status_success = true
+	_ = notification_post_success(text)
 }
 
 set_error_status :: proc(text: string) {
-	set_text(state.status, text)
-	ui.status_error = true
+	_ = notification_post_error(text)
 }
 
 set_status_source :: proc(video_id: string) {
-	ui_set_string(&ui.status_source_video_id, video_id)
-	ui.needs_redraw = true
+	_ = notification_set_action(
+		notification_history.current_id,
+		.View_Source,
+		video_id,
+	)
 }
 
 should_load_completed_source :: proc(source_update: bool, active_source, completed_source: int) -> bool {
@@ -501,7 +503,36 @@ import_progress_status :: proc(job: ^Import_Job, contents: string) -> string {
 refresh_import_progress :: proc() {
 	if import_job == nil {return}
 	contents, _ := os.read_entire_file(import_progress_path(), context.temp_allocator)
-	set_text(state.status, import_progress_status(import_job, string(contents)))
+	status := import_progress_status(import_job, string(contents))
+	if import_job.notification_id != 0 {
+		phase := import_job_phase(import_job)
+		source_progress := ""
+		if import_job.library_recovery_source {
+			source_progress = fmt.tprintf(
+				"%d of %d",
+				import_job.recovery_index,
+				import_job.recovery_total,
+			)
+		}
+		fields := [3]Notification_Field{
+			{label="Operation", value=import_job.library_recovery_source ? "Library recovery" : "Media import"},
+			{label="Source", value=source_progress},
+			{label="Phase", value=fmt.tprintf("%v", phase)},
+		}
+		phase_changed := !import_job.has_notification_phase ||
+		                 import_job.last_notification_phase != phase
+		import_job.last_notification_phase = phase
+		import_job.has_notification_phase = true
+		_ = notification_update(
+			import_job.notification_id,
+			status,
+			"The application validates local media, downloads missing media, and rebuilds saved exercise clips.",
+			fields[:],
+			persist_now = phase_changed,
+		)
+	} else {
+		set_text(state.status, status)
+	}
 }
 
 embedded_helper_path :: proc(executable_path, name: string) -> string {
@@ -1332,7 +1363,12 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		import_job_destroy(job)
 	}
 	if job.cancelled {
-		set_text(state.status, "Download stopped")
+		_ = notification_finish(
+			job.notification_id,
+			.Interrupted,
+			"Download stopped",
+			"The user stopped the active media operation.",
+		)
 		return
 	}
 	if job.accepted > 0 {
@@ -1346,7 +1382,12 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			}
 			refresh_sources()
 		} else {
-			set_text(state.status, "The import completed, but the library update failed")
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				"The import completed, but the library update failed",
+				"The downloaded files were preserved, but SQLite did not accept the updated library records.",
+			)
 			return
 		}
 	}
@@ -1356,24 +1397,74 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			load_source_player(last_imported_source)
 		}
 		if job.invalid_merged_media > 0 {
-			set_text(state.status, "Download failed validation: the staged MP4 did not contain compatible H.264 video and AAC audio. The previous source file was preserved.")
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				"Download failed media validation",
+				"The staged MP4 did not contain decodable H.264 video and AAC audio. The previous source file was preserved.",
+			)
 		} else if job.missing_merged_media > 0 {
-			set_text(state.status, fmt.tprintf("Import failed: yt-dlp did not create the merged MP4. Check media helpers. Log: %s", diagnostic_log_path("yt-dlp")))
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				"Import failed: yt-dlp did not create the merged MP4",
+				fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("yt-dlp")),
+			)
 		} else if len(job.replace_video_id) > 0 && last_imported_source >= 0 {
-			set_text(state.status, fmt.tprintf("Refetch failed. Log: %s", diagnostic_log_path("yt-dlp")))
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				"Refetch failed",
+				fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("yt-dlp")),
+			)
 		} else {
-			set_text(state.status, fmt.tprintf("Imported %d; %d failed. Log: %s", job.accepted, job.failed, diagnostic_log_path("yt-dlp")))
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				fmt.tprintf("Imported %d source(s); %d failed", job.accepted, job.failed),
+				fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("yt-dlp")),
+			)
 		}
 	} else if job.has_source_update {
 		if job.failed_exercise_refreshes > 0 {
-			set_text(state.status, fmt.tprintf("Refetched source; %d exercise rebuild(s) failed. Log: %s", job.failed_exercise_refreshes, diagnostic_log_path("ffmpeg")))
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				fmt.tprintf(
+					"Refetched source; %d exercise rebuild(s) failed",
+					job.failed_exercise_refreshes,
+				),
+				fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("ffmpeg")),
+			)
 		} else {
-			set_success_status(fmt.tprintf("Refetched source and rebuilt %d exercise(s)", job.refreshed_exercises))
+			_ = notification_finish(
+				job.notification_id,
+				.Success,
+				fmt.tprintf("Refetched source and rebuilt %d exercise(s)", job.refreshed_exercises),
+			)
 		}
 	} else if len(job.new_sources) > 0 {
-		set_success_status(import_success_status(len(job.new_sources), job.existing_sources, job.updated_hints, job.latest_updated_hint))
+		_ = notification_finish(
+			job.notification_id,
+			.Success,
+			import_success_status(
+				len(job.new_sources),
+				job.existing_sources,
+				job.updated_hints,
+				job.latest_updated_hint,
+			),
+		)
 	} else if job.existing_sources > 0 {
-		set_success_status(import_success_status(0, job.existing_sources, job.updated_hints, job.latest_updated_hint))
+		_ = notification_finish(
+			job.notification_id,
+			.Success,
+			import_success_status(
+				0,
+				job.existing_sources,
+				job.updated_hints,
+				job.latest_updated_hint,
+			),
+		)
 	}
 	if job.has_source_update {
 		set_status_source(job.updated_source.video_id)
@@ -1474,10 +1565,12 @@ library_recovery_finish :: proc() {
 	recovered := library_recovery.recovered
 	failed := library_recovery.failed
 	cancelled := library_recovery.cancelled
+	notification_id := library_recovery.notification_id
 	library_recovery_destroy()
 	if cancelled {
-		set_text(
-			state.status,
+		_ = notification_finish(
+			notification_id,
+			.Interrupted,
 			fmt.tprintf(
 				"Library imported; recovery stopped after %d source(s), with %d failure(s)",
 				recovered,
@@ -1487,7 +1580,9 @@ library_recovery_finish :: proc() {
 		return
 	}
 	if failed > 0 {
-		set_error_status(
+		_ = notification_finish(
+			notification_id,
+			.Error,
 			fmt.tprintf(
 				"Library imported; recovered %d source(s), %d require manual refetch",
 				recovered,
@@ -1495,7 +1590,9 @@ library_recovery_finish :: proc() {
 			),
 		)
 	} else {
-		set_success_status(
+		_ = notification_finish(
+			notification_id,
+			.Success,
 			fmt.tprintf("Library imported and recovered %d source(s)", recovered),
 		)
 	}
@@ -1531,6 +1628,7 @@ library_recovery_start_next :: proc() {
 			continue
 		}
 		job.library_recovery_source = true
+		job.notification_id = library_recovery.notification_id
 		job.recovery_index = entry_index + 1
 		job.recovery_total = len(library_recovery.entries)
 		job.reuse_existing_media = reuse_existing
@@ -1557,14 +1655,22 @@ library_recovery_start_next :: proc() {
 		os.make_directory(app_support_dir())
 		_ = os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
 		_ = os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
-		set_text(
-			state.status,
+		fields := [3]Notification_Field{
+			{label="Operation", value="Library recovery"},
+			{label="Source", value=fmt.tprintf("%d of %d", entry_index + 1, len(library_recovery.entries))},
+			{label="Requested resolution", value=fmt.tprintf("%dp", entry.height)},
+		}
+		_ = notification_update(
+			library_recovery.notification_id,
 			fmt.tprintf(
 				"Recovering source %d of %d at %dp...",
 				entry_index + 1,
 				len(library_recovery.entries),
 				entry.height,
 			),
+			"The application reuses valid local media and downloads only sources that are missing or invalid.",
+			fields[:],
+			persist_now = true,
 		)
 		thread.start(worker)
 		return
@@ -1580,6 +1686,10 @@ library_recovery_start :: proc() -> bool {
 	}
 	if !require_helper("yt-dlp") || !require_helper("ffmpeg") {return false}
 	recovery := new(Library_Recovery)
+	recovery.notification_id = notification_begin(
+		"Library imported; preparing source recovery",
+		"The imported library records are installed. Media validation and exercise recovery will now run sequentially.",
+	)
 	recovery.entries = make(
 		[dynamic]Library_Recovery_Entry,
 		0,
@@ -1620,17 +1730,28 @@ refetch_source :: proc(source_index: int, maximum_height := 0) {
 	if worker == nil { import_job_destroy(job); set_text(state.status, "Unable to start import worker"); return }
 	job.thread = worker
 	worker.data = job
+	fields := [2]Notification_Field{
+		{label="Operation", value="Source refetch"},
+		{label="Source", value=source.title},
+	}
+	summary := "Refetching source at the best available quality..."
+	if maximum_height > 0 {
+		summary = fmt.tprintf(
+			"Refetching source at up to %dp...",
+			maximum_height,
+		)
+	}
+	job.notification_id = notification_begin(
+		summary,
+		"The source will be downloaded into staging files, validated, and then committed.",
+		fields[:],
+	)
 	import_job = job
 	last_imported_source = source_index
 	if state.active_source == source_index {metal_player_clear()}
 	os.make_directory(app_support_dir())
 	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
 	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
-	if maximum_height > 0 {
-		set_text(state.status, fmt.tprintf("Refetching the selected source at up to %dp...", maximum_height))
-	} else {
-		set_text(state.status, "Refetching the selected source at the best available quality...")
-	}
 	thread.start(worker)
 }
 
@@ -1668,10 +1789,13 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if worker == nil { import_job_destroy(job); set_text(state.status, "Unable to start import worker"); return }
 	job.thread = worker
 	worker.data = job
+	job.notification_id = notification_begin(
+		"Downloading video and YouTube captions...",
+		"The application downloads each selected source sequentially and validates the merged media before updating the library.",
+	)
 	import_job = job
 	os.make_directory(app_support_dir())
 	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
-	set_text(state.status, "Downloading video and YouTube captions...")
 	thread.start(worker)
 	close_source_modal()
 }
@@ -1716,9 +1840,18 @@ on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 		.Save,
 	)
 	if job == nil { set_text(state.status, "Unable to allocate export job"); return }
+	fields := [3]Notification_Field{
+		{label="Operation", value="Save exercise"},
+		{label="Source", value=source.title},
+		{label="Range", value=fmt.tprintf("%s – %s", format_timestamp(state.range_start), format_timestamp(state.range_end))},
+	}
+	job.notification_id = notification_begin(
+		"Exporting exercise clip...",
+		"FFmpeg is encoding the selected source range as a standalone exercise clip.",
+		fields[:],
+	)
 	export_job = job
 	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
-	set_text(state.status, "Exporting exercise clip...")
 	thread.start(job.thread)
 }
 
@@ -1771,9 +1904,18 @@ on_preview :: proc "c" (self: Id, command: Sel, sender: Id) {
 		.Preview,
 	)
 	if job == nil { set_text(state.status, "Unable to allocate preview job"); return }
+	fields := [3]Notification_Field{
+		{label="Operation", value="Preview range"},
+		{label="Source", value=source.title},
+		{label="Duration", value=format_timestamp(state.range_end - state.range_start)},
+	}
+	job.notification_id = notification_begin(
+		"Preparing range preview...",
+		"FFmpeg is encoding a temporary preview for the selected range.",
+		fields[:],
+	)
 	export_job = job
 	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
-	set_text(state.status, "Preparing range preview...")
 	thread.start(job.thread)
 }
 
@@ -1825,53 +1967,107 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		export_job = nil
 		export_job_destroy(job)
 	}
-	if !job.success { set_text(state.status, fmt.tprintf("ffmpeg failed; details: %s", diagnostic_log_path("ffmpeg"))); return }
+	if !job.success {
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"FFmpeg failed",
+			fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("ffmpeg")),
+		)
+		return
+	}
 	if job.operation == .Preview {
 		if !metal_player_load(job.exercise.clip_path) {
-			set_text(state.status, "Unable to load the exported preview")
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				"Unable to load the exported preview",
+			)
 			return
 		}
 		ui.player_duration = job.exercise.end_seconds - job.exercise.start_seconds
 		set_source_playback_active(false)
 		start_loaded_playback_at(0)
-		set_text(state.status, fmt.tprintf("Previewing %s", format_timestamp(job.exercise.end_seconds-job.exercise.start_seconds)))
+		_ = notification_finish(
+			job.notification_id,
+			.Success,
+			fmt.tprintf(
+				"Previewing %s",
+				format_timestamp(job.exercise.end_seconds-job.exercise.start_seconds),
+			),
+		)
 		return
 	}
 	if job.operation == .Repair {
 		index := exercise_index_for_id(state.exercises[:], job.exercise.id)
 		if index < 0 {
-			set_text(state.status, "The rebuilt exercise is no longer in the library")
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				"The rebuilt exercise is no longer in the library",
+			)
 			return
 		}
 		repaired, copied := clone_exercise(job.exercise)
 		if !copied {
-			set_text(state.status, "Unable to store the rebuilt exercise")
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				"Unable to store the rebuilt exercise",
+			)
 			return
 		}
 		delete_exercise(&state.exercises[index])
 		state.exercises[index] = repaired
 		if !save_library() {
-			set_text(state.status, "The clip was rebuilt, but the library update failed")
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				"The clip was rebuilt, but the library update failed",
+			)
 			return
 		}
 		refresh_exercises()
 		if !metal_player_load(repaired.clip_path) {
-			set_text(state.status, "The clip was rebuilt, but it could not be loaded")
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				"The clip was rebuilt, but it could not be loaded",
+			)
 			return
 		}
 		ui.player_duration = repaired.end_seconds - repaired.start_seconds
 		set_source_playback_active(false)
 		start_loaded_playback_at(0)
 		ui.active_exercise = index
-		set_success_status(fmt.tprintf("Rebuilt and playing %s", repaired.name))
+		_ = notification_finish(
+			job.notification_id,
+			.Success,
+			fmt.tprintf("Rebuilt and playing %s", repaired.name),
+		)
 		return
 	}
 	exercise, copied := clone_exercise(job.exercise)
-	if !copied { set_text(state.status, "Unable to store exported exercise"); return }
+	if !copied {
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"Unable to store exported exercise",
+		)
+		return
+	}
 	append(&state.exercises, exercise)
 	save_library()
 	refresh_exercises()
-	set_text(state.status, fmt.tprintf("Saved %s (%s)", job.exercise.name, format_timestamp(job.exercise.end_seconds-job.exercise.start_seconds)))
+	_ = notification_finish(
+		job.notification_id,
+		.Success,
+		fmt.tprintf(
+			"Saved %s (%s)",
+			job.exercise.name,
+			format_timestamp(job.exercise.end_seconds-job.exercise.start_seconds),
+		),
+	)
 }
 
 on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
@@ -1925,9 +2121,17 @@ on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
 			set_text(state.status, "Unable to allocate the exercise rebuild job")
 			return
 		}
+		fields := [2]Notification_Field{
+			{label="Operation", value="Rebuild exercise"},
+			{label="Exercise", value=exercise.name},
+		}
+		job.notification_id = notification_begin(
+			fmt.tprintf("Rebuilding missing clip for %s...", exercise.name),
+			"FFmpeg is recreating the saved exercise from its original source range.",
+			fields[:],
+		)
 		export_job = job
 		os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
-		set_text(state.status, fmt.tprintf("Rebuilding missing clip for %s...", exercise.name))
 		thread.start(job.thread)
 		return
 	}
@@ -2043,8 +2247,6 @@ confirm_library_import :: proc() {
 		set_error_status("Wait for the active media or metadata operation")
 		return
 	}
-	source_count := len(pending_library_import.sources)
-	exercise_count := len(pending_library_import.exercises)
 	metal_player_clear()
 	if install_error := portable_library_install(&pending_library_import);
 	   install_error != .None {
@@ -2064,13 +2266,6 @@ confirm_library_import :: proc() {
 	ui.source_playback_active = false
 	refresh_sources()
 	refresh_exercises()
-	set_success_status(
-		fmt.tprintf(
-			"Imported %d source(s) and %d exercise(s)",
-			source_count,
-			exercise_count,
-		),
-	)
 	_ = library_recovery_start()
 }
 
@@ -2167,6 +2362,8 @@ main :: proc() {
 		return
 	}
 	load_library()
+	notification_history_initialize()
+	defer notification_history_destroy()
 	pool := msg_id(objc_getClass("NSAutoreleasePool"), sel_registerName("new"))
 	build_metal_window()
 	metal_player_clear()

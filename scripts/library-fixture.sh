@@ -21,7 +21,7 @@ validate_database() {
     echo "[vocal-training] database foreign-key check failed: $database" >&2
     return 1
   }
-  [ "$(sqlite3 "$database" "PRAGMA user_version")" = "1" ] || {
+  [ "$(sqlite3 "$database" "PRAGMA user_version")" = "2" ] || {
     echo "[vocal-training] unsupported database schema: $database" >&2
     return 1
   }

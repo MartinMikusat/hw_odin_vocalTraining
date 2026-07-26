@@ -37,6 +37,7 @@ Source_Probe_Job :: struct {
 	input: string,
 	cached_results: [dynamic]Source_Probe_Result,
 	results: [dynamic]Source_Probe_Result,
+	notification_id: i64,
 }
 
 source_probe_job: ^Source_Probe_Job
@@ -189,8 +190,11 @@ source_probe_request :: proc() {
 	if worker == nil {source_probe_job_destroy(job); return}
 	job.thread = worker
 	worker.data = job
+	job.notification_id = notification_begin(
+		"Checking YouTube metadata and formats...",
+		"The application reads source metadata without downloading media.",
+	)
 	source_probe_job = job
-	set_text(state.status, "Checking YouTube metadata and formats...")
 	thread.start(worker)
 }
 
@@ -211,12 +215,22 @@ on_source_probe_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	source_probe_job = nil
 	current := strings.trim_space(ui.url_input)
 	if current != probed_input {
+		_ = notification_finish(
+			job.notification_id,
+			.Interrupted,
+			"Metadata check superseded by edited URLs",
+		"The previous result was discarded because the source input changed.",
+		)
 		delete(probed_input)
 		source_probe_request()
 		return
 	}
 	delete(probed_input)
-	set_text(state.status, fmt.tprintf("Found metadata for %d video(s)", len(source_probe_results)))
+	_ = notification_finish(
+		job.notification_id,
+		.Success,
+		fmt.tprintf("Found metadata for %d video(s)", len(source_probe_results)),
+	)
 	ui.needs_redraw = true
 }
 

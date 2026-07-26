@@ -475,7 +475,20 @@ database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 			clip_path TEXT NOT NULL,
 			position INTEGER NOT NULL
 		);
-		PRAGMA user_version = 1;
+		CREATE TABLE IF NOT EXISTS notifications (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at_ms INTEGER NOT NULL,
+			updated_at_ms INTEGER NOT NULL,
+			kind INTEGER NOT NULL,
+			summary TEXT NOT NULL,
+			detail TEXT NOT NULL,
+			context_json TEXT NOT NULL DEFAULT '[]',
+			action_kind INTEGER NOT NULL DEFAULT 0,
+			action_target TEXT NOT NULL DEFAULT ''
+		);
+		CREATE INDEX IF NOT EXISTS notifications_updated_at
+			ON notifications(updated_at_ms);
+		PRAGMA user_version = 2;
 	`)
 }
 

@@ -390,6 +390,198 @@ sqlite_source_round_trip_preserves_metadata_and_unicode_test :: proc(t: ^testing
 }
 
 @(test)
+notification_lifecycle_updates_one_persistent_record_test :: proc(t: ^testing.T) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+
+	notification_history_destroy()
+	previous_database := library_database
+	previous_fallback := library_legacy_fallback
+	library_database = database
+	library_legacy_fallback = false
+	defer {
+		notification_history_destroy()
+		ui_set_string(&ui.status, "")
+		ui_set_string(&ui.status_source_video_id, "")
+		library_database = previous_database
+		library_legacy_fallback = previous_fallback
+	}
+	notification_history_initialize()
+	fields := [2]Notification_Field{
+		{label="Operation", value="Test import"},
+		{label="Phase", value="Preparing"},
+	}
+	id := notification_begin("Preparing import", "Test detail", fields[:])
+	fields[1].value = "Downloading"
+	testing.expect(t, notification_update(
+		id,
+		"Downloading 50%",
+		fields=fields[:],
+		persist_now=true,
+	))
+	testing.expect(t, notification_finish(
+		id,
+		.Success,
+		"Import complete",
+		action_kind=.View_Source,
+		action_target="video-1",
+	))
+	count, counted := database_count(database, "notifications")
+	testing.expect(t, counted)
+	testing.expect_value(t, count, 1)
+	statement, prepared := sqlite_prepare(
+		database,
+		"SELECT kind, summary, action_kind, action_target FROM notifications",
+	)
+	testing.expect(t, prepared)
+	if !prepared {return}
+	defer sqlite3_finalize(statement)
+	testing.expect_value(t, sqlite3_step(statement), SQLITE_ROW)
+	testing.expect_value(
+		t,
+		Notification_Kind(sqlite3_column_int(statement, 0)),
+		Notification_Kind.Success,
+	)
+	summary := sqlite3_column_text(statement, 1)
+	testing.expect(t, summary != nil)
+	if summary != nil {testing.expect_value(t, string(summary), "Import complete")}
+	testing.expect_value(
+		t,
+		Notification_Action_Kind(sqlite3_column_int(statement, 2)),
+		Notification_Action_Kind.View_Source,
+	)
+	target := sqlite3_column_text(statement, 3)
+	testing.expect(t, target != nil)
+	if target != nil {testing.expect_value(t, string(target), "video-1")}
+	testing.expect_value(t, len(notification_history.entries), 1)
+	testing.expect_value(t, len(notification_history.entries[0].fields), 2)
+
+	notification_history_destroy()
+	notification_history_initialize()
+	testing.expect_value(t, len(notification_history.entries), 1)
+	if len(notification_history.entries) == 1 {
+		reloaded := &notification_history.entries[0]
+		testing.expect_value(t, reloaded.summary, "Import complete")
+		testing.expect_value(t, reloaded.action_kind, Notification_Action_Kind.View_Source)
+		testing.expect_value(t, reloaded.action_target, "video-1")
+		testing.expect_value(t, len(reloaded.fields), 2)
+		if len(reloaded.fields) == 2 {
+			testing.expect_value(t, reloaded.fields[1].label, "Phase")
+			testing.expect_value(t, reloaded.fields[1].value, "Downloading")
+		}
+	}
+}
+
+@(test)
+notification_retention_keeps_the_newest_ten_thousand_records_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+	testing.expect(t, sqlite_execute(
+		database,
+		`WITH RECURSIVE sequence(value) AS (
+			SELECT 1
+			UNION ALL
+			SELECT value + 1 FROM sequence WHERE value < 10001
+		)
+		INSERT INTO notifications (
+			created_at_ms, updated_at_ms, kind, summary, detail,
+			context_json, action_kind, action_target
+		)
+		SELECT value, value, 0, 'status', 'detail', '[]', 0, ''
+		FROM sequence`,
+	))
+	previous_database := library_database
+	previous_fallback := library_legacy_fallback
+	library_database = database
+	library_legacy_fallback = false
+	defer {
+		library_database = previous_database
+		library_legacy_fallback = previous_fallback
+	}
+	testing.expect(t, notification_database_prune())
+	count, counted := database_count(database, "notifications")
+	testing.expect(t, counted)
+	testing.expect_value(t, count, NOTIFICATION_HISTORY_LIMIT)
+	statement, prepared := sqlite_prepare(
+		database,
+		"SELECT MIN(id), MAX(id) FROM notifications",
+	)
+	testing.expect(t, prepared)
+	if !prepared {return}
+	defer sqlite3_finalize(statement)
+	testing.expect_value(t, sqlite3_step(statement), SQLITE_ROW)
+	testing.expect_value(t, sqlite3_column_int64(statement, 0), i64(2))
+	testing.expect_value(t, sqlite3_column_int64(statement, 1), i64(10001))
+}
+
+@(test)
+notification_startup_marks_unfinished_activity_as_interrupted_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+	testing.expect(t, sqlite_execute(
+		database,
+		`INSERT INTO notifications (
+			created_at_ms, updated_at_ms, kind, summary, detail,
+			context_json, action_kind, action_target
+		) VALUES (1, 1, 1, 'Running', 'Detail', '[]', 0, '')`,
+	))
+	notification_history_destroy()
+	previous_database := library_database
+	previous_fallback := library_legacy_fallback
+	library_database = database
+	library_legacy_fallback = false
+	defer {
+		notification_history_destroy()
+		library_database = previous_database
+		library_legacy_fallback = previous_fallback
+	}
+	notification_history_initialize()
+	testing.expect_value(t, len(notification_history.entries), 1)
+	testing.expect_value(
+		t,
+		notification_history.entries[0].kind,
+		Notification_Kind.Interrupted,
+	)
+}
+
+@(test)
 exercise_range_validation_test :: proc(t: ^testing.T) {
 	testing.expect(t, valid_exercise_range(10, 20, 60))
 	testing.expect(t, !valid_exercise_range(-1, 20, 60))
@@ -1297,6 +1489,13 @@ portable_library_install_replaces_database_and_memory_together_test :: proc(
 	if !opened {return}
 	defer sqlite3_close(database)
 	testing.expect(t, database_create_schema(database))
+	testing.expect(t, sqlite_execute(
+		database,
+		`INSERT INTO notifications (
+			created_at_ms, updated_at_ms, kind, summary, detail,
+			context_json, action_kind, action_target
+		) VALUES (1, 1, 0, 'Keep me', 'Local history', '[]', 0, '')`,
+	))
 
 	previous_state := state
 	previous_database := library_database
@@ -1363,6 +1562,12 @@ portable_library_install_replaces_database_and_memory_together_test :: proc(
 	title := sqlite3_column_text(statement, 0)
 	testing.expect(t, title != nil)
 	if title != nil {testing.expect_value(t, string(title), "New")}
+	notification_count, notifications_counted := database_count(
+		database,
+		"notifications",
+	)
+	testing.expect(t, notifications_counted)
+	testing.expect_value(t, notification_count, 1)
 }
 
 @(test)
@@ -1435,6 +1640,70 @@ exercise_metadata_modal_contains_rows_and_actions_test :: proc(t: ^testing.T) {
 	testing.expect(t, last_row.y > source_button.y + source_button.h)
 	testing.expect(t, close_button.x >= modal.x && close_button.x + close_button.w <= modal.x + modal.w)
 	testing.expect(t, source_button.x >= modal.x && source_button.x + source_button.w <= modal.x + modal.w)
+}
+
+@(test)
+notification_history_modal_contains_list_detail_and_registered_rows_test :: proc(
+	t: ^testing.T,
+) {
+	modal := notification_modal_rect_for_size(1100, 720)
+	list := notification_list_rect(modal)
+	detail := notification_detail_rect(modal)
+	close_button := notification_history_close_rect(modal)
+	action := notification_history_action_rect(modal)
+	testing.expect(t, list.x >= modal.x && list.x + list.w <= modal.x + modal.w)
+	testing.expect(t, detail.x > list.x + list.w)
+	testing.expect(t, detail.x + detail.w <= modal.x + modal.w)
+	testing.expect(t, close_button.y >= modal.y)
+	testing.expect(t, action.x + action.w <= modal.x + modal.w)
+
+	notification_history_destroy()
+	notification_history.entries = make([dynamic]Notification)
+	notification_history.initialized = true
+	append(&notification_history.entries, Notification{
+		id = 41,
+		created_at_ms = 1,
+		updated_at_ms = 1,
+		kind = .Info,
+		summary = strings.clone("First"),
+		detail = strings.clone("First detail"),
+		action_target = strings.clone(""),
+	})
+	append(&notification_history.entries, Notification{
+		id = 42,
+		created_at_ms = 2,
+		updated_at_ms = 2,
+		kind = .Success,
+		summary = strings.clone("Second"),
+		detail = strings.clone("Second detail"),
+		action_target = strings.clone(""),
+	})
+	notification_history.selected_id = 42
+	previous_width := ui.width
+	previous_height := ui.height
+	previous_open := ui.notification_modal_open
+	previous_ui_build := ui_build
+	defer {
+		ui.width = previous_width
+		ui.height = previous_height
+		ui.notification_modal_open = previous_open
+		ui_build = previous_ui_build
+		notification_history_destroy()
+	}
+	ui.width = 1100
+	ui.height = 720
+	ui.notification_modal_open = true
+	frame_arena: mem_virtual.Arena
+	frame_error := mem_virtual.arena_init_static(&frame_arena, 1024*1024, 4096)
+	testing.expect(t, frame_error == nil)
+	if frame_error != nil {return}
+	defer mem_virtual.arena_destroy(&frame_arena)
+	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	testing.expect(t, find_ui_control_by_action(.Close_Notification_History) != nil)
+	testing.expect(t, find_ui_control_by_action_and_index(.Select_Notification, 42) != nil)
+	testing.expect(t, find_ui_control_by_action(.Open_Notification_History) == nil)
+	ui_build.controls = nil
 }
 
 @(test)

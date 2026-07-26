@@ -87,6 +87,7 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 	overlay := "none"
 	switch {
 	case command_palette.is_open(&command_palette_state): overlay = "command-palette"
+	case ui.notification_modal_open: overlay = "notification-history"
 	case ui.exercise_metadata_open: overlay = "exercise-metadata"
 	case ui.exercise_rename_open: overlay = "exercise-rename"
 	case ui.source_modal_open: overlay = "source-modal"
@@ -276,6 +277,11 @@ ui_diagnostic_compare_background :: proc(
 		}
 		if reason := ui_diagnostic_control_change(&baseline_control, current_control);
 		   len(reason) > 0 {
+			if current.surface.background == "import" &&
+			   current_control.action_kind == "Open_Notification_History" &&
+			   reason == "rectangle" {
+				continue
+			}
 			append(&diff.changed, UI_Diagnostic_Change{
 				functional_name = strings.clone(baseline_control.functional_name, allocator),
 				reason = strings.clone(reason, allocator),

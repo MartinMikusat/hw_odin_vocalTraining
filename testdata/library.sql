@@ -1593,5 +1593,7 @@ CREATE TABLE exercises (
 			position INTEGER NOT NULL
 		);
 INSERT INTO exercises VALUES('9-1Padxsmio-1','9-1Padxsmio','Ep. 68 "How To Warm Up Your Voice" - Voice Lessons To The World Exercise 1',510.5666666666666629,612.2800440969999726,'clips/9-1Padxsmio-1.mp4',0);
+CREATE TABLE notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, kind INTEGER NOT NULL, summary TEXT NOT NULL, detail TEXT NOT NULL, context_json TEXT NOT NULL DEFAULT '[]', action_kind INTEGER NOT NULL DEFAULT 0, action_target TEXT NOT NULL DEFAULT '');
+CREATE INDEX notifications_updated_at ON notifications(updated_at_ms);
 COMMIT;
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;

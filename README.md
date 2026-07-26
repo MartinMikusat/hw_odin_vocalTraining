@@ -122,6 +122,14 @@ the application-support directory. Use the **Data** control to open the library
 data dialog. The dialog can open that directory in Finder, export portable
 library metadata, or import a previous export.
 
+Select the footer notification to open the notification history. The modal
+shows the newest entries first and keeps the selected entry visible while new
+events arrive. Its detail pane shows timestamps, operation context, diagnostic
+paths, and an available source action. Long operations update one history
+entry until they finish. The application keeps the newest 10,000 entries in
+its local SQLite database. Library export and import do not transfer or replace
+this local activity history.
+
 Library exports use the versioned `.vocaltraining.json` format. They contain
 source URLs, saved quality metadata, transcripts, timestamp hints, and exercise
 definitions. They do not contain downloaded videos or exercise clips. Import
@@ -232,8 +240,10 @@ entry snapshot. Query, result, and ranked-index buffers retain their capacity
 between edits and sessions.
 
 SQLite stores sources, transcript segments, hints, exercises, and source
-metadata. The main thread commits state changes in transactions. A startup
-worker fills missing metadata from existing yt-dlp files.
+metadata. It also stores the newest 10,000 structured notifications. The main
+thread commits state changes in transactions. A startup worker fills missing
+metadata from existing yt-dlp files. Startup marks an unfinished notification
+as interrupted when the previous process did not finalize its operation.
 
 The portable library format is a separate JSON data-transfer schema. It omits
 runtime file paths. Import derives each source and clip path from the selected

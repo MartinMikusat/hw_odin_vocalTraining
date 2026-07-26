@@ -1,11 +1,13 @@
 package main
 
 import "base:runtime"
+import "core:c"
 import "core:fmt"
 import "core:hash"
 import mem_virtual "core:mem/virtual"
 import "core:os"
 import "core:strings"
+import posix "core:sys/posix"
 import CF "core:sys/darwin/CoreFoundation"
 import command_palette "command_palette:."
 import flash "flash:."
@@ -142,6 +144,7 @@ UI_State :: struct {
 	exercise_metadata_open: bool,
 	exercise_metadata_index: int,
 	data_modal_open: bool,
+	notification_modal_open: bool,
 	library_import_confirm_open: bool,
 	library_import_pending: bool,
 	url_input:          string,
@@ -152,6 +155,7 @@ UI_State :: struct {
 	exercise_rename:    string,
 	command_palette_query: string,
 	command_palette_scroll: f64,
+	notification_scroll: f64,
 	status:             string,
 	status_source_video_id: string,
 	status_success:     bool,
@@ -254,6 +258,10 @@ UI_Action_Kind :: enum {
 	Source_Quality,
 	Stop_Download,
 	View_Status_Source,
+	Open_Notification_History,
+	Close_Notification_History,
+	Select_Notification,
+	Activate_Notification_Action,
 	Source_Search,
 	Transcript_Search,
 	Source,
@@ -954,6 +962,181 @@ data_modal_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
 }
 
+notification_modal_rect_for_size :: proc(
+	view_width, view_height: f64,
+) -> UI_Rect {
+	width := min(max(720, view_width * 0.76), 1040)
+	height := min(max(480, view_height * 0.72), 700)
+	return UI_Rect{
+		(view_width - width) / 2,
+		(view_height - height) / 2,
+		width,
+		height,
+	}
+}
+
+notification_modal_rect :: proc() -> UI_Rect {
+	return notification_modal_rect_for_size(ui.width, ui.height)
+}
+
+notification_list_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{
+		modal.x + 24,
+		modal.y + 72,
+		max(260, modal.w * 0.38),
+		modal.h - 144,
+	}
+}
+
+notification_detail_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	list := notification_list_rect(modal)
+	x := list.x + list.w + 18
+	return UI_Rect{x, list.y, modal.x + modal.w - 24 - x, list.h}
+}
+
+notification_history_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
+}
+
+notification_history_action_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	detail := notification_detail_rect(modal)
+	return UI_Rect{detail.x + detail.w - 164, modal.y + 22, 164, 34}
+}
+
+NOTIFICATION_ROW_HEIGHT :: 58.0
+
+notification_visible_row_count :: proc(modal: UI_Rect) -> int {
+	return max(1, int(notification_list_rect(modal).h / NOTIFICATION_ROW_HEIGHT))
+}
+
+notification_max_scroll :: proc(modal: UI_Rect) -> f64 {
+	return f64(max(
+		0,
+		len(notification_history.entries) - notification_visible_row_count(modal),
+	))
+}
+
+notification_first_visible :: proc(modal: UI_Rect) -> int {
+	return min(
+		max(0, int(ui.notification_scroll)),
+		int(notification_max_scroll(modal)),
+	)
+}
+
+notification_row_rect :: proc(modal: UI_Rect, visible_index: int) -> UI_Rect {
+	list := notification_list_rect(modal)
+	return UI_Rect{
+		list.x,
+		list.y + list.h - NOTIFICATION_ROW_HEIGHT * f64(visible_index + 1),
+		list.w,
+		NOTIFICATION_ROW_HEIGHT,
+	}
+}
+
+notification_for_visible_row :: proc(
+	modal: UI_Rect,
+	visible_index: int,
+) -> ^Notification {
+	newest_offset := notification_first_visible(modal) + visible_index
+	history_index := len(notification_history.entries) - 1 - newest_offset
+	if history_index < 0 || history_index >= len(notification_history.entries) {
+		return nil
+	}
+	return &notification_history.entries[history_index]
+}
+
+notification_selected :: proc() -> ^Notification {
+	return notification_find(notification_history.selected_id)
+}
+
+notification_action_available :: proc(notification: ^Notification) -> bool {
+	if notification == nil {return false}
+	switch notification.action_kind {
+	case .View_Source:
+		return source_index_for_video_id(
+			state.sources[:],
+			notification.action_target,
+		) >= 0
+	case .None:
+		return false
+	}
+	return false
+}
+
+open_notification_history :: proc() {
+	cancel_ui_flash()
+	if ui.data_modal_open {close_data_modal()}
+	if ui.exercise_rename_open {close_exercise_rename()}
+	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.source_details_open {close_source_details()}
+	if ui.source_modal_open {close_source_modal()}
+	ui.notification_modal_open = true
+	ui.focus = .None
+	ui.notification_scroll = 0
+	selected := notification_find(notification_history.current_id)
+	if selected == nil {selected = notification_latest()}
+	notification_history.selected_id = selected != nil ? selected.id : 0
+	ui.needs_redraw = true
+}
+
+close_notification_history :: proc() {
+	cancel_ui_flash()
+	ui.notification_modal_open = false
+	ui.notification_scroll = 0
+	notification_history.selected_id = 0
+	ui.needs_redraw = true
+}
+
+select_notification :: proc(id: i64) -> bool {
+	if notification_find(id) == nil {return false}
+	notification_history.selected_id = id
+	ui.needs_redraw = true
+	return true
+}
+
+select_relative_notification :: proc(direction: int) -> bool {
+	if len(notification_history.entries) == 0 {return false}
+	index := len(notification_history.entries) - 1
+	for notification, candidate in notification_history.entries {
+		if notification.id == notification_history.selected_id {
+			index = candidate
+			break
+		}
+	}
+	index = min(max(0, index + direction), len(notification_history.entries) - 1)
+	notification_history.selected_id = notification_history.entries[index].id
+	newest_offset := len(notification_history.entries) - 1 - index
+	visible := notification_visible_row_count(notification_modal_rect())
+	if newest_offset < int(ui.notification_scroll) {
+		ui.notification_scroll = f64(newest_offset)
+	} else if newest_offset >= int(ui.notification_scroll) + visible {
+		ui.notification_scroll = f64(newest_offset - visible + 1)
+	}
+	ui.needs_redraw = true
+	return true
+}
+
+activate_notification_action :: proc() -> bool {
+	notification := notification_selected()
+	if !notification_action_available(notification) {return false}
+	switch notification.action_kind {
+	case .View_Source:
+		source_index := source_index_for_video_id(
+			state.sources[:],
+			notification.action_target,
+		)
+		if source_index < 0 {return false}
+		close_notification_history()
+		set_ui_mode(.Create)
+		ui_event_tag = source_index
+		on_select_source(nil, nil, nil)
+		return true
+	case .None:
+		return false
+	}
+	return false
+}
+
 library_import_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 22, 124, 34}
 }
@@ -1133,6 +1316,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
 	if ui.data_modal_open {close_data_modal()}
+	if ui.notification_modal_open {close_notification_history()}
 	ui.source_scrubbing = false
 	ui.source_hint_menu_open = false
 	if mode == .Play {
@@ -2550,6 +2734,228 @@ draw_data_modal :: proc(
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
 }
 
+notification_kind_text :: proc(kind: Notification_Kind) -> string {
+	switch kind {
+	case .Info:        return "INFO"
+	case .Activity:    return "IN PROGRESS"
+	case .Success:     return "SUCCESS"
+	case .Error:       return "ERROR"
+	case .Interrupted: return "INTERRUPTED"
+	}
+	return "INFO"
+}
+
+notification_time_text :: proc(timestamp_ms: i64) -> string {
+	seconds := posix.time_t(timestamp_ms / 1_000)
+	local: posix.tm
+	if posix.localtime_r(&seconds, &local) == nil {return "UNKNOWN TIME"}
+	buffer: [32]c.char
+	count := posix.strftime(
+		&buffer[0],
+		len(buffer),
+		"%Y-%m-%d %H:%M:%S",
+		&local,
+	)
+	if count == 0 {return "UNKNOWN TIME"}
+	result, _ := strings.clone(
+		string(buffer[:count]),
+		context.temp_allocator,
+	)
+	return result
+}
+
+draw_notification_history :: proc(
+	ctx, font: rawptr,
+	bright, muted, dim, orange, cyan, danger, success: [4]f64,
+) {
+	if !ui.notification_modal_open {return}
+	modal := notification_modal_rect()
+	list := notification_list_rect(modal)
+	detail := notification_detail_rect(modal)
+	fill_overlay_rect(
+		ctx,
+		UI_Rect{0, 0, ui.width, ui.height},
+		[4]f64{0.008, 0.009, 0.009, 0.88},
+	)
+	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
+	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	draw_text_in_rect(
+		ctx,
+		font,
+		"NOTIFICATION HISTORY",
+		UI_Rect{header.x + 20, header.y, header.w - 40, header.h},
+		.Start,
+		.Center,
+		bright,
+	)
+	fill_overlay_rect(ctx, list, [4]f64{0.021, 0.024, 0.022, 1})
+	fill_overlay_rect(ctx, detail, [4]f64{0.025, 0.028, 0.026, 1})
+
+	visible_count := notification_visible_row_count(modal)
+	for visible_index in 0 ..< visible_count {
+		notification := notification_for_visible_row(modal, visible_index)
+		if notification == nil {break}
+		row := notification_row_rect(modal, visible_index)
+		selected := notification.id == notification_history.selected_id
+		if selected {
+			fill_overlay_rect(ctx, row, [4]f64{0.035, 0.12, 0.12, 1})
+		} else if contains(row, ui.mouse) {
+			fill_overlay_rect(ctx, row, [4]f64{0.045, 0.052, 0.048, 1})
+		}
+		kind_color := muted
+		if notification.kind == .Success {kind_color = success}
+		if notification.kind == .Error || notification.kind == .Interrupted {
+			kind_color = danger
+		}
+		if notification.kind == .Activity {kind_color = orange}
+		draw_text_in_rect(
+			ctx,
+			font,
+			notification.summary,
+			UI_Rect{row.x + 12, row.y + 25, row.w - 24, 26},
+			.Start,
+			.Center,
+			selected ? bright : muted,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			fmt.tprintf(
+				"%s  /  %s",
+				notification_time_text(notification.updated_at_ms),
+				notification_kind_text(notification.kind),
+			),
+			UI_Rect{row.x + 12, row.y + 5, row.w - 24, 20},
+			.Start,
+			.Center,
+			kind_color,
+			10,
+		)
+		fill_overlay_rect(
+			ctx,
+			UI_Rect{row.x + 10, row.y, row.w - 20, 1},
+			[4]f64{0.09, 0.095, 0.09, 1},
+		)
+	}
+
+	selected := notification_selected()
+	if selected == nil {
+		draw_text_in_rect(
+			ctx,
+			font,
+			"NO NOTIFICATIONS",
+			detail,
+			.Center,
+			.Center,
+			dim,
+		)
+	} else {
+		y := detail.y + detail.h - 34
+		draw_text_in_rect(
+			ctx,
+			font,
+			selected.summary,
+			UI_Rect{detail.x + 16, y, detail.w - 32, 28},
+			.Start,
+			.Center,
+			bright,
+		)
+		y -= 32
+		draw_text_in_rect(
+			ctx,
+			font,
+			fmt.tprintf(
+				"%s  /  CREATED %s",
+				notification_kind_text(selected.kind),
+				notification_time_text(selected.created_at_ms),
+			),
+			UI_Rect{detail.x + 16, y, detail.w - 32, 22},
+			.Start,
+			.Center,
+			selected.kind == .Error || selected.kind == .Interrupted ? danger : cyan,
+			10,
+		)
+		y -= 42
+		draw_text_in_rect(
+			ctx,
+			font,
+			"DETAIL",
+			UI_Rect{detail.x + 16, y, detail.w - 32, 18},
+			.Start,
+			.Center,
+			dim,
+			10,
+		)
+		y -= 25
+		draw_text_in_rect(
+			ctx,
+			font,
+			selected.detail,
+			UI_Rect{detail.x + 16, y, detail.w - 32, 24},
+			.Start,
+			.Center,
+			muted,
+		)
+		y -= 42
+		for field in selected.fields {
+			if y < detail.y + 16 {break}
+			draw_text_in_rect(
+				ctx,
+				font,
+				field.label,
+				UI_Rect{detail.x + 16, y, detail.w * 0.34, 22},
+				.Start,
+				.Center,
+				dim,
+				10,
+			)
+			draw_text_in_rect(
+				ctx,
+				font,
+				field.value,
+				UI_Rect{
+					detail.x + 16 + detail.w * 0.34,
+					y,
+					detail.w * 0.66 - 32,
+					22,
+				},
+				.Start,
+				.Center,
+				muted,
+			)
+			y -= 28
+		}
+	}
+
+	close_button := ui_control_rect(.Close_Notification_History)
+	close_color := [4]f64{0.052, 0.055, 0.052, 1}
+	if contains(close_button, ui.mouse) {
+		close_color = [4]f64{0.09, 0.095, 0.09, 1}
+	}
+	fill_overlay_rect(ctx, close_button, close_color)
+	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
+	action := ui_control_rect(.Activate_Notification_Action)
+	if action.w > 0 {
+		enabled := notification_action_available(selected)
+		action_color := enabled ? [4]f64{0.035, 0.12, 0.12, 1} :
+		                        [4]f64{0.052, 0.055, 0.052, 1}
+		if enabled && contains(action, ui.mouse) {
+			action_color = [4]f64{0.045, 0.18, 0.18, 1}
+		}
+		fill_overlay_rect(ctx, action, action_color)
+		draw_text_in_rect(
+			ctx,
+			font,
+			"VIEW SOURCE",
+			action,
+			.Center,
+			.Center,
+			enabled ? cyan : dim,
+		)
+	}
+}
+
 draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	if !ui.source_details_open || ui.source_details_index < 0 || ui.source_details_index >= len(state.sources) {return}
 	modal := source_details_rect()
@@ -3499,6 +3905,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		state.has_start && state.has_end ? cyan : muted,
 	)
 	status_rect := footer_status_rect()
+	status_control := find_ui_control_by_action(.Open_Notification_History)
+	if status_control != nil && contains(status_rect, ui.mouse) {
+		fill_overlay_rect(ctx, status_rect, [4]f64{0.045, 0.052, 0.048, 1})
+	}
 	status_text := fmt.tprintf("SYS / %s", ui.status)
 	status_color := ui.status_error ? danger : (ui.status_success ? success : muted)
 	if import_job != nil || export_job != nil {
@@ -3534,6 +3944,17 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	draw_exercise_rename(ctx, small_font, bright, muted, dim, orange)
 	draw_exercise_metadata(ctx, small_font, bright, muted, dim, orange, cyan, danger)
 	draw_data_modal(ctx, small_font, bright, muted, dim, orange, cyan)
+	draw_notification_history(
+		ctx,
+		small_font,
+		bright,
+		muted,
+		dim,
+		orange,
+		cyan,
+		danger,
+		success,
+	)
 
 	if ui.source_modal_open {
 		modal := source_modal_rect()
@@ -3845,6 +4266,9 @@ ui_controls_valid :: proc(controls: []UI_Control) -> bool {
 
 ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Command_Palette_Disabled {return false}
+	if kind == .Activate_Notification_Action {
+		return notification_action_available(notification_selected())
+	}
 	if kind == .Export_Library || kind == .Import_Library {
 		return !library_transfer_busy()
 	}
@@ -3995,6 +4419,56 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 	element_class := objc_getClass("VocalAccessibilityElement")
 	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
 		layout_rects()
+	if ui.notification_modal_open {
+		modal := notification_modal_rect()
+		add_ax_element(
+			array,
+			element_class,
+			"Close notification history",
+			"AXButton",
+			notification_history_close_rect(modal),
+			.Close_Notification_History,
+			flash_label = "close notifications",
+		)
+		visible_count := notification_visible_row_count(modal)
+		for visible_index in 0 ..< visible_count {
+			notification := notification_for_visible_row(modal, visible_index)
+			if notification == nil {break}
+			add_ax_element(
+				array,
+				element_class,
+				fmt.tprintf(
+					"%s, %s, %s",
+					notification_kind_text(notification.kind),
+					notification_time_text(notification.updated_at_ms),
+					notification.summary,
+				),
+				"AXButton",
+				notification_row_rect(modal, visible_index),
+				.Select_Notification,
+				int(notification.id),
+				flash_label = "notification",
+				functional_name = fmt.tprintf(
+					"notification history entry %d",
+					notification.id,
+				),
+			)
+		}
+		selected := notification_selected()
+		if selected != nil && selected.action_kind != .None {
+			add_ax_element(
+				array,
+				element_class,
+				"View notification source",
+				"AXButton",
+				notification_history_action_rect(modal),
+				.Activate_Notification_Action,
+				flash_label = "view notification source",
+			)
+		}
+		validate_ui_controls()
+		return
+	}
 	if import_job != nil {
 		add_ax_element(array, element_class, "Stop download", "AXButton", import_cancel_rect(), .Stop_Download, flash_label = "stop download")
 	}
@@ -4212,6 +4686,15 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
+	add_ax_element(
+		array,
+		element_class,
+		"Open notification history",
+		"AXButton",
+		footer_status_rect(),
+		.Open_Notification_History,
+		flash_label = "notifications",
+	)
 	toggle_label := "Switch to Play mode"
 	if ui.mode == .Play {toggle_label = "Switch to Create mode"}
 	add_ax_element(
@@ -4539,6 +5022,14 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		set_ui_mode(.Create)
 		ui_event_tag = action.index
 		on_select_source(nil, nil, nil)
+	case .Open_Notification_History:
+		open_notification_history()
+	case .Close_Notification_History:
+		close_notification_history()
+	case .Select_Notification:
+		return select_notification(i64(action.index))
+	case .Activate_Notification_Action:
+		return activate_notification_action()
 	case .Source_Search:
 		focus_text_input(.Source_Search)
 	case .Transcript_Search:
@@ -4925,6 +5416,7 @@ begin_command_palette :: proc() -> bool {
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
 	if ui.data_modal_open {close_data_modal()}
+	if ui.notification_modal_open {close_notification_history()}
 	ui.palette_previous_focus = ui.focus
 	ui.palette_previous_caret = ui.caret_byte_offset
 	ui.palette_previous_text_scroll = ui.text_scroll_x
@@ -4983,6 +5475,7 @@ activate_command_palette_result :: proc(result_index: int) -> bool {
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
 	if ui.data_modal_open {close_data_modal()}
+	if ui.notification_modal_open {close_notification_history()}
 	if action.kind == .Source {set_ui_mode(.Create)}
 	if action.kind == .Exercise {set_ui_mode(.Play)}
 	return activate_ui_action(action)
@@ -5583,6 +6076,12 @@ dispatch_click :: proc(point: Point) {
 		return
 	}
 	clear_marked_text()
+	if ui.notification_modal_open {
+		modal := notification_modal_rect()
+		if !contains(modal, point) {close_notification_history(); return}
+		_ = activate_registered_target_at_point(point)
+		return
+	}
 	if ui.data_modal_open {
 		modal := data_modal_rect()
 		if !contains(modal, point) {close_data_modal(); return}
@@ -5637,7 +6136,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if !command_palette.is_open(&command_palette_state) &&
 	   !ui.source_modal_open && !ui.source_details_open &&
 	   !ui.exercise_rename_open && !ui.exercise_metadata_open &&
-	   !ui.data_modal_open &&
+	   !ui.data_modal_open && !ui.notification_modal_open &&
 	   contains(app_header_rect(), ui.mouse) &&
 	   !contains(ui_control_rect(.Mode_Toggle), ui.mouse) {
 		if msg_uint(event, sel_registerName("clickCount")) >= 2 {
@@ -5658,7 +6157,7 @@ on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if command_palette.is_open(&command_palette_state) {return}
 	if ui.source_modal_open || ui.source_details_open ||
 	   ui.exercise_rename_open || ui.exercise_metadata_open ||
-	   ui.data_modal_open ||
+	   ui.data_modal_open || ui.notification_modal_open ||
 	   ui.mode != .Create {
 		return
 	}
@@ -5716,6 +6215,15 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 		ui.command_palette_scroll = min(
 			max(0, ui.command_palette_scroll + delta),
 			command_palette_max_scroll(),
+		)
+		ui.needs_redraw = true
+		return
+	}
+	if ui.notification_modal_open {
+		delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
+		ui.notification_scroll = min(
+			max(0, ui.notification_scroll + delta / NOTIFICATION_ROW_HEIGHT),
+			notification_max_scroll(notification_modal_rect()),
 		)
 		ui.needs_redraw = true
 		return
@@ -5951,6 +6459,12 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if ui.exercise_metadata_open && key == 53 {close_exercise_metadata(); return}
 	if ui.exercise_rename_open && key == 53 {close_exercise_rename(); return}
 	if ui.data_modal_open && key == 53 {close_data_modal(); return}
+	if ui.notification_modal_open {
+		if key == 53 {close_notification_history(); return}
+		if key == 125 {_ = select_relative_notification(-1); return}
+		if key == 126 {_ = select_relative_notification(1); return}
+		return
+	}
 	if key == 53 && unfocus_text_input() {return}
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
 	if ui.source_details_open && key == 53 {close_source_details(); return}
@@ -5978,6 +6492,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		   !ui.exercise_rename_open &&
 		   !ui.exercise_metadata_open &&
 		   !ui.data_modal_open &&
+		   !ui.notification_modal_open &&
 		   state.player != nil {
 			if delta, scrub := timeline_scrub_delta(key, modifiers); scrub {
 				scrub_player_by(delta)
