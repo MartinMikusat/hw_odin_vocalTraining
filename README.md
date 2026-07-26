@@ -248,8 +248,23 @@ and initially commit 64 KiB.
 Install Odin and ensure `odin` is on `PATH`. Clone `hw_odin_matchSorter`,
 `hw_odin_ui_flash`, and `hw_odin_ui_commandPalette` next to this repository.
 The build imports them as the `match_sorter`, `flash`, and `command_palette`
-collections. The default build is unoptimized, includes debug information and
-assertions, and emits a matching dSYM:
+collections.
+
+[`dependencies.lock`](dependencies.lock) records each sibling repository URL
+and tested commit. Every build rejects a checkout with another origin, commit,
+or uncommitted change. After updating and validating the sibling libraries,
+record their current commits:
+
+```sh
+./scripts/dependencies.sh update
+./scripts/dependencies.sh check
+```
+
+Update dependencies to their latest compatible revisions promptly. Run all
+library tests and the application tests before updating the lock.
+
+The default build is unoptimized, includes debug information and assertions,
+and emits a matching dSYM:
 
 ```sh
 ./build.sh

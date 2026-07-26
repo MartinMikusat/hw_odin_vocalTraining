@@ -22,6 +22,7 @@ if [ ! -f "$FONT_ROOT/Iosevka-Regular.ttf" ]; then
   echo "[vocal-training] missing bundled Iosevka font: $FONT_ROOT/Iosevka-Regular.ttf" >&2
   exit 1
 fi
+"$ROOT/scripts/dependencies.sh" check
 cd "$ROOT"
 
 MODE=${1:-debug}
