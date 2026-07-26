@@ -118,8 +118,18 @@ focused text field remains normal text. Press **Escape** to leave a focused
 text field and make Flash navigation available again.
 
 Download and export diagnostics are stored as `yt-dlp.log` and `ffmpeg.log` in
-the application-support directory. Use the **Data** control to open that
-directory in Finder.
+the application-support directory. Use the **Data** control to open the library
+data dialog. The dialog can open that directory in Finder, export portable
+library metadata, or import a previous export.
+
+Library exports use the versioned `.vocaltraining.json` format. They contain
+source URLs, saved quality metadata, transcripts, timestamp hints, and exercise
+definitions. They do not contain downloaded videos or exercise clips. Import
+validates the complete file, then replaces the library records in one database
+transaction. Existing media files remain in place. The app recovers each
+source sequentially at its exact saved resolution and rebuilds its exercises.
+If that resolution is no longer available, the source remains missing for
+manual refetch.
 
 ### Command-line control
 
@@ -224,6 +234,11 @@ between edits and sessions.
 SQLite stores sources, transcript segments, hints, exercises, and source
 metadata. The main thread commits state changes in transactions. A startup
 worker fills missing metadata from existing yt-dlp files.
+
+The portable library format is a separate JSON data-transfer schema. It omits
+runtime file paths. Import derives each source and clip path from the selected
+application-support directory, which permits transfers between development and
+installed builds.
 
 The repository contains the canonical development library in
 `testdata/library.sqlite3`. Development launches use `build/dev-support`, and

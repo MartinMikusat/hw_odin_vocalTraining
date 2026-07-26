@@ -245,12 +245,20 @@ delete_exercise :: proc(exercise: ^Exercise, allocator := context.allocator) {
 	exercise^ = {}
 }
 
+app_state_collections_destroy :: proc(value: ^App_State) {
+	if value == nil {return}
+	for &source in value.sources {delete_source_video(&source)}
+	for &hint in value.hints {delete_import_hint(&hint)}
+	for &exercise in value.exercises {delete_exercise(&exercise)}
+	delete(value.sources)
+	delete(value.hints)
+	delete(value.exercises)
+	transcript_generation_destroy(&value.transcripts)
+	value.sources = nil
+	value.hints = nil
+	value.exercises = nil
+}
+
 app_state_memory_destroy :: proc() {
-	for &source in state.sources { delete_source_video(&source) }
-	for &hint in state.hints { delete_import_hint(&hint) }
-	for &exercise in state.exercises { delete_exercise(&exercise) }
-	delete(state.sources)
-	delete(state.hints)
-	delete(state.exercises)
-	transcript_generation_destroy(&state.transcripts)
+	app_state_collections_destroy(&state)
 }

@@ -861,7 +861,7 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 			testing.expect(t, !command_palette.context_matches(active, entry.contexts))
 			testing.expect(t, len(entry.unavailable_reason) > 0)
 		}
-		if entry.title == "Open data folder" {
+		if entry.title == "Open library data" {
 			found_data = true
 			testing.expect(t, command_palette.context_matches(active, entry.contexts))
 		}
@@ -1155,6 +1155,224 @@ durable_model_clone_survives_source_arena_destruction_test :: proc(t: ^testing.T
 }
 
 @(test)
+portable_library_round_trip_omits_machine_paths_test :: proc(t: ^testing.T) {
+	support, found := os.lookup_env("VT_APP_SUPPORT_DIR")
+	defer delete(support)
+	testing.expect(t, found)
+	if !found {return}
+	previous_state := state
+	state = {}
+	defer {
+		app_state_collections_destroy(&state)
+		state = previous_state
+	}
+	state.sources = make([dynamic]Source_Video)
+	state.hints = make([dynamic]Import_Hint)
+	state.exercises = make([dynamic]Exercise)
+	transcripts, transcripts_ok := transcript_generation_create(1)
+	testing.expect(t, transcripts_ok)
+	if !transcripts_ok {return}
+	state.transcripts = transcripts
+	source, source_ok := clone_source_video(Source_Video{
+		id = "source-1",
+		video_id = "video-1",
+		title = "Živý hlas",
+		url = "https://youtu.be/video-1",
+		media_path = fmt.tprintf("%s/sources/video-1.mp4", support),
+		duration = 120,
+		metadata = {
+			width = 1920,
+			height = 1080,
+			vcodec = "avc1",
+			acodec = "mp4a",
+			format_id = "137+140",
+		},
+		metadata_status = .Available,
+	})
+	testing.expect(t, source_ok)
+	if !source_ok {return}
+	append(&state.sources, source)
+	hint, hint_ok := clone_import_hint(Import_Hint{
+		source_id = "source-1",
+		seconds = 30,
+	})
+	testing.expect(t, hint_ok)
+	if !hint_ok {return}
+	append(&state.hints, hint)
+	exercise, exercise_ok := clone_exercise(Exercise{
+		id = "exercise-1",
+		source_id = "source-1",
+		name = "Warm up",
+		start_seconds = 40,
+		end_seconds = 55,
+		clip_path = fmt.tprintf("%s/clips/exercise-1.mp4", support),
+	})
+	testing.expect(t, exercise_ok)
+	if !exercise_ok {return}
+	append(&state.exercises, exercise)
+	testing.expect(t, transcript_append_copy(&state.transcripts, Transcript_Segment{
+		id = "segment-1",
+		source_id = "source-1",
+		start_seconds = 10,
+		duration_seconds = 2,
+		text = "Sing now",
+	}))
+
+	path := fmt.tprintf("%s/portable-library-test.vocaltraining.json", support)
+	defer os.remove(path)
+	testing.expect_value(t, portable_library_export(path), Portable_Library_Error.None)
+	bytes, read_ok := os.read_entire_file(path, context.temp_allocator)
+	testing.expect(t, read_ok)
+	if read_ok {
+		testing.expect(t, !strings.contains(string(bytes), support))
+		testing.expect(t, !strings.contains(string(bytes), `"media_path"`))
+		testing.expect(t, !strings.contains(string(bytes), `"clip_path"`))
+	}
+	imported, import_error := portable_library_read(path)
+	testing.expect_value(t, import_error, Portable_Library_Error.None)
+	defer app_state_collections_destroy(&imported)
+	testing.expect_value(t, len(imported.sources), 1)
+	testing.expect_value(t, len(imported.exercises), 1)
+	testing.expect_value(t, len(imported.transcripts.segments), 1)
+	testing.expect_value(t, imported.sources[0].title, "Živý hlas")
+	testing.expect_value(
+		t,
+		imported.sources[0].media_path,
+		fmt.tprintf("%s/sources/video-1.mp4", support),
+	)
+	testing.expect_value(
+		t,
+		imported.exercises[0].clip_path,
+		fmt.tprintf("%s/clips/exercise-1.mp4", support),
+	)
+}
+
+@(test)
+portable_library_validation_rejects_versions_and_broken_references_test :: proc(
+	t: ^testing.T,
+) {
+	source := Portable_Source{
+		id = "source-1",
+		video_id = "video-1",
+		duration = 60,
+	}
+	data := Portable_Library{
+		format = PORTABLE_LIBRARY_FORMAT,
+		version = PORTABLE_LIBRARY_VERSION + 1,
+		sources = []Portable_Source{source},
+	}
+	testing.expect_value(
+		t,
+		portable_library_validate(&data),
+		Portable_Library_Error.Version,
+	)
+	data.version = PORTABLE_LIBRARY_VERSION
+	data.exercises = []Portable_Exercise{{
+		id = "exercise-1",
+		source_id = "missing",
+		start_seconds = 1,
+		end_seconds = 2,
+	}}
+	testing.expect_value(
+		t,
+		portable_library_validate(&data),
+		Portable_Library_Error.Reference,
+	)
+}
+
+@(test)
+portable_library_install_replaces_database_and_memory_together_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+
+	previous_state := state
+	previous_database := library_database
+	previous_fallback := library_legacy_fallback
+	state = {}
+	imported: App_State
+	defer {
+		app_state_collections_destroy(&state)
+		app_state_collections_destroy(&imported)
+		state = previous_state
+		library_database = previous_database
+		library_legacy_fallback = previous_fallback
+	}
+	state.sources = make([dynamic]Source_Video)
+	state.hints = make([dynamic]Import_Hint)
+	state.exercises = make([dynamic]Exercise)
+	state.transcripts, _ = transcript_generation_create(0)
+	old_source, old_ok := clone_source_video(Source_Video{
+		id = "old-source",
+		video_id = "old-video",
+		title = "Old",
+		url = "https://youtu.be/old-video",
+		media_path = "/tmp/old.mp4",
+		duration = 30,
+	})
+	testing.expect(t, old_ok)
+	if !old_ok {return}
+	append(&state.sources, old_source)
+
+	imported.sources = make([dynamic]Source_Video)
+	imported.hints = make([dynamic]Import_Hint)
+	imported.exercises = make([dynamic]Exercise)
+	imported.transcripts, _ = transcript_generation_create(0)
+	new_source, new_ok := clone_source_video(Source_Video{
+		id = "new-source",
+		video_id = "new-video",
+		title = "New",
+		url = "https://youtu.be/new-video",
+		media_path = fmt.tprintf("%s/sources/new-video.mp4", app_support_dir()),
+		duration = 60,
+	})
+	testing.expect(t, new_ok)
+	if !new_ok {return}
+	append(&imported.sources, new_source)
+	library_database = database
+	library_legacy_fallback = false
+
+	testing.expect_value(
+		t,
+		portable_library_install(&imported),
+		Portable_Library_Error.None,
+	)
+	testing.expect_value(t, len(state.sources), 1)
+	testing.expect_value(t, state.sources[0].title, "New")
+	testing.expect_value(t, len(imported.sources), 0)
+	statement, prepared := sqlite_prepare(
+		database,
+		"SELECT title FROM sources ORDER BY position",
+	)
+	testing.expect(t, prepared)
+	if !prepared {return}
+	defer sqlite3_finalize(statement)
+	testing.expect_value(t, sqlite3_step(statement), SQLITE_ROW)
+	title := sqlite3_column_text(statement, 0)
+	testing.expect(t, title != nil)
+	if title != nil {testing.expect_value(t, string(title), "New")}
+}
+
+@(test)
+library_recovery_quality_requires_the_saved_height_test :: proc(t: ^testing.T) {
+	selector := download_format_selector(720, true)
+	testing.expect(t, strings.contains(selector, "height=720"))
+	testing.expect(t, !strings.contains(selector, "height<=720"))
+}
+
+@(test)
 mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
 	for slot in 0..<8 {
 		testing.expect_value(t, control_action_for_slot(.Create, slot), slot)
@@ -1279,6 +1497,58 @@ download_progress_uses_latest_complete_progress_line_test :: proc(t: ^testing.T)
 	testing.expect_value(t, status, "Downloading 25.0% / 80.0MiB / 5.0MiB/s / ETA 00:12")
 	_, ok = download_progress_status("noise only")
 	testing.expect(t, !ok)
+}
+
+@(test)
+import_progress_ignores_stale_download_during_existing_media_validation_test :: proc(
+	t: ^testing.T,
+) {
+	job := Import_Job{
+		phase = .Validating_Existing_Media,
+		library_recovery_source = true,
+		recovery_index = 3,
+		recovery_total = 7,
+	}
+	status := import_progress_status(
+		&job,
+		"VT_PROGRESS|100.0%|7.18MiB|8.27MiB/s|NA\n",
+	)
+	testing.expect_value(
+		t,
+		status,
+		"Recovering source 3 of 7: validating existing media",
+	)
+}
+
+@(test)
+import_progress_reports_download_finalization_and_exercise_rebuild_phases_test :: proc(
+	t: ^testing.T,
+) {
+	job := Import_Job{
+		phase = .Downloading,
+		library_recovery_source = true,
+		recovery_index = 7,
+		recovery_total = 7,
+	}
+	status := import_progress_status(
+		&job,
+		"VT_PROGRESS|100.0%|7.18MiB|8.27MiB/s|NA\n",
+	)
+	testing.expect_value(
+		t,
+		status,
+		"Recovering source 7 of 7: finalizing downloaded media",
+	)
+	job.phase = .Rebuilding_Exercises
+	status = import_progress_status(
+		&job,
+		"VT_PROGRESS|100.0%|7.18MiB|8.27MiB/s|NA\n",
+	)
+	testing.expect_value(
+		t,
+		status,
+		"Recovering source 7 of 7: rebuilding exercises",
+	)
 }
 
 @(test)

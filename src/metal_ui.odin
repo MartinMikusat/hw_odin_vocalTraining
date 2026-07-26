@@ -141,6 +141,9 @@ UI_State :: struct {
 	exercise_rename_index: int,
 	exercise_metadata_open: bool,
 	exercise_metadata_index: int,
+	data_modal_open: bool,
+	library_import_confirm_open: bool,
+	library_import_pending: bool,
 	url_input:          string,
 	source_search:      string,
 	transcript_search:  string,
@@ -284,6 +287,12 @@ UI_Action_Kind :: enum {
 	Data,
 	Rename,
 	Metadata,
+	Close_Data_Modal,
+	Open_Data_Folder,
+	Export_Library,
+	Import_Library,
+	Cancel_Library_Import,
+	Confirm_Library_Import,
 }
 
 AX_Action :: struct {
@@ -926,6 +935,33 @@ exercise_metadata_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
 }
 
+data_modal_rect :: proc() -> UI_Rect {
+	width := min(max(560, ui.width * 0.5), 680)
+	height := min(max(330, ui.height * 0.42), 390)
+	return UI_Rect{(ui.width - width) / 2, (ui.height - height) / 2, width, height}
+}
+
+data_modal_action_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
+	return UI_Rect{
+		modal.x + 24,
+		modal.y + modal.h - 116 - f64(row) * 52,
+		modal.w - 48,
+		40,
+	}
+}
+
+data_modal_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
+}
+
+library_import_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 22, 124, 34}
+}
+
+library_import_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + modal.w - 230, modal.y + 22, 206, 34}
+}
+
 exercise_metadata_source_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + modal.w - 204, modal.y + 22, 180, 34}
 }
@@ -1010,6 +1046,25 @@ close_exercise_metadata :: proc() {
 	ui.needs_redraw = true
 }
 
+open_data_modal :: proc() {
+	cancel_ui_flash()
+	app_state_collections_destroy(&pending_library_import)
+	ui.data_modal_open = true
+	ui.library_import_confirm_open = false
+	ui.library_import_pending = false
+	ui.focus = .None
+	ui.needs_redraw = true
+}
+
+close_data_modal :: proc() {
+	cancel_ui_flash()
+	ui.data_modal_open = false
+	ui.library_import_confirm_open = false
+	ui.library_import_pending = false
+	app_state_collections_destroy(&pending_library_import)
+	ui.needs_redraw = true
+}
+
 view_exercise_source :: proc() {
 	if ui.exercise_metadata_index < 0 ||
 	   ui.exercise_metadata_index >= len(state.exercises) {
@@ -1077,6 +1132,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.source_details_open {close_source_details()}
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.data_modal_open {close_data_modal()}
 	ui.source_scrubbing = false
 	ui.source_hint_menu_open = false
 	if mode == .Play {
@@ -2371,6 +2427,129 @@ draw_exercise_metadata :: proc(
 	draw_text_in_rect(ctx, font, "VIEW SOURCE", source_button, .Center, .Center, source_enabled ? cyan : dim)
 }
 
+draw_data_modal :: proc(
+	ctx, font: rawptr,
+	bright, muted, dim, orange, cyan: [4]f64,
+) {
+	if !ui.data_modal_open {return}
+	modal := data_modal_rect()
+	fill_overlay_rect(
+		ctx,
+		UI_Rect{0, 0, ui.width, ui.height},
+		[4]f64{0.008, 0.009, 0.009, 0.88},
+	)
+	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
+	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	title := ui.library_import_confirm_open ? "REPLACE LIBRARY" : "LIBRARY DATA"
+	draw_text_in_rect(
+		ctx,
+		font,
+		title,
+		UI_Rect{header.x + 20, header.y, header.w - 40, header.h},
+		.Start,
+		.Center,
+		bright,
+	)
+	if ui.library_import_confirm_open {
+		draw_text_in_rect(
+			ctx,
+			font,
+			"The imported records will replace the current source and exercise library.",
+			UI_Rect{modal.x + 24, modal.y + modal.h - 112, modal.w - 48, 28},
+			.Start,
+			.Center,
+			bright,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			fmt.tprintf(
+				"%03d SOURCES   %03d EXERCISES   %04d TRANSCRIPT SEGMENTS",
+				len(pending_library_import.sources),
+				len(pending_library_import.exercises),
+				len(pending_library_import.transcripts.segments),
+			),
+			UI_Rect{modal.x + 24, modal.y + modal.h - 158, modal.w - 48, 30},
+			.Start,
+			.Center,
+			cyan,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			"Local media files remain in place. Recovery starts after replacement.",
+			UI_Rect{modal.x + 24, modal.y + modal.h - 198, modal.w - 48, 26},
+			.Start,
+			.Center,
+			muted,
+		)
+		cancel := ui_control_rect(.Cancel_Library_Import)
+		confirm := ui_control_rect(.Confirm_Library_Import)
+		cancel_color := [4]f64{0.052, 0.055, 0.052, 1}
+		if contains(cancel, ui.mouse) {cancel_color = [4]f64{0.09, 0.095, 0.09, 1}}
+		fill_overlay_rect(ctx, cancel, cancel_color)
+		draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
+		confirm_control := find_ui_control_by_action(.Confirm_Library_Import)
+		confirm_enabled := confirm_control != nil && .Enabled in confirm_control.flags
+		confirm_color := confirm_enabled ? [4]f64{0.15, 0.061, 0.032, 1} : [4]f64{0.052, 0.055, 0.052, 1}
+		if confirm_enabled && contains(confirm, ui.mouse) {
+			confirm_color = [4]f64{0.23, 0.083, 0.035, 1}
+		}
+		fill_overlay_rect(ctx, confirm, confirm_color)
+		if confirm_enabled {fill_overlay_border(ctx, confirm, orange)}
+		draw_text_in_rect(
+			ctx,
+			font,
+			"REPLACE AND RECOVER",
+			confirm,
+			.Center,
+			.Center,
+			confirm_enabled ? bright : dim,
+		)
+		return
+	}
+
+	actions := [3]UI_Action_Kind{.Open_Data_Folder, .Export_Library, .Import_Library}
+	labels := [3]string{"OPEN DATA FOLDER", "EXPORT LIBRARY METADATA", "IMPORT LIBRARY METADATA"}
+	details := [3]string{
+		"Show the active application-support directory in Finder",
+		"Save portable source, transcript, quality, and exercise records",
+		"Replace this library and recover media at each saved resolution",
+	}
+	for kind, index in actions {
+		rect := ui_control_rect(kind)
+		control := find_ui_control_by_action(kind)
+		enabled := control != nil && .Enabled in control.flags
+		color := [4]f64{0.052, 0.055, 0.052, 1}
+		if enabled && contains(rect, ui.mouse) {color = [4]f64{0.09, 0.095, 0.09, 1}}
+		fill_overlay_rect(ctx, rect, color)
+		draw_text_in_rect(
+			ctx,
+			font,
+			labels[index],
+			UI_Rect{rect.x + 12, rect.y + 14, rect.w - 24, 22},
+			.Start,
+			.Center,
+			enabled ? bright : dim,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			details[index],
+			UI_Rect{rect.x + 12, rect.y - 3, rect.w - 24, 20},
+			.Start,
+			.Center,
+			enabled ? muted : dim,
+		)
+	}
+	close_button := ui_control_rect(.Close_Data_Modal)
+	close_color := [4]f64{0.052, 0.055, 0.052, 1}
+	if contains(close_button, ui.mouse) {close_color = [4]f64{0.09, 0.095, 0.09, 1}}
+	fill_overlay_rect(ctx, close_button, close_color)
+	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
+}
+
 draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	if !ui.source_details_open || ui.source_details_index < 0 || ui.source_details_index >= len(state.sources) {return}
 	modal := source_details_rect()
@@ -3354,6 +3533,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	draw_source_details(ctx, small_font, bright, muted, cyan)
 	draw_exercise_rename(ctx, small_font, bright, muted, dim, orange)
 	draw_exercise_metadata(ctx, small_font, bright, muted, dim, orange, cyan, danger)
+	draw_data_modal(ctx, small_font, bright, muted, dim, orange, cyan)
 
 	if ui.source_modal_open {
 		modal := source_modal_rect()
@@ -3665,6 +3845,12 @@ ui_controls_valid :: proc(controls: []UI_Control) -> bool {
 
 ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Command_Palette_Disabled {return false}
+	if kind == .Export_Library || kind == .Import_Library {
+		return !library_transfer_busy()
+	}
+	if kind == .Confirm_Library_Import {
+		return !library_transfer_busy() && ui.library_import_pending
+	}
 	if kind == .Start || kind == .End {
 		return state.player != nil &&
 		       state.active_source >= 0 &&
@@ -3858,6 +4044,68 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				index,
 				flash_label = "palette result",
 				functional_name = fmt.tprintf("palette result %d", result.entry.id),
+			)
+		}
+		validate_ui_controls()
+		return
+	}
+	if ui.data_modal_open {
+		modal := data_modal_rect()
+		if ui.library_import_confirm_open {
+			add_ax_element(
+				array,
+				element_class,
+				"Cancel library import",
+				"AXButton",
+				library_import_cancel_rect(modal),
+				.Cancel_Library_Import,
+				flash_label = "cancel import",
+			)
+			add_ax_element(
+				array,
+				element_class,
+				"Replace library and recover media",
+				"AXButton",
+				library_import_confirm_rect(modal),
+				.Confirm_Library_Import,
+				flash_label = "replace library",
+			)
+		} else {
+			add_ax_element(
+				array,
+				element_class,
+				"Open data folder",
+				"AXButton",
+				data_modal_action_rect(modal, 0),
+				.Open_Data_Folder,
+				flash_label = "open data folder",
+			)
+			add_ax_element(
+				array,
+				element_class,
+				"Export library metadata",
+				"AXButton",
+				data_modal_action_rect(modal, 1),
+				.Export_Library,
+				flash_label = "export library",
+			)
+			add_ax_element(
+				array,
+				element_class,
+				"Import library metadata",
+				"AXButton",
+				data_modal_action_rect(modal, 2),
+				.Import_Library,
+				flash_label = "import library",
+			)
+			add_ax_element(
+				array,
+				element_class,
+				"Close library data",
+				"AXButton",
+				data_modal_close_rect(modal),
+				.Close_Data_Modal,
+				flash_label = "close data",
 			)
 		}
 		validate_ui_controls()
@@ -4176,7 +4424,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		"Pause",
 		"Load captions",
 		"Preview range",
-		"Open data folder",
+		"Open library data",
 		"Rename exercise",
 		"Show exercise metadata",
 	}
@@ -4283,6 +4531,7 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		}
 	case .Stop_Download:
 		if import_job != nil {
+			if library_recovery != nil {library_recovery.cancelled = true}
 			import_job_cancel(import_job)
 			set_text(state.status, "Stopping download...")
 		}
@@ -4354,7 +4603,19 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 	case .Preview:
 		on_preview(nil, nil, nil)
 	case .Data:
+		open_data_modal()
+	case .Close_Data_Modal:
+		close_data_modal()
+	case .Open_Data_Folder:
 		on_open_data_folder(nil, nil, nil)
+	case .Export_Library:
+		export_library_with_panel()
+	case .Import_Library:
+		prepare_library_import_with_panel()
+	case .Cancel_Library_Import:
+		close_data_modal()
+	case .Confirm_Library_Import:
+		confirm_library_import()
 	case .Rename:
 		open_exercise_rename()
 	case .Metadata:
@@ -4591,10 +4852,10 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Data},
-		"Open data folder",
-		"Show downloaded media, clips, and diagnostics in Finder",
+		"Open library data",
+		"Export, import, or inspect the active library directory",
 		"Command",
-		[]string{"finder", "logs", "storage"},
+		[]string{"finder", "logs", "storage", "export", "import", "migration"},
 	)
 	for source, index in state.sources {
 		resolution := ""
@@ -4663,6 +4924,7 @@ begin_command_palette :: proc() -> bool {
 	cancel_ui_flash()
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.data_modal_open {close_data_modal()}
 	ui.palette_previous_focus = ui.focus
 	ui.palette_previous_caret = ui.caret_byte_offset
 	ui.palette_previous_text_scroll = ui.text_scroll_x
@@ -4720,6 +4982,7 @@ activate_command_palette_result :: proc(result_index: int) -> bool {
 	if ui.source_details_open {close_source_details()}
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.data_modal_open {close_data_modal()}
 	if action.kind == .Source {set_ui_mode(.Create)}
 	if action.kind == .Exercise {set_ui_mode(.Play)}
 	return activate_ui_action(action)
@@ -4938,6 +5201,7 @@ render_frame :: proc() {
 
 ui_memory_destroy :: proc() {
 	metal_player_clear()
+	app_state_collections_destroy(&pending_library_import)
 	if ui.ax_children != nil {msg_void(ui.ax_children, sel_registerName("release"))}
 	if ui.text_texture != nil {msg_void(ui.text_texture, sel_registerName("release"))}
 	if ui.solid_pipeline != nil {msg_void(ui.solid_pipeline, sel_registerName("release"))}
@@ -5319,6 +5583,12 @@ dispatch_click :: proc(point: Point) {
 		return
 	}
 	clear_marked_text()
+	if ui.data_modal_open {
+		modal := data_modal_rect()
+		if !contains(modal, point) {close_data_modal(); return}
+		_ = activate_registered_target_at_point(point)
+		return
+	}
 	if ui.exercise_metadata_open {
 		modal := exercise_metadata_modal_rect()
 		if !contains(modal, point) {close_exercise_metadata(); return}
@@ -5367,6 +5637,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if !command_palette.is_open(&command_palette_state) &&
 	   !ui.source_modal_open && !ui.source_details_open &&
 	   !ui.exercise_rename_open && !ui.exercise_metadata_open &&
+	   !ui.data_modal_open &&
 	   contains(app_header_rect(), ui.mouse) &&
 	   !contains(ui_control_rect(.Mode_Toggle), ui.mouse) {
 		if msg_uint(event, sel_registerName("clickCount")) >= 2 {
@@ -5387,6 +5658,7 @@ on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if command_palette.is_open(&command_palette_state) {return}
 	if ui.source_modal_open || ui.source_details_open ||
 	   ui.exercise_rename_open || ui.exercise_metadata_open ||
+	   ui.data_modal_open ||
 	   ui.mode != .Create {
 		return
 	}
@@ -5449,7 +5721,8 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 		return
 	}
 	if ui.source_modal_open || ui.source_details_open ||
-	   ui.exercise_rename_open || ui.exercise_metadata_open {
+	   ui.exercise_rename_open || ui.exercise_metadata_open ||
+	   ui.data_modal_open {
 		return
 	}
 	delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
@@ -5677,6 +5950,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	if ui.exercise_metadata_open && key == 53 {close_exercise_metadata(); return}
 	if ui.exercise_rename_open && key == 53 {close_exercise_rename(); return}
+	if ui.data_modal_open && key == 53 {close_data_modal(); return}
 	if key == 53 && unfocus_text_input() {return}
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
 	if ui.source_details_open && key == 53 {close_source_details(); return}
@@ -5703,6 +5977,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		   !ui.source_details_open &&
 		   !ui.exercise_rename_open &&
 		   !ui.exercise_metadata_open &&
+		   !ui.data_modal_open &&
 		   state.player != nil {
 			if delta, scrub := timeline_scrub_delta(key, modifiers); scrub {
 				scrub_player_by(delta)

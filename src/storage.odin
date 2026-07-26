@@ -2,9 +2,11 @@ package main
 
 import "core:encoding/json"
 import "core:fmt"
+import "core:math"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "core:time"
 import mem_virtual "core:mem/virtual"
 import "base:runtime"
 
@@ -30,6 +32,166 @@ Source_Context_Metadata :: struct {
 	ext:             string,
 	format_id:       string,
 	filesize_approx: i64,
+}
+
+PORTABLE_LIBRARY_FORMAT  :: "vocal-training-library"
+PORTABLE_LIBRARY_VERSION :: 1
+
+Portable_Source :: struct {
+	id:              string,
+	video_id:        string,
+	title:           string,
+	url:             string,
+	duration:        f64,
+	metadata:        Source_Context_Metadata,
+	metadata_status: Source_Metadata_Status,
+}
+
+Portable_Transcript_Segment :: struct {
+	id:               string,
+	source_id:        string,
+	start_seconds:    f64,
+	duration_seconds: f64,
+	text:             string,
+}
+
+Portable_Import_Hint :: struct {
+	source_id: string,
+	seconds:   f64,
+}
+
+Portable_Exercise :: struct {
+	id:            string,
+	source_id:     string,
+	name:          string,
+	start_seconds: f64,
+	end_seconds:   f64,
+}
+
+Portable_Library :: struct {
+	format:           string,
+	version:          int,
+	exported_at_unix: i64,
+	sources:          []Portable_Source,
+	segments:         []Portable_Transcript_Segment,
+	hints:            []Portable_Import_Hint,
+	exercises:        []Portable_Exercise,
+}
+
+Portable_Library_Error :: enum {
+	None,
+	Read,
+	Decode,
+	Format,
+	Version,
+	Identifier,
+	Duplicate,
+	Reference,
+	Timestamp,
+	Encode,
+	Write,
+	Database,
+}
+
+portable_library_error_text :: proc(value: Portable_Library_Error) -> string {
+	switch value {
+	case .None:       return ""
+	case .Read:       return "Unable to read the library export"
+	case .Decode:     return "The library export is not valid JSON"
+	case .Format:     return "The selected file is not a Vocal Training library export"
+	case .Version:    return "This library export version is not supported"
+	case .Identifier: return "The library export contains an unsafe identifier"
+	case .Duplicate:  return "The library export contains duplicate records"
+	case .Reference:  return "The library export contains a broken source reference"
+	case .Timestamp:  return "The library export contains an invalid timestamp"
+	case .Encode:     return "Unable to encode the library export"
+	case .Write:      return "Unable to write the library export"
+	case .Database:   return "Unable to replace the library database"
+	}
+	return "Unknown library export error"
+}
+
+portable_identifier_valid :: proc(value: string) -> bool {
+	if len(value) == 0 {return false}
+	for byte in value {
+		if byte >= 'a' && byte <= 'z' ||
+		   byte >= 'A' && byte <= 'Z' ||
+		   byte >= '0' && byte <= '9' ||
+		   byte == '-' || byte == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+portable_seconds_valid :: proc(value: f64) -> bool {
+	return !math.is_nan(value) && !math.is_inf(value) && value >= 0
+}
+
+portable_source_index :: proc(sources: []Portable_Source, id: string) -> int {
+	for source, index in sources {
+		if source.id == id {return index}
+	}
+	return -1
+}
+
+portable_library_validate :: proc(data: ^Portable_Library) -> Portable_Library_Error {
+	if data.format != PORTABLE_LIBRARY_FORMAT {return .Format}
+	if data.version != PORTABLE_LIBRARY_VERSION {return .Version}
+	for source, index in data.sources {
+		if !portable_identifier_valid(source.id) ||
+		   !portable_identifier_valid(source.video_id) {
+			return .Identifier
+		}
+		if !portable_seconds_valid(source.duration) {return .Timestamp}
+		for other in data.sources[index+1:] {
+			if source.id == other.id || source.video_id == other.video_id {
+				return .Duplicate
+			}
+		}
+	}
+	for segment, index in data.segments {
+		if !portable_identifier_valid(segment.id) {return .Identifier}
+		source_index := portable_source_index(data.sources, segment.source_id)
+		if source_index < 0 {return .Reference}
+		if !portable_seconds_valid(segment.start_seconds) ||
+		   !portable_seconds_valid(segment.duration_seconds) ||
+		   segment.start_seconds > data.sources[source_index].duration {
+			return .Timestamp
+		}
+		for other in data.segments[index+1:] {
+			if segment.id == other.id {return .Duplicate}
+		}
+	}
+	for hint, index in data.hints {
+		source_index := portable_source_index(data.sources, hint.source_id)
+		if source_index < 0 {return .Reference}
+		if !portable_seconds_valid(hint.seconds) ||
+		   hint.seconds > data.sources[source_index].duration {
+			return .Timestamp
+		}
+		for other in data.hints[index+1:] {
+			if hint.source_id == other.source_id && hint.seconds == other.seconds {
+				return .Duplicate
+			}
+		}
+	}
+	for exercise, index in data.exercises {
+		if !portable_identifier_valid(exercise.id) {return .Identifier}
+		source_index := portable_source_index(data.sources, exercise.source_id)
+		if source_index < 0 {return .Reference}
+		if !portable_seconds_valid(exercise.start_seconds) ||
+		   !portable_seconds_valid(exercise.end_seconds) ||
+		   exercise.end_seconds <= exercise.start_seconds ||
+		   exercise.end_seconds > data.sources[source_index].duration {
+			return .Timestamp
+		}
+		for other in data.exercises[index+1:] {
+			if exercise.id == other.id {return .Duplicate}
+		}
+	}
+	return .None
 }
 
 delete_source_context_metadata :: proc(metadata: ^Source_Context_Metadata, allocator := context.allocator) {
@@ -390,6 +552,206 @@ database_save_collections :: proc(
 
 database_save_state :: proc(database: ^SQLite_DB) -> bool {
 	return database_save_collections(database, state.sources[:], state.transcripts.segments[:], state.hints[:], state.exercises[:])
+}
+
+portable_library_from_state :: proc(allocator := context.allocator) -> (Portable_Library, bool) {
+	sources, sources_error := make([]Portable_Source, len(state.sources), allocator)
+	if sources_error != nil {return {}, false}
+	segments, segments_error := make([]Portable_Transcript_Segment, len(state.transcripts.segments), allocator)
+	if segments_error != nil {return {}, false}
+	hints, hints_error := make([]Portable_Import_Hint, len(state.hints), allocator)
+	if hints_error != nil {return {}, false}
+	exercises, exercises_error := make([]Portable_Exercise, len(state.exercises), allocator)
+	if exercises_error != nil {return {}, false}
+	for source, index in state.sources {
+		sources[index] = Portable_Source {
+			id = source.id,
+			video_id = source.video_id,
+			title = source.title,
+			url = source.url,
+			duration = source.duration,
+			metadata = source.metadata,
+			metadata_status = source.metadata_status,
+		}
+	}
+	for segment, index in state.transcripts.segments {
+		segments[index] = Portable_Transcript_Segment {
+			id = segment.id,
+			source_id = segment.source_id,
+			start_seconds = segment.start_seconds,
+			duration_seconds = segment.duration_seconds,
+			text = segment.text,
+		}
+	}
+	for hint, index in state.hints {
+		hints[index] = Portable_Import_Hint {
+			source_id = hint.source_id,
+			seconds = hint.seconds,
+		}
+	}
+	for exercise, index in state.exercises {
+		exercises[index] = Portable_Exercise {
+			id = exercise.id,
+			source_id = exercise.source_id,
+			name = exercise.name,
+			start_seconds = exercise.start_seconds,
+			end_seconds = exercise.end_seconds,
+		}
+	}
+	return Portable_Library {
+		format = PORTABLE_LIBRARY_FORMAT,
+		version = PORTABLE_LIBRARY_VERSION,
+		exported_at_unix = time.to_unix_seconds(time.now()),
+		sources = sources,
+		segments = segments,
+		hints = hints,
+		exercises = exercises,
+	}, true
+}
+
+portable_library_export :: proc(path: string) -> Portable_Library_Error {
+	scratch, scratch_ok := growing_arena_create()
+	if !scratch_ok {return .Encode}
+	defer growing_arena_destroy(scratch)
+	allocator := mem_virtual.arena_allocator(scratch)
+	data, created := portable_library_from_state(allocator)
+	if !created {return .Encode}
+	if validation_error := portable_library_validate(&data); validation_error != .None {
+		return validation_error
+	}
+	encoded, encode_error := json.marshal(
+		data,
+		{pretty=true, use_spaces=true, spaces=2},
+		allocator,
+	)
+	if encode_error != nil {return .Encode}
+	temporary_path := fmt.aprintf("%s.tmp", path, allocator=allocator)
+	_ = os.remove(temporary_path)
+	if !os.write_entire_file(temporary_path, encoded) {return .Write}
+	if !os.rename(temporary_path, path) {
+		_ = os.remove(temporary_path)
+		return .Write
+	}
+	return .None
+}
+
+portable_library_read :: proc(path: string) -> (App_State, Portable_Library_Error) {
+	scratch, scratch_ok := growing_arena_create()
+	if !scratch_ok {return {}, .Decode}
+	defer growing_arena_destroy(scratch)
+	allocator := mem_virtual.arena_allocator(scratch)
+	bytes, read_ok := os.read_entire_file(path, allocator)
+	if !read_ok {return {}, .Read}
+	data: Portable_Library
+	if decode_error := json.unmarshal(bytes, &data, .JSON, allocator); decode_error != nil {
+		return {}, .Decode
+	}
+	if validation_error := portable_library_validate(&data); validation_error != .None {
+		return {}, validation_error
+	}
+
+	result: App_State
+	result.sources = make([dynamic]Source_Video, 0, len(data.sources))
+	result.hints = make([dynamic]Import_Hint, 0, len(data.hints))
+	result.exercises = make([dynamic]Exercise, 0, len(data.exercises))
+	transcripts, transcripts_ok := transcript_generation_create(len(data.segments))
+	if !transcripts_ok {
+		app_state_collections_destroy(&result)
+		return {}, .Decode
+	}
+	result.transcripts = transcripts
+	loaded := false
+	defer if !loaded {app_state_collections_destroy(&result)}
+
+	for source in data.sources {
+		runtime_source := Source_Video {
+			id = source.id,
+			video_id = source.video_id,
+			title = source.title,
+			url = source.url,
+			media_path = fmt.aprintf(
+				"%s/sources/%s.mp4",
+				app_support_dir(),
+				source.video_id,
+				allocator=allocator,
+			),
+			duration = source.duration,
+			metadata = source.metadata,
+			metadata_status = source.metadata_status,
+		}
+		copy, copied := clone_source_video(runtime_source)
+		if !copied {return {}, .Decode}
+		copy.media_available = os.exists(copy.media_path)
+		append(&result.sources, copy)
+	}
+	for hint in data.hints {
+		copy, copied := clone_import_hint(Import_Hint{
+			source_id = hint.source_id,
+			seconds = hint.seconds,
+		})
+		if !copied {return {}, .Decode}
+		append(&result.hints, copy)
+	}
+	for exercise in data.exercises {
+		runtime_exercise := Exercise {
+			id = exercise.id,
+			source_id = exercise.source_id,
+			name = exercise.name,
+			start_seconds = exercise.start_seconds,
+			end_seconds = exercise.end_seconds,
+			clip_path = fmt.aprintf(
+				"%s/clips/%s.mp4",
+				app_support_dir(),
+				exercise.id,
+				allocator=allocator,
+			),
+		}
+		copy, copied := clone_exercise(runtime_exercise)
+		if !copied {return {}, .Decode}
+		append(&result.exercises, copy)
+	}
+	for segment in data.segments {
+		if !transcript_append_copy(&result.transcripts, Transcript_Segment{
+			id = segment.id,
+			source_id = segment.source_id,
+			start_seconds = segment.start_seconds,
+			duration_seconds = segment.duration_seconds,
+			text = segment.text,
+		}) {
+			return {}, .Decode
+		}
+	}
+	loaded = true
+	return result, .None
+}
+
+portable_library_install :: proc(imported: ^App_State) -> Portable_Library_Error {
+	if library_database == nil || library_legacy_fallback {return .Database}
+	if !database_save_collections(
+		library_database,
+		imported.sources[:],
+		imported.transcripts.segments[:],
+		imported.hints[:],
+		imported.exercises[:],
+	) {
+		return .Database
+	}
+	previous: App_State
+	previous.sources = state.sources
+	previous.transcripts = state.transcripts
+	previous.hints = state.hints
+	previous.exercises = state.exercises
+	state.sources = imported.sources
+	state.transcripts = imported.transcripts
+	state.hints = imported.hints
+	state.exercises = imported.exercises
+	imported.sources = nil
+	imported.transcripts = {}
+	imported.hints = nil
+	imported.exercises = nil
+	app_state_collections_destroy(&previous)
+	invalidate_transcript_matches()
+	return .None
 }
 
 database_integrity_ok :: proc(database: ^SQLite_DB) -> bool {

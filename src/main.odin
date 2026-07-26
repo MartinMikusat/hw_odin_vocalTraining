@@ -114,6 +114,14 @@ send_address: rawptr
 system_address: rawptr
 last_imported_source: int = -1
 
+Import_Phase :: enum {
+	Preparing,
+	Validating_Existing_Media,
+	Downloading,
+	Validating_Downloaded_Media,
+	Rebuilding_Exercises,
+}
+
 Import_Job :: struct {
 	thread: ^thread.Thread,
 	completion_target: Id,
@@ -147,11 +155,17 @@ Import_Job :: struct {
 	process: os2.Process,
 	has_process: bool,
 	cancelled: bool,
+	phase: Import_Phase,
+	library_recovery_source: bool,
+	recovery_index: int,
+	recovery_total: int,
+	reuse_existing_media: bool,
 }
 
 Import_Quality :: struct {
 	video_id: string,
 	height: int,
+	exact: bool,
 }
 
 Export_Operation :: enum {
@@ -169,6 +183,22 @@ Export_Job :: struct {
 	operation: Export_Operation,
 	success: bool,
 }
+
+Library_Recovery_Entry :: struct {
+	video_id: string,
+	height:   int,
+}
+
+Library_Recovery :: struct {
+	entries:   [dynamic]Library_Recovery_Entry,
+	next:      int,
+	recovered: int,
+	failed:    int,
+	cancelled: bool,
+}
+
+library_recovery: ^Library_Recovery
+pending_library_import: App_State
 
 Source_Metadata_Job :: struct {
 	thread: ^thread.Thread,
@@ -424,11 +454,54 @@ download_progress_status :: proc(contents: string) -> (string, bool) {
 	return fmt.tprintf("Downloading %s / %s / %s / ETA %s", percent, total, speed, eta), true
 }
 
+import_job_set_phase :: proc(job: ^Import_Job, phase: Import_Phase) {
+	sync.mutex_lock(&job.process_mutex)
+	job.phase = phase
+	sync.mutex_unlock(&job.process_mutex)
+}
+
+import_job_phase :: proc(job: ^Import_Job) -> Import_Phase {
+	sync.mutex_lock(&job.process_mutex)
+	phase := job.phase
+	sync.mutex_unlock(&job.process_mutex)
+	return phase
+}
+
+import_progress_status :: proc(job: ^Import_Job, contents: string) -> string {
+	prefix := ""
+	if job.library_recovery_source {
+		prefix = fmt.tprintf(
+			"Recovering source %d of %d: ",
+			job.recovery_index,
+			job.recovery_total,
+		)
+	}
+	switch import_job_phase(job) {
+	case .Preparing:
+		return fmt.tprintf("%spreparing media", prefix)
+	case .Validating_Existing_Media:
+		return fmt.tprintf("%svalidating existing media", prefix)
+	case .Downloading:
+		if status, ok := download_progress_status(contents); ok {
+			if strings.contains(status, "Downloading 100.0%") &&
+			   strings.has_suffix(status, "ETA NA") {
+				return fmt.tprintf("%sfinalizing downloaded media", prefix)
+			}
+			return fmt.tprintf("%s%s", prefix, status)
+		}
+		return fmt.tprintf("%sstarting media download", prefix)
+	case .Validating_Downloaded_Media:
+		return fmt.tprintf("%svalidating downloaded media", prefix)
+	case .Rebuilding_Exercises:
+		return fmt.tprintf("%srebuilding exercises", prefix)
+	}
+	return fmt.tprintf("%spreparing media", prefix)
+}
+
 refresh_import_progress :: proc() {
 	if import_job == nil {return}
-	contents, read_ok := os.read_entire_file(import_progress_path(), context.temp_allocator)
-	if !read_ok {return}
-	if status, ok := download_progress_status(string(contents)); ok {set_text(state.status, status)}
+	contents, _ := os.read_entire_file(import_progress_path(), context.temp_allocator)
+	set_text(state.status, import_progress_status(import_job, string(contents)))
 }
 
 embedded_helper_path :: proc(executable_path, name: string) -> string {
@@ -861,7 +934,13 @@ import_job_create :: proc(input: string, replace_video_id := "") -> ^Import_Job 
 	if len(replace_video_id) == 0 {
 		for result in source_probe_results {
 			if result.selected_height > 0 {
-				append(&job.qualities, Import_Quality{strings.clone(result.video_id, allocator), result.selected_height})
+				append(
+					&job.qualities,
+					Import_Quality {
+						video_id = strings.clone(result.video_id, allocator),
+						height = result.selected_height,
+					},
+				)
 			}
 		}
 	}
@@ -920,14 +999,23 @@ import_job_is_cancelled :: proc(job: ^Import_Job) -> bool {
 	return cancelled
 }
 
-download_format_selector :: proc(maximum_height: int) -> string {
+download_format_selector :: proc(maximum_height: int, exact := false) -> string {
 	if maximum_height <= 0 {return "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4][vcodec^=avc1]"}
+	if exact {
+		return fmt.tprintf(
+			"bv*[height=%d][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height=%d][ext=mp4][vcodec^=avc1]",
+			maximum_height,
+			maximum_height,
+		)
+	}
 	return fmt.tprintf("bv*[height<=%d][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=%d][ext=mp4][vcodec^=avc1]", maximum_height, maximum_height)
 }
 
-import_job_selected_height :: proc(job: ^Import_Job, video_id: string) -> int {
-	for quality in job.qualities {if quality.video_id == video_id {return quality.height}}
-	return 0
+import_job_selected_quality :: proc(job: ^Import_Job, video_id: string) -> (int, bool) {
+	for quality in job.qualities {
+		if quality.video_id == video_id {return quality.height, quality.exact}
+	}
+	return 0, false
 }
 
 staged_source_cleanup :: proc(directory, video_id: string) {
@@ -979,14 +1067,20 @@ staged_source_commit :: proc(directory, video_id: string) -> bool {
 	return os.rename(fmt.tprintf("%s/%s", directory, media_name), fmt.tprintf("%s/%s.mp4", directory, video_id))
 }
 
-import_job_run_download :: proc(job: ^Import_Job, url, output: string, maximum_height := 0) -> bool {
+import_job_run_download :: proc(
+	job: ^Import_Job,
+	url, output: string,
+	maximum_height := 0,
+	exact_height := false,
+) -> bool {
 	progress_file, progress_error := os2.open(import_progress_path(), {.Write, .Create, .Trunc, .Inheritable})
 	if progress_error != nil {return false}
 	defer os2.close(progress_file)
 	log_file, log_error := os2.open(diagnostic_log_path("yt-dlp"), {.Write, .Create, .Append, .Inheritable})
 	if log_error != nil {return false}
 	defer os2.close(log_file)
-	format_selector := download_format_selector(maximum_height)
+	import_job_set_phase(job, .Downloading)
+	format_selector := download_format_selector(maximum_height, exact_height)
 	command := [24]string{
 		helper_command("yt-dlp"), "--no-playlist", "--force-overwrites", "--write-info-json",
 		"--write-subs", "--write-auto-subs", "--sub-langs", "en,.*-orig", "--sub-format", "json3",
@@ -1011,6 +1105,29 @@ import_job_run_download :: proc(job: ^Import_Job, url, output: string, maximum_h
 	return !cancelled && wait_error == nil && process_state.success
 }
 
+import_job_rebuild_exercises :: proc(job: ^Import_Job, source: ^Source_Video) {
+	import_job_set_phase(job, .Rebuilding_Exercises)
+	run := transmute(proc "c" (cstring) -> int)system_address
+	os.make_directory(fmt.tprintf("%s/clips", app_support_dir()))
+	for exercise in job.exercises {
+		if exercise.source_id != source.id || len(exercise.clip_path) == 0 {continue}
+		command := clip_export_command(
+			source.media_path,
+			exercise.clip_path,
+			exercise.start_seconds,
+			exercise.end_seconds,
+		)
+		c_command := strings.clone_to_cstring(command)
+		result := run(c_command)
+		delete(c_command)
+		if result == 0 {
+			job.refreshed_exercises += 1
+		} else {
+			job.failed_exercise_refreshes += 1
+		}
+	}
+}
+
 import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	video_id, valid := parse_video_id(url)
 	if !valid { return false }
@@ -1027,6 +1144,16 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 			}
 			return true
 		}
+		if job.reuse_existing_media && os.exists(source.media_path) {
+			import_job_set_phase(job, .Validating_Existing_Media)
+			if media_file_validate(source.media_path) {
+				import_job_rebuild_exercises(job, source)
+				return true
+			}
+		}
+		if job.library_recovery_source && source.metadata.height <= 0 {
+			return false
+		}
 	}
 
 	dir := app_support_dir()
@@ -1035,16 +1162,17 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	source_directory := fmt.tprintf("%s/sources", dir)
 	staged_source_cleanup(source_directory, video_id)
 	output := fmt.tprintf("%s/%s.download.%%(ext)s", source_directory, video_id)
-	if !import_job_run_download(job, url, output, import_job_selected_height(job, video_id)) {
+	selected_height, exact_height := import_job_selected_quality(job, video_id)
+	if !import_job_run_download(job, url, output, selected_height, exact_height) {
 		staged_source_cleanup(source_directory, video_id)
 		return false
 	}
+	import_job_set_phase(job, .Validating_Downloaded_Media)
 	if !staged_source_validate(source_directory, video_id) || !staged_source_commit(source_directory, video_id) {
 		job.invalid_merged_media += 1
 		staged_source_cleanup(source_directory, video_id)
 		return false
 	}
-	run := transmute(proc "c" (cstring) -> int)system_address
 	media_path := fmt.tprintf("%s/sources/%s.mp4", dir, video_id)
 	if !os.exists(media_path) {
 		job.missing_merged_media += 1
@@ -1097,14 +1225,7 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 		job.has_transcript_update = true
 	}
 	if existing != nil {
-		for exercise in job.exercises {
-			if exercise.source_id != source.id || len(exercise.clip_path) == 0 { continue }
-			command := clip_export_command(source.media_path, exercise.clip_path, exercise.start_seconds, exercise.end_seconds)
-			c_command := strings.clone_to_cstring(command)
-			result := run(c_command)
-			delete(c_command)
-			if result == 0 { job.refreshed_exercises += 1 } else { job.failed_exercise_refreshes += 1 }
-		}
+		import_job_rebuild_exercises(job, &source)
 	}
 	return true
 }
@@ -1166,6 +1287,46 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	thread.join(job.thread)
 	thread.destroy(job.thread)
 	job.thread = nil
+	if job.library_recovery_source {
+		success := false
+		if !job.cancelled && job.accepted > 0 {
+			success = import_job_apply(job) &&
+			          job.failed == 0 &&
+			          job.failed_exercise_refreshes == 0
+			refresh_sources()
+			refresh_exercises()
+		}
+		cancelled := job.cancelled
+		if library_recovery == nil {
+			import_job = nil
+			import_job_destroy(job)
+			return
+		}
+		if cancelled {
+			library_recovery.cancelled = true
+			import_job = nil
+			import_job_destroy(job)
+			library_recovery_finish()
+			return
+		}
+		if success {
+			library_recovery.recovered += 1
+		} else {
+			library_recovery.failed += 1
+			if job.accepted == 0 {
+				if source_index := source_index_for_video_id(
+					state.sources[:],
+					job.replace_video_id,
+				); source_index >= 0 {
+					state.sources[source_index].media_available = false
+				}
+			}
+		}
+		import_job = nil
+		import_job_destroy(job)
+		library_recovery_start_next()
+		return
+	}
 	defer {
 		import_job = nil
 		import_job_destroy(job)
@@ -1300,6 +1461,144 @@ on_source_metadata_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	request_next_missing_source_metadata()
 }
 
+library_recovery_destroy :: proc() {
+	if library_recovery == nil {return}
+	for &entry in library_recovery.entries {delete(entry.video_id)}
+	delete(library_recovery.entries)
+	free(library_recovery)
+	library_recovery = nil
+}
+
+library_recovery_finish :: proc() {
+	if library_recovery == nil {return}
+	recovered := library_recovery.recovered
+	failed := library_recovery.failed
+	cancelled := library_recovery.cancelled
+	library_recovery_destroy()
+	if cancelled {
+		set_text(
+			state.status,
+			fmt.tprintf(
+				"Library imported; recovery stopped after %d source(s), with %d failure(s)",
+				recovered,
+				failed,
+			),
+		)
+		return
+	}
+	if failed > 0 {
+		set_error_status(
+			fmt.tprintf(
+				"Library imported; recovered %d source(s), %d require manual refetch",
+				recovered,
+				failed,
+			),
+		)
+	} else {
+		set_success_status(
+			fmt.tprintf("Library imported and recovered %d source(s)", recovered),
+		)
+	}
+}
+
+source_index_for_video_id :: proc(sources: []Source_Video, video_id: string) -> int {
+	for source, index in sources {
+		if source.video_id == video_id {return index}
+	}
+	return -1
+}
+
+library_recovery_start_next :: proc() {
+	if library_recovery == nil || import_job != nil {return}
+	for library_recovery.next < len(library_recovery.entries) {
+		entry_index := library_recovery.next
+		entry := library_recovery.entries[entry_index]
+		library_recovery.next += 1
+		source_index := source_index_for_video_id(state.sources[:], entry.video_id)
+		if source_index < 0 {
+			library_recovery.failed += 1
+			continue
+		}
+		source := &state.sources[source_index]
+		reuse_existing := os.exists(source.media_path)
+		if !reuse_existing && entry.height <= 0 {
+			library_recovery.failed += 1
+			continue
+		}
+		job := import_job_create(source.url, source.video_id)
+		if job == nil {
+			library_recovery.failed += 1
+			continue
+		}
+		job.library_recovery_source = true
+		job.recovery_index = entry_index + 1
+		job.recovery_total = len(library_recovery.entries)
+		job.reuse_existing_media = reuse_existing
+		allocator := mem_virtual.arena_allocator(job.arena)
+		if entry.height > 0 {
+			append(
+				&job.qualities,
+				Import_Quality{
+					video_id = strings.clone(source.video_id, allocator),
+					height = entry.height,
+					exact = true,
+				},
+			)
+		}
+		worker := thread.create(import_worker)
+		if worker == nil {
+			import_job_destroy(job)
+			library_recovery.failed += 1
+			continue
+		}
+		job.thread = worker
+		worker.data = job
+		import_job = job
+		os.make_directory(app_support_dir())
+		_ = os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
+		_ = os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
+		set_text(
+			state.status,
+			fmt.tprintf(
+				"Recovering source %d of %d at %dp...",
+				entry_index + 1,
+				len(library_recovery.entries),
+				entry.height,
+			),
+		)
+		thread.start(worker)
+		return
+	}
+	library_recovery_finish()
+}
+
+library_recovery_start :: proc() -> bool {
+	if library_recovery != nil || import_job != nil {return false}
+	if len(state.sources) == 0 {
+		set_success_status("Library imported")
+		return true
+	}
+	if !require_helper("yt-dlp") || !require_helper("ffmpeg") {return false}
+	recovery := new(Library_Recovery)
+	recovery.entries = make(
+		[dynamic]Library_Recovery_Entry,
+		0,
+		len(state.sources),
+	)
+	for source in state.sources {
+		append(
+			&recovery.entries,
+			Library_Recovery_Entry {
+				video_id = strings.clone(source.video_id),
+				height = source.metadata.height,
+			},
+		)
+	}
+	library_recovery = recovery
+	library_recovery_start_next()
+	return true
+}
+
 refetch_source :: proc(source_index: int, maximum_height := 0) {
 	if import_job != nil { set_text(state.status, "An import is already running"); return }
 	if source_index < 0 || source_index >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
@@ -1309,7 +1608,13 @@ refetch_source :: proc(source_index: int, maximum_height := 0) {
 	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
 	if maximum_height > 0 {
 		allocator := mem_virtual.arena_allocator(job.arena)
-		append(&job.qualities, Import_Quality{strings.clone(source.video_id, allocator), maximum_height})
+		append(
+			&job.qualities,
+			Import_Quality {
+				video_id = strings.clone(source.video_id, allocator),
+				height = maximum_height,
+			},
+		)
 	}
 	worker := thread.create(import_worker)
 	if worker == nil { import_job_destroy(job); set_text(state.status, "Unable to start import worker"); return }
@@ -1657,6 +1962,118 @@ on_open_data_folder :: proc "c" (self: Id, command: Sel, sender: Id) {
 	msg_void_id(workspace, sel_registerName("openURL:"), url)
 }
 
+library_transfer_busy :: proc() -> bool {
+	return import_job != nil ||
+	       export_job != nil ||
+	       source_probe_job != nil ||
+	       source_metadata_job != nil ||
+	       library_recovery != nil
+}
+
+library_panel_path :: proc(save: bool) -> (string, bool) {
+	panel_class := save ? objc_getClass("NSSavePanel") : objc_getClass("NSOpenPanel")
+	panel_selector := save ? sel_registerName("savePanel") : sel_registerName("openPanel")
+	panel := msg_id(panel_class, panel_selector)
+	if panel == nil {return "", false}
+	extensions := msg_id_id(
+		objc_getClass("NSArray"),
+		sel_registerName("arrayWithObject:"),
+		nsstring("json"),
+	)
+	msg_void_id(panel, sel_registerName("setAllowedFileTypes:"), extensions)
+	msg_void_bool(panel, sel_registerName("setCanCreateDirectories:"), true)
+	if save {
+		msg_void_id(
+			panel,
+			sel_registerName("setNameFieldStringValue:"),
+			nsstring("Vocal Training Library.vocaltraining.json"),
+		)
+	} else {
+		msg_void_bool(panel, sel_registerName("setCanChooseFiles:"), true)
+		msg_void_bool(panel, sel_registerName("setCanChooseDirectories:"), false)
+		msg_void_bool(panel, sel_registerName("setAllowsMultipleSelection:"), false)
+	}
+	if msg_i64(panel, sel_registerName("runModal")) != 1 {return "", false}
+	url := msg_id(panel, sel_registerName("URL"))
+	path_value := msg_id(url, sel_registerName("path"))
+	utf8 := msg_id(path_value, sel_registerName("UTF8String"))
+	if utf8 == nil {return "", false}
+	path, clone_error := strings.clone(string(cstring(utf8)))
+	return path, clone_error == nil
+}
+
+export_library_with_panel :: proc() {
+	if library_transfer_busy() {
+		set_error_status("Wait for the active media or metadata operation")
+		return
+	}
+	path, selected := library_panel_path(true)
+	if !selected {return}
+	defer delete(path)
+	if export_error := portable_library_export(path); export_error != .None {
+		set_error_status(portable_library_error_text(export_error))
+		return
+	}
+	set_success_status(fmt.tprintf("Exported library metadata to %s", filepath.base(path)))
+	close_data_modal()
+}
+
+prepare_library_import_with_panel :: proc() {
+	if library_transfer_busy() {
+		set_error_status("Wait for the active media or metadata operation")
+		return
+	}
+	path, selected := library_panel_path(false)
+	if !selected {return}
+	defer delete(path)
+	imported, import_error := portable_library_read(path)
+	if import_error != .None {
+		set_error_status(portable_library_error_text(import_error))
+		return
+	}
+	app_state_collections_destroy(&pending_library_import)
+	pending_library_import = imported
+	ui.library_import_confirm_open = true
+	ui.library_import_pending = true
+	ui.needs_redraw = true
+}
+
+confirm_library_import :: proc() {
+	if library_transfer_busy() {
+		set_error_status("Wait for the active media or metadata operation")
+		return
+	}
+	source_count := len(pending_library_import.sources)
+	exercise_count := len(pending_library_import.exercises)
+	metal_player_clear()
+	if install_error := portable_library_install(&pending_library_import);
+	   install_error != .None {
+		set_error_status(portable_library_error_text(install_error))
+		return
+	}
+	state.active_source = -1
+	state.has_start = false
+	state.has_end = false
+	ui.active_exercise = -1
+	ui.source_scroll = 0
+	ui.transcript_scroll = 0
+	ui.exercise_scroll = 0
+	ui.data_modal_open = false
+	ui.library_import_confirm_open = false
+	ui.library_import_pending = false
+	ui.source_playback_active = false
+	refresh_sources()
+	refresh_exercises()
+	set_success_status(
+		fmt.tprintf(
+			"Imported %d source(s) and %d exercise(s)",
+			source_count,
+			exercise_count,
+		),
+	)
+	_ = library_recovery_start()
+}
+
 jobs_shutdown :: proc() {
 	if source_probe_job != nil {
 		if source_probe_job.thread != nil {
@@ -1686,6 +2103,7 @@ jobs_shutdown :: proc() {
 		import_job_destroy(import_job)
 		import_job = nil
 	}
+	library_recovery_destroy()
 	if export_job != nil {
 		if export_job.thread != nil {
 			thread.join(export_job.thread)
