@@ -17,6 +17,10 @@ EXECUTABLE="$APP/Contents/MacOS/VocalTraining"
 APP_PID=""
 STOPPING_APP=0
 MEMORY_PROFILE=${VT_MEMORY_PROFILE:-none}
+VT_APP_SUPPORT_DIR=${VT_APP_SUPPORT_DIR:-"$ROOT/build/dev-support"}
+export VT_APP_SUPPORT_DIR
+
+"$ROOT/scripts/library-fixture.sh" init
 
 fingerprint() {
   stat -f '%m:%z:%N' src/*.odin ./*.sh scripts/*.sh Info.plist 2>/dev/null | shasum | cut -d' ' -f1

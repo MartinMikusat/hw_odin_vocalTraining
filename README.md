@@ -170,6 +170,12 @@ SQLite stores sources, transcript segments, hints, exercises, and source
 metadata. The main thread commits state changes in transactions. A startup
 worker fills missing metadata from existing yt-dlp files.
 
+The repository contains the canonical development library in
+`testdata/library.sqlite3`. Development launches use `build/dev-support`, and
+tests use temporary copies. Installed builds continue to use the standard
+macOS Application Support directory. Database file paths are relative to the
+selected support directory.
+
 ### Memory ownership
 
 The renderer owns two virtual-memory arenas. The frame arena holds the control
@@ -255,6 +261,34 @@ It fingerprints the source, build scripts, and `Info.plist` every half-second.
 A successful change rebuilds and relaunches the debug app; a failed build
 leaves the currently running app untouched. Metal validation is enabled.
 Press `Ctrl-C` to stop the watcher and app.
+
+The watcher initializes `build/dev-support/library.sqlite3` from the canonical
+development library. It preserves this working copy between launches.
+
+Reset the working copy when a test scenario must start from the baseline:
+
+```sh
+./scripts/library-fixture.sh reset
+```
+
+Add representative feature data through the application. Validate and promote
+the working copy only when that data must become part of the shared baseline:
+
+```sh
+./scripts/library-fixture.sh validate
+./scripts/library-fixture.sh promote
+```
+
+Promotion validates SQLite integrity and foreign keys. It also regenerates
+`testdata/library.sql` for review. Media binaries are not committed. A fresh
+working copy therefore reports media as missing until its support directory
+contains the referenced `sources/` and `clips/` files.
+
+Run the complete test suite against an isolated copy:
+
+```sh
+./test.sh
+```
 
 If the app exits abnormally, the watcher copies the exact executable, its
 dSYM, the newest macOS crash report, the binary UUID, and the Git revision into

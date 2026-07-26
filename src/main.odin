@@ -360,6 +360,9 @@ shell_quote :: proc(s: string) -> string {
 }
 
 app_support_dir :: proc() -> string {
+	if override := getenv("VT_APP_SUPPORT_DIR"); override != nil && len(string(override)) > 0 {
+		return string(override)
+	}
 	home := getenv("HOME")
 	return fmt.tprintf("%s/Library/Application Support/VocalTraining", string(home))
 }

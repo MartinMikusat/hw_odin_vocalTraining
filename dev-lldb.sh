@@ -4,6 +4,10 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT"
 
+VT_APP_SUPPORT_DIR=${VT_APP_SUPPORT_DIR:-"$ROOT/build/dev-support"}
+export VT_APP_SUPPORT_DIR
+"$ROOT/scripts/library-fixture.sh" init
+
 ./build.sh debug
 APP="$ROOT/build/VocalTraining.app"
 EXECUTABLE="$APP/Contents/MacOS/VocalTraining"

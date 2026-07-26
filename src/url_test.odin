@@ -3,6 +3,7 @@ package main
 import "core:testing"
 import "core:encoding/json"
 import "core:os"
+import "core:path/filepath"
 import "core:strings"
 import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
@@ -105,6 +106,114 @@ source_context_file_size_uses_readable_units_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, format_file_size(1_500_000_000), "1.50 GB")
 	testing.expect_value(t, format_frame_rate(30), "30 fps")
 	testing.expect_value(t, format_frame_rate(29.97), "29.97 fps")
+}
+
+@(test)
+canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^testing.T) {
+	path, found := os.lookup_env("VT_TEST_LIBRARY")
+	defer delete(path)
+	testing.expect(t, found)
+	if !found {return}
+
+	c_path := strings.clone_to_cstring(path)
+	defer delete(c_path)
+	database: ^SQLite_DB
+	opened := sqlite3_open_v2(c_path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+
+	testing.expect(t, database_create_schema(database))
+	testing.expect(t, database_integrity_ok(database))
+	source_count, sources_counted := database_count(database, "sources")
+	segment_count, segments_counted := database_count(database, "transcript_segments")
+	hint_count, hints_counted := database_count(database, "import_hints")
+	exercise_count, exercises_counted := database_count(database, "exercises")
+	testing.expect(t, sources_counted && segments_counted && hints_counted && exercises_counted)
+	testing.expect_value(t, source_count, 7)
+	testing.expect_value(t, segment_count, 1532)
+	testing.expect_value(t, hint_count, 12)
+	testing.expect_value(t, exercise_count, 1)
+
+	loaded: App_State
+	testing.expect(t, database_load_state(database, &loaded))
+	defer {
+		for &source in loaded.sources {delete_source_video(&source)}
+		for &hint in loaded.hints {delete_import_hint(&hint)}
+		for &exercise in loaded.exercises {delete_exercise(&exercise)}
+		delete(loaded.sources)
+		delete(loaded.hints)
+		delete(loaded.exercises)
+		transcript_generation_destroy(&loaded.transcripts)
+	}
+	testing.expect_value(t, len(loaded.sources), source_count)
+	testing.expect_value(t, len(loaded.transcripts.segments), segment_count)
+	testing.expect_value(t, len(loaded.hints), hint_count)
+	testing.expect_value(t, len(loaded.exercises), exercise_count)
+	for source in loaded.sources {
+		testing.expect(t, filepath.is_abs(source.media_path))
+		found_segment := false
+		for segment in loaded.transcripts.segments {
+			if segment.source_id == source.id {
+				found_segment = true
+				break
+			}
+		}
+		testing.expect(t, found_segment)
+	}
+	for exercise in loaded.exercises {
+		source_found := false
+		for source in loaded.sources {
+			if source.id == exercise.source_id {
+				source_found = true
+				break
+			}
+		}
+		testing.expect(t, source_found)
+		testing.expect(t, filepath.is_abs(exercise.clip_path))
+	}
+
+	previous_state := state
+	previous_ui := ui
+	previous_ui_build := ui_build
+	state = loaded
+	loaded = {}
+	defer {
+		for &source in state.sources {delete_source_video(&source)}
+		for &hint in state.hints {delete_import_hint(&hint)}
+		for &exercise in state.exercises {delete_exercise(&exercise)}
+		delete(state.sources)
+		delete(state.hints)
+		delete(state.exercises)
+		transcript_generation_destroy(&state.transcripts)
+		delete(ui.transcript_matches)
+		delete(ui_build.controls)
+		state = previous_state
+		ui = previous_ui
+		ui_build = previous_ui_build
+	}
+	ui = UI_State{
+		width = 2048,
+		height = 1120,
+		player_volume = 1,
+		playback_rate = 1,
+		source_details_index = -1,
+		source_modal_refetch_index = -1,
+		transcript_active_match = -1,
+		transcript_matches_dirty = true,
+	}
+	ui.mode = .Create
+	build_ui_controls(false)
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	create_control_count := len(ui_build.controls)
+	testing.expect(t, create_control_count > 20)
+	delete(ui_build.controls)
+	ui_build.controls = nil
+
+	ui.mode = .Play
+	build_ui_controls(false)
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	testing.expect(t, len(ui_build.controls) > 4)
 }
 
 @(test)
@@ -688,6 +797,9 @@ core_text_draws_a_truncated_line_before_releasing_it_test :: proc(t: ^testing.T)
 
 @(test)
 metal_player_survives_autorelease_pool_drain_and_replacement_test :: proc(t: ^testing.T) {
+	headless, skip := os.lookup_env("VT_HEADLESS_TEST")
+	delete(headless)
+	if skip {return}
 	objc_handle := os.dlopen("/usr/lib/libobjc.A.dylib", os.RTLD_NOW)
 	testing.expect(t, objc_handle != nil)
 	testing.expect(t, os.dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", os.RTLD_NOW) != nil)

@@ -3,6 +3,7 @@ package main
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
+import "core:path/filepath"
 import "core:strings"
 import mem_virtual "core:mem/virtual"
 import "base:runtime"
@@ -252,6 +253,22 @@ database_path :: proc() -> string {
 	return fmt.tprintf("%s/library.sqlite3", app_support_dir())
 }
 
+database_file_path_for_storage :: proc(path: string) -> string {
+	root := app_support_dir()
+	prefix := fmt.tprintf("%s/", root)
+	if strings.has_prefix(path, prefix) {return path[len(prefix):]}
+	return path
+}
+
+database_file_path_for_runtime :: proc(path: string, allocator := context.allocator) -> (string, bool) {
+	if filepath.is_abs(path) {
+		copy, err := strings.clone(path, allocator)
+		return copy, err == nil
+	}
+	resolved, err := filepath.join([]string{app_support_dir(), path}, allocator)
+	return resolved, err == nil
+}
+
 database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 	return sqlite_execute(database, `
 		PRAGMA foreign_keys = ON;
@@ -308,7 +325,7 @@ database_insert_source :: proc(database: ^SQLite_DB, source: Source_Video, posit
 		sqlite_bind_text_value(statement, 2, source.video_id) &&
 		sqlite_bind_text_value(statement, 3, source.title) &&
 		sqlite_bind_text_value(statement, 4, source.url) &&
-		sqlite_bind_text_value(statement, 5, source.media_path) &&
+		sqlite_bind_text_value(statement, 5, database_file_path_for_storage(source.media_path)) &&
 		sqlite3_bind_double(statement, 6, source.duration) == SQLITE_OK &&
 		sqlite3_bind_int(statement, 7, i32(position)) == SQLITE_OK &&
 		sqlite3_bind_int(statement, 8, i32(source.metadata_status)) == SQLITE_OK &&
@@ -361,7 +378,7 @@ database_save_collections :: proc(
 		if !ok {return false}
 		bound := sqlite_bind_text_value(statement, 1, exercise.id) && sqlite_bind_text_value(statement, 2, exercise.source_id) && sqlite_bind_text_value(statement, 3, exercise.name) &&
 			sqlite3_bind_double(statement, 4, exercise.start_seconds) == SQLITE_OK && sqlite3_bind_double(statement, 5, exercise.end_seconds) == SQLITE_OK &&
-			sqlite_bind_text_value(statement, 6, exercise.clip_path) && sqlite3_bind_int(statement, 7, i32(position)) == SQLITE_OK
+			sqlite_bind_text_value(statement, 6, database_file_path_for_storage(exercise.clip_path)) && sqlite3_bind_int(statement, 7, i32(position)) == SQLITE_OK
 		stepped := bound && sqlite3_step(statement) == SQLITE_DONE
 		sqlite3_finalize(statement)
 		if !stepped {return false}
@@ -425,7 +442,10 @@ database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bo
 		source.video_id, copied = sqlite_column_string(statement, 1); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
 		source.title, copied = sqlite_column_string(statement, 2); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
 		source.url, copied = sqlite_column_string(statement, 3); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
-		source.media_path, copied = sqlite_column_string(statement, 4); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
+		stored_media_path, stored_media_path_copied := sqlite_column_string(statement, 4, context.temp_allocator)
+		if !stored_media_path_copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
+		source.media_path, copied = database_file_path_for_runtime(stored_media_path)
+		if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
 		source.duration = sqlite3_column_double(statement, 5)
 		source.metadata_status = Source_Metadata_Status(sqlite3_column_int(statement, 6))
 		source.metadata.width = int(sqlite3_column_int(statement, 7)); source.metadata.height = int(sqlite3_column_int(statement, 8)); source.metadata.fps = sqlite3_column_double(statement, 9)
@@ -466,7 +486,10 @@ database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bo
 		exercise.id, copied = sqlite_column_string(statement, 0); if !copied {sqlite3_finalize(statement); return false}
 		exercise.source_id, copied = sqlite_column_string(statement, 1); if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return false}
 		exercise.name, copied = sqlite_column_string(statement, 2); if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return false}
-		exercise.clip_path, copied = sqlite_column_string(statement, 5); if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return false}
+		stored_clip_path, stored_clip_path_copied := sqlite_column_string(statement, 5, context.temp_allocator)
+		if !stored_clip_path_copied {delete_exercise(&exercise); sqlite3_finalize(statement); return false}
+		exercise.clip_path, copied = database_file_path_for_runtime(stored_clip_path)
+		if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return false}
 		append(&exercises, exercise)
 	}
 	sqlite3_finalize(statement)
