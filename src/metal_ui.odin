@@ -163,6 +163,7 @@ UI_State :: struct {
 	has_marked_text:    bool,
 	player_volume:      f32,
 	playback_rate:      f32,
+	player_duration:    f64,
 	source_playback_active: bool,
 	source_scrubbing:   bool,
 	source_hint_menu_open: bool,
@@ -1171,8 +1172,7 @@ transcript_search_rect :: proc(transcript: UI_Rect) -> UI_Rect {
 }
 
 player_content_rect :: proc(player: UI_Rect) -> UI_Rect {
-	bottom_metadata_height := 30.0
-	if ui.mode == .Create {bottom_metadata_height = 64}
+	bottom_metadata_height := 64.0
 	header_height := 35.0
 	return UI_Rect {
 		player.x + 1,
@@ -1240,10 +1240,9 @@ source_timeline_rect :: proc(player: UI_Rect) -> UI_Rect {
 	return UI_Rect{player.x + 10, player.y + 38, max(0, player.w - 20), 18}
 }
 
-source_timeline_seconds :: proc(point: Point, player: UI_Rect) -> f64 {
-	if state.active_source < 0 || state.active_source >= len(state.sources) {return 0}
+player_timeline_seconds :: proc(point: Point, player: UI_Rect) -> f64 {
 	timeline := source_timeline_rect(player)
-	return timeline_seconds_at_point(point, timeline, state.sources[state.active_source].duration)
+	return timeline_seconds_at_point(point, timeline, ui.player_duration)
 }
 
 timeline_seconds_at_point :: proc(point: Point, timeline: UI_Rect, duration: f64) -> f64 {
@@ -1252,15 +1251,15 @@ timeline_seconds_at_point :: proc(point: Point, timeline: UI_Rect, duration: f64
 	return ratio * max(0, duration)
 }
 
-seek_source_timeline :: proc(point: Point, player: UI_Rect) {
+seek_player_timeline :: proc(point: Point, player: UI_Rect) {
 	if state.player == nil {return}
-	seek_seconds(source_timeline_seconds(point, player))
+	seek_seconds(player_timeline_seconds(point, player))
 	ui.needs_redraw = true
 }
 
-seek_source_timeline_rect :: proc(point: Point, timeline: UI_Rect) {
-	if state.player == nil || state.active_source < 0 || state.active_source >= len(state.sources) {return}
-	seek_seconds(timeline_seconds_at_point(point, timeline, state.sources[state.active_source].duration))
+seek_player_timeline_rect :: proc(point: Point, timeline: UI_Rect) {
+	if state.player == nil {return}
+	seek_seconds(timeline_seconds_at_point(point, timeline, ui.player_duration))
 	ui.needs_redraw = true
 }
 
@@ -2187,7 +2186,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		if rect.w <= 0 || rect.h <= 0 {continue}
 		push_rect(vertices, rect, field)
 	}
-	if ui.mode == .Create && state.player != nil {
+	if state.player != nil {
 		button_kinds := [7]UI_Action_Kind{
 			.Volume_Down,
 			.Volume_Up,
@@ -2208,8 +2207,8 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		timeline := ui_control_rect(.Source_Timeline)
 		track := UI_Rect{timeline.x, timeline.y + timeline.h / 2 - 2, timeline.w, 4}
 		push_rect(vertices, track, rule)
-		if state.active_source >= 0 && state.active_source < len(state.sources) {
-			duration := state.sources[state.active_source].duration
+		if ui.player_duration > 0 {
+			duration := ui.player_duration
 			seconds, has_seconds := current_seconds()
 			progress := 0.0
 			if has_seconds && duration > 0 {progress = min(max(seconds / duration, 0), 1)}
@@ -2605,15 +2604,16 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			.Center,
 			muted,
 		)
-	} else if ui.mode == .Create {
-		source := &state.sources[state.active_source]
+	} else if state.player != nil {
 		volume_down := ui_control_rect(.Volume_Down)
 		playing := msg_f32(state.player, sel_registerName("rate")) > 0
 		draw_text_in_rect(ctx, small_font, playing ? "PAUSE" : "PLAY", ui_control_rect(.Source_Play_Pause), .Center, .Center, playing ? orange : cyan)
 		draw_text_in_rect(ctx, small_font, "STOP", ui_control_rect(.Source_Stop), .Center, .Center, muted)
-		hint_count := source_hint_count(state.active_source)
-		hint_control := source_hint_control(hint_count)
-		if hint_control == .Reset {
+		hint_control := Source_Hint_Control.Reset
+		if ui.source_playback_active {
+			hint_control = source_hint_control(source_hint_count(state.active_source))
+		}
+		if hint_control == .Reset || !ui.source_playback_active {
 			draw_text_in_rect(ctx, small_font, "RESET", ui_control_rect(.Source_Reset), .Center, .Center, muted)
 		} else if hint_control == .Menu {
 			draw_timestamp_text_in_rect(ctx, small_font, format_timestamp(source_initial_seconds(state.active_source)), ui_control_rect(.Source_Hint_Menu), .Center, .Center, cyan)
@@ -2650,7 +2650,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		)
 		timestamp_rect := source_timestamp_rect(player)
 		if seconds, ok := current_seconds(); ok {
-			timestamp := fmt.tprintf("%s / %s", format_timestamp(seconds), format_timestamp(source.duration))
+			timestamp := fmt.tprintf("%s / %s", format_timestamp(seconds), format_timestamp(ui.player_duration))
 			draw_timestamp_text_in_rect(
 				ctx,
 				small_font,
@@ -2664,13 +2664,13 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"MEDIA READY",
+			ui.source_playback_active ? "MEDIA READY" : "EXERCISE READY",
 			UI_Rect{timestamp_rect.x + timestamp_rect.w + 12, player.y, 100, 30},
 			.Start,
 			.Center,
 			cyan,
 		)
-		if ui.source_hint_menu_open && hint_control == .Menu {
+		if ui.source_playback_active && ui.source_hint_menu_open && hint_control == .Menu {
 			values := source_hint_values(state.active_source, context.temp_allocator)
 			selected := source_initial_seconds(state.active_source)
 			for seconds, option_index in values {
@@ -3680,17 +3680,18 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			row.y -= 30
 		}
 	}
-	if ui.mode == .Create && state.player != nil {
+	if state.player != nil {
 		playing := msg_f32(state.player, sel_registerName("rate")) > 0
-		add_pointer_control("toggle playback from player surface", player, .Player_Surface, {.Primary_Press})
-		add_pointer_control("scrub source timeline", source_timeline_rect(player), .Source_Timeline, {.Primary_Press, .Drag})
-		add_ax_element(array, element_class, playing ? "Pause source" : "Play source", "AXButton", source_play_pause_rect(player), .Source_Play_Pause, flash_label = "play pause source")
-		add_ax_element(array, element_class, "Stop source and return to zero", "AXButton", source_stop_rect(player), .Source_Stop, flash_label = "stop source")
-		hint_count := source_hint_count(state.active_source)
-		hint_control := source_hint_control(hint_count)
-		if hint_control == .Reset {
-			add_ax_element(array, element_class, "Return to the imported source timestamp", "AXButton", source_reset_rect(player), .Source_Reset, flash_label = "reset source timestamp")
-		} else if hint_control == .Menu {
+		media_name := ui.source_playback_active ? "source" : "exercise"
+		add_pointer_control(fmt.tprintf("toggle %s playback from player surface", media_name), player, .Player_Surface, {.Primary_Press})
+		add_pointer_control(fmt.tprintf("scrub %s timeline", media_name), source_timeline_rect(player), .Source_Timeline, {.Primary_Press, .Drag})
+		add_ax_element(array, element_class, fmt.tprintf("%s %s", playing ? "Pause" : "Play", media_name), "AXButton", source_play_pause_rect(player), .Source_Play_Pause, flash_label = fmt.tprintf("play pause %s", media_name))
+		add_ax_element(array, element_class, fmt.tprintf("Stop %s and return to zero", media_name), "AXButton", source_stop_rect(player), .Source_Stop, flash_label = fmt.tprintf("stop %s", media_name))
+		hint_control := Source_Hint_Control.Reset
+		if ui.source_playback_active {
+			hint_control = source_hint_control(source_hint_count(state.active_source))
+		}
+		if hint_control == .Menu {
 			add_ax_element(array, element_class, fmt.tprintf("Source timestamp %s", format_timestamp(source_initial_seconds(state.active_source))), "AXButton", source_reset_rect(player), .Source_Hint_Menu, flash_label = "select source timestamp")
 			if ui.source_hint_menu_open {
 				values := source_hint_values(state.active_source, context.temp_allocator)
@@ -3710,13 +3711,22 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				}
 			}
 		}
-		add_ax_element(array, element_class, "Decrease source playback speed", "AXButton", source_speed_down_rect(player), .Speed_Down, flash_label = "slower")
-		add_ax_element(array, element_class, "Increase source playback speed", "AXButton", source_speed_up_rect(player), .Speed_Up, flash_label = "faster")
+		reset_label := "Return to the imported source timestamp"
+		reset_flash_label := "reset source timestamp"
+		if !ui.source_playback_active {
+			reset_label = "Return to the start of the exercise"
+			reset_flash_label = "reset exercise"
+		}
+		if hint_control == .Reset || !ui.source_playback_active {
+			add_ax_element(array, element_class, reset_label, "AXButton", source_reset_rect(player), .Source_Reset, flash_label = reset_flash_label)
+		}
+		add_ax_element(array, element_class, fmt.tprintf("Decrease %s playback speed", media_name), "AXButton", source_speed_down_rect(player), .Speed_Down, flash_label = "slower")
+		add_ax_element(array, element_class, fmt.tprintf("Increase %s playback speed", media_name), "AXButton", source_speed_up_rect(player), .Speed_Up, flash_label = "faster")
 		percent := volume_percent(ui.player_volume)
 		add_ax_element(
 			array,
 			element_class,
-			fmt.tprintf("Decrease source volume, %d percent", percent),
+			fmt.tprintf("Decrease %s volume, %d percent", media_name, percent),
 			"AXButton",
 			source_volume_down_rect(player),
 			.Volume_Down,
@@ -3725,7 +3735,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		add_ax_element(
 			array,
 			element_class,
-			fmt.tprintf("Increase source volume, %d percent", percent),
+			fmt.tprintf("Increase %s volume, %d percent", media_name, percent),
 			"AXButton",
 			source_volume_up_rect(player),
 			.Volume_Up,
@@ -3870,11 +3880,11 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 	case .Player_Surface:
 		on_toggle_playback(nil, nil, nil)
 	case .Source_Stop:
-		stop_source_playback()
+		stop_player_playback()
 	case .Source_Timeline:
 		return false
 	case .Source_Reset:
-		reset_source_playback()
+		reset_player_playback()
 	case .Source_Hint_Menu:
 		ui.source_hint_menu_open = !ui.source_hint_menu_open
 	case .Source_Hint:
@@ -4067,12 +4077,12 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Source_Stop},
-		"Stop source",
-		"Stop source playback and seek to zero",
+		"Stop playback",
+		"Stop the loaded source or exercise and seek to zero",
 		"Command",
 		[]string{"transport", "zero"},
-		palette_condition(create_player),
-		"Available with a loaded source in Create mode",
+		palette_condition(PALETTE_CONTEXT_PLAYER),
+		"Available after loading a source or exercise",
 	)
 	create_timestamps := command_palette.Context_Mask(
 		u64(create_player) | u64(PALETTE_CONTEXT_TIMESTAMPS),
@@ -4087,6 +4097,19 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		palette_condition(create_timestamps),
 		"Available when the loaded source has an imported timestamp",
 	)
+	play_player := command_palette.Context_Mask(
+		u64(PALETTE_CONTEXT_PLAY) | u64(PALETTE_CONTEXT_PLAYER),
+	)
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Source_Reset},
+		"Reset exercise",
+		"Seek to the start of the loaded exercise",
+		"Command",
+		[]string{"transport", "zero"},
+		palette_condition(play_player),
+		"Available after loading an exercise in Play mode",
+	)
 	transport_actions := [4]UI_Action{
 		{kind = .Speed_Down},
 		{kind = .Speed_Up},
@@ -4095,10 +4118,10 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 	}
 	transport_titles := [4]string{"Decrease speed", "Increase speed", "Decrease volume", "Increase volume"}
 	transport_subtitles := [4]string{
-		"Reduce source playback speed by 0.1x",
-		"Increase source playback speed by 0.1x",
-		"Reduce source volume by 10 percent",
-		"Increase source volume by 10 percent",
+		"Reduce playback speed by 0.1x",
+		"Increase playback speed by 0.1x",
+		"Reduce volume by 10 percent",
+		"Increase volume by 10 percent",
 	}
 	for action, index in transport_actions {
 		append_command_palette_entry(
@@ -4108,8 +4131,8 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 			transport_subtitles[index],
 			"Command",
 			nil,
-			palette_condition(create_player),
-			"Available with a loaded source in Create mode",
+			palette_condition(PALETTE_CONTEXT_PLAYER),
+			"Available after loading a source or exercise",
 		)
 	}
 	append_command_palette_entry(
@@ -4688,6 +4711,7 @@ metal_player_clear :: proc() {
 	ui.audio_engine, ui.audio_player = nil, nil
 	ui.audio_pitch, ui.audio_file = nil, nil
 	ui.audio_start_frame = 0
+	ui.player_duration = 0
 	if player != nil {
 		msg_void(player, sel_registerName("pause"))
 		msg_void(player, sel_registerName("release"))
@@ -4814,7 +4838,7 @@ activate_registered_target_at_point :: proc(point: Point) -> bool {
 		place_caret_in_text_field(ui.exercise_name, control.rect, point)
 	case .Source_Timeline:
 		ui.source_scrubbing = true
-		seek_source_timeline_rect(point, control.rect)
+		seek_player_timeline_rect(point, control.rect)
 	case:
 		return activate_ui_action(control.action)
 	}
@@ -4914,9 +4938,9 @@ on_metal_mouse_dragged :: proc "c" (self: Id, command: Sel, event: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	ui.mouse = msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
-	if ui.source_scrubbing && ui.mode == .Create {
+	if ui.source_scrubbing {
 		control := find_ui_control_by_action(.Source_Timeline)
-		if control != nil && .Drag in control.flags {seek_source_timeline_rect(ui.mouse, control.rect)}
+		if control != nil && .Drag in control.flags {seek_player_timeline_rect(ui.mouse, control.rect)}
 	}
 	ui.needs_redraw = true
 }

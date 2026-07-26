@@ -72,10 +72,12 @@ Use the transcript search field to rank fuzzy caption matches. Clear the field
 to restore the transcript's time order.
 Mark the start and end of a useful section, then commit the range as an
 exercise. Saved exercises appear in the exercise bank and play as standalone
-clips when selected. The Source Monitor volume controls adjust playback in 10%
-steps and retain that level when another source is loaded during the session.
-Its transport can play, pause, stop at zero, reset to the imported URL
-timestamp, and scrub across the complete source.
+clips when selected. The Source Monitor and Practice Monitor use the same
+playback controls. The volume controls adjust playback in 10% steps and retain
+that level when another source or exercise is loaded during the session. The
+transport can play, pause, stop at zero, change speed, change volume, and scrub
+across the loaded media. Source reset seeks to the imported URL timestamp.
+Exercise reset seeks to the start of the clip.
 If a source has multiple imported timestamps, the Reset control becomes a
 timestamp selector. Selecting a value seeks there and saves it as the source's
 active timestamp.
@@ -90,6 +92,11 @@ keys to move, Return to select, and Escape to close the palette. Commands that
 do not apply to the current mode remain visible with their unavailable reason.
 Selecting a source switches to Create and loads it. Selecting an exercise
 switches to Play and starts it.
+
+If an exercise clip file is missing, select that exercise to rebuild it from
+the saved source file and time range. The app updates the existing exercise
+record and starts playback after the rebuild. If the source file is also
+missing, refetch the source first.
 
 Press **/** when no text field has focus to show keyboard labels on all visible
 discrete controls. Each label is a compact mnemonic with two or three

@@ -154,13 +154,19 @@ Import_Quality :: struct {
 	height: int,
 }
 
+Export_Operation :: enum {
+	Save,
+	Preview,
+	Repair,
+}
+
 Export_Job :: struct {
 	thread: ^thread.Thread,
 	completion_target: Id,
 	arena: ^mem_virtual.Arena,
 	exercise: Exercise,
 	source_path: string,
-	preview: bool,
+	operation: Export_Operation,
 	success: bool,
 }
 
@@ -592,6 +598,20 @@ valid_exercise_range :: proc(start, end, source_duration: f64) -> bool {
 	return start >= 0 && end > start && (source_duration <= 0 || end <= source_duration)
 }
 
+source_index_for_id :: proc(sources: []Source_Video, source_id: string) -> int {
+	for source, index in sources {
+		if source.id == source_id {return index}
+	}
+	return -1
+}
+
+exercise_index_for_id :: proc(exercises: []Exercise, exercise_id: string) -> int {
+	for exercise, index in exercises {
+		if exercise.id == exercise_id {return index}
+	}
+	return -1
+}
+
 seek_video_seconds :: proc(seconds: f64) {
 	if state.player == nil { return }
 	t := CMTime{value=i64(seconds*600), timescale=600, flags=1}
@@ -611,6 +631,13 @@ seek_seconds :: proc(seconds: f64) {
 	resume := msg_f32(state.player, sel_registerName("rate")) > 0
 	seek_video_seconds(seconds)
 	metal_audio_seek(seconds, resume)
+}
+
+start_loaded_playback_at :: proc(seconds: f64) {
+	if state.player == nil {return}
+	seek_seconds(seconds)
+	msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
+	metal_audio_play()
 }
 
 source_initial_seconds :: proc(source_index: int) -> f64 {
@@ -670,7 +697,7 @@ select_source_hint :: proc(source_index: int, seconds: f64) -> bool {
 	return true
 }
 
-stop_source_playback :: proc() {
+stop_player_playback :: proc() {
 	if state.player == nil {return}
 	msg_void(state.player, sel_registerName("pause"))
 	metal_audio_pause()
@@ -678,9 +705,13 @@ stop_source_playback :: proc() {
 	ui.needs_redraw = true
 }
 
-reset_source_playback :: proc() {
-	if state.player == nil || state.active_source < 0 {return}
-	seek_seconds(source_initial_seconds(state.active_source))
+reset_player_playback :: proc() {
+	if state.player == nil {return}
+	seconds := 0.0
+	if ui.source_playback_active && state.active_source >= 0 {
+		seconds = source_initial_seconds(state.active_source)
+	}
+	seek_seconds(seconds)
 	ui.needs_redraw = true
 }
 
@@ -697,6 +728,7 @@ load_source_player :: proc(index: int) -> bool {
 	}
 	path := source.media_path
 	if !metal_player_load(path) {metal_player_clear(); return false}
+	ui.player_duration = source.duration
 	set_source_playback_active(true)
 	state.has_start, state.has_end = false, false
 	set_text(state.exercise_name_input, "")
@@ -1323,7 +1355,11 @@ on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 	name := fmt.tprintf("%s Exercise %d", source.title, number)
 	entered := strings.trim_space(field_text(state.exercise_name_input))
 	if len(entered) > 0 { name = entered }
-	job := export_job_create(Exercise{id=id, source_id=source.id, name=name, start_seconds=state.range_start, end_seconds=state.range_end}, source.media_path, false)
+	job := export_job_create(
+		Exercise{id=id, source_id=source.id, name=name, start_seconds=state.range_start, end_seconds=state.range_end},
+		source.media_path,
+		.Save,
+	)
 	if job == nil { set_text(state.status, "Unable to allocate export job"); return }
 	export_job = job
 	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
@@ -1374,7 +1410,11 @@ on_preview :: proc "c" (self: Id, command: Sel, sender: Id) {
 		return
 	}
 	source := &state.sources[state.active_source]
-	job := export_job_create(Exercise{id="preview", source_id=source.id, name="Range Preview", start_seconds=state.range_start, end_seconds=state.range_end}, source.media_path, true)
+	job := export_job_create(
+		Exercise{id="preview", source_id=source.id, name="Range Preview", start_seconds=state.range_start, end_seconds=state.range_end},
+		source.media_path,
+		.Preview,
+	)
 	if job == nil { set_text(state.status, "Unable to allocate preview job"); return }
 	export_job = job
 	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
@@ -1388,7 +1428,11 @@ export_job_destroy :: proc(job: ^Export_Job) {
 	free(job)
 }
 
-export_job_create :: proc(exercise: Exercise, source_path: string, preview: bool) -> ^Export_Job {
+export_job_create :: proc(
+	exercise: Exercise,
+	source_path: string,
+	operation: Export_Operation,
+) -> ^Export_Job {
 	arena, ok := growing_arena_create()
 	if !ok { return nil }
 	job := new(Export_Job)
@@ -1399,7 +1443,7 @@ export_job_create :: proc(exercise: Exercise, source_path: string, preview: bool
 	if !copied { export_job_destroy(job); return nil }
 	job.exercise = copy
 	job.source_path = strings.clone(source_path, allocator)
-	job.preview = preview
+	job.operation = operation
 	worker := thread.create(export_worker)
 	if worker == nil { export_job_destroy(job); return nil }
 	job.thread = worker
@@ -1427,14 +1471,44 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		export_job_destroy(job)
 	}
 	if !job.success { set_text(state.status, fmt.tprintf("ffmpeg failed; details: %s", diagnostic_log_path("ffmpeg"))); return }
-	if job.preview {
+	if job.operation == .Preview {
 		if !metal_player_load(job.exercise.clip_path) {
 			set_text(state.status, "Unable to load the exported preview")
 			return
 		}
+		ui.player_duration = job.exercise.end_seconds - job.exercise.start_seconds
 		set_source_playback_active(false)
-		msg_void(state.player, sel_registerName("play"))
+		start_loaded_playback_at(0)
 		set_text(state.status, fmt.tprintf("Previewing %s", format_timestamp(job.exercise.end_seconds-job.exercise.start_seconds)))
+		return
+	}
+	if job.operation == .Repair {
+		index := exercise_index_for_id(state.exercises[:], job.exercise.id)
+		if index < 0 {
+			set_text(state.status, "The rebuilt exercise is no longer in the library")
+			return
+		}
+		repaired, copied := clone_exercise(job.exercise)
+		if !copied {
+			set_text(state.status, "Unable to store the rebuilt exercise")
+			return
+		}
+		delete_exercise(&state.exercises[index])
+		state.exercises[index] = repaired
+		if !save_library() {
+			set_text(state.status, "The clip was rebuilt, but the library update failed")
+			return
+		}
+		refresh_exercises()
+		if !metal_player_load(repaired.clip_path) {
+			set_text(state.status, "The clip was rebuilt, but it could not be loaded")
+			return
+		}
+		ui.player_duration = repaired.end_seconds - repaired.start_seconds
+		set_source_playback_active(false)
+		start_loaded_playback_at(0)
+		ui.active_exercise = index
+		set_success_status(fmt.tprintf("Rebuilt and playing %s", repaired.name))
 		return
 	}
 	exercise, copied := clone_exercise(job.exercise)
@@ -1471,13 +1545,44 @@ on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if sender != nil { index = int(msg_uint(sender, sel_registerName("tag"))) }
 	if index < 0 || index >= len(state.exercises) { return }
 	exercise := &state.exercises[index]
-	if !os.exists(exercise.clip_path) { set_text(state.status, "The exported clip file is missing"); return }
+	if !os.exists(exercise.clip_path) {
+		if export_job != nil {
+			set_text(state.status, "Wait for the active clip export to finish")
+			return
+		}
+		source_index := source_index_for_id(state.sources[:], exercise.source_id)
+		if source_index < 0 {
+			set_text(state.status, "The original source is no longer in the library")
+			return
+		}
+		source := &state.sources[source_index]
+		if !source.media_available || !os.exists(source.media_path) {
+			set_text(state.status, "The original source file is missing. Refetch the source before rebuilding this exercise.")
+			return
+		}
+		if !valid_exercise_range(exercise.start_seconds, exercise.end_seconds, source.duration) {
+			set_text(state.status, "The saved exercise range is not valid for its source")
+			return
+		}
+		if !require_helper("ffmpeg") {return}
+		job := export_job_create(exercise^, source.media_path, .Repair)
+		if job == nil {
+			set_text(state.status, "Unable to allocate the exercise rebuild job")
+			return
+		}
+		export_job = job
+		os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
+		set_text(state.status, fmt.tprintf("Rebuilding missing clip for %s...", exercise.name))
+		thread.start(job.thread)
+		return
+	}
 	if !metal_player_load(exercise.clip_path) {
 		set_text(state.status, "Unable to load the selected exercise")
 		return
 	}
+	ui.player_duration = exercise.end_seconds - exercise.start_seconds
 	set_source_playback_active(false)
-	msg_void(state.player, sel_registerName("play"))
+	start_loaded_playback_at(0)
 	ui.active_exercise = index
 	set_text(state.status, fmt.tprintf("Playing %s", exercise.name))
 }

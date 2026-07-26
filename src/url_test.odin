@@ -1382,9 +1382,31 @@ source_timeline_maps_and_clamps_pointer_position_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-source_transport_and_timeline_stay_inside_player_test :: proc(t: ^testing.T) {
-	player := UI_Rect{300, 100, 580, 360}
-	controls := [7]UI_Rect{source_play_pause_rect(player), source_stop_rect(player), source_reset_rect(player), source_speed_down_rect(player), source_speed_value_rect(player), source_speed_up_rect(player), source_timeline_rect(player)}
+source_and_exercise_id_lookups_return_stable_indices_test :: proc(t: ^testing.T) {
+	sources := []Source_Video{{id="source-a"}, {id="source-b"}}
+	exercises := []Exercise{{id="exercise-a"}, {id="exercise-b"}}
+	testing.expect_value(t, source_index_for_id(sources, "source-b"), 1)
+	testing.expect_value(t, source_index_for_id(sources, "missing"), -1)
+	testing.expect_value(t, exercise_index_for_id(exercises, "exercise-a"), 0)
+	testing.expect_value(t, exercise_index_for_id(exercises, "missing"), -1)
+}
+
+@(test)
+player_transport_and_timeline_stay_inside_player_test :: proc(t: ^testing.T) {
+	player := UI_Rect{300, 100, 1000, 360}
+	controls := [11]UI_Rect {
+		source_play_pause_rect(player),
+		source_stop_rect(player),
+		source_reset_rect(player),
+		source_speed_down_rect(player),
+		source_speed_value_rect(player),
+		source_speed_up_rect(player),
+		source_volume_down_rect(player),
+		source_volume_value_rect(player),
+		source_volume_up_rect(player),
+		source_timestamp_rect(player),
+		source_timeline_rect(player),
+	}
 	for rect in controls {
 		testing.expect(t, rect.x >= player.x && rect.x+rect.w <= player.x+player.w)
 		testing.expect(t, rect.y >= player.y && rect.y+rect.h <= player.y+player.h)
