@@ -23,7 +23,7 @@ export VT_APP_SUPPORT_DIR
 "$ROOT/scripts/library-fixture.sh" init
 
 fingerprint() {
-  stat -f '%m:%z:%N' src/*.odin ./*.sh scripts/*.sh Info.plist 2>/dev/null | shasum | cut -d' ' -f1
+  stat -f '%m:%z:%N' src/*.odin ./*.sh scripts/*.sh Info.plist resources/fonts/* resources/icons/iconoir/* 2>/dev/null | shasum | cut -d' ' -f1
 }
 
 stop_app() {

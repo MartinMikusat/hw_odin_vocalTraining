@@ -27,6 +27,11 @@ operation. It prefers executables packaged in
 The application bundles its Iosevka Regular interface font. The user does not
 need to install the font.
 
+The application opens as a square, borderless window without a native shadow.
+Use the three controls at the upper left to close, minimize, or zoom the window.
+Drag the title strip to move the window. Drag a window edge or corner to resize
+it. The minimum window size is 1100 by 720 points.
+
 The application stores its SQLite library and downloaded media in
 `~/Library/Application Support/VocalTraining`. It migrates and removes the old
 `library.json` file after it verifies the new database. Only download media you
@@ -247,15 +252,19 @@ real task is active.
 
 ### Architecture
 
-A thin AppKit shell creates the window and forwards input. Odin calculates
-every visible control, while Metal renders the interface through one
-`CAMetalLayer`. The custom Metal view conforms to `NSTextInputClient` and
-routes typing through `interpretKeyEvents`, so Command shortcuts and input
-methods stay on the AppKit path. AVPlayer decodes muted video, and Core Video
-maps its frames into Metal textures. AVAudioEngine routes audio through a
-time-pitch unit, so speed changes preserve vocal pitch. Audio configuration
-notifications restart and reschedule this graph when the default output device
-changes.
+A thin AppKit shell creates a borderless window and forwards input. The window
+opens on the complete visible screen and has a minimum size of 1100 by 720
+points. Odin calculates every visible control, including the custom close,
+minimize, and zoom controls. The control registry supplies pointer,
+Accessibility, and Flash input for these controls. Metal renders the interface
+through one `CAMetalLayer`.
+
+The custom Metal view conforms to `NSTextInputClient` and routes typing through
+`interpretKeyEvents`. Command shortcuts and input methods stay on the AppKit
+path. AVPlayer decodes muted video, and Core Video maps its frames into Metal
+textures. AVAudioEngine routes audio through a time-pitch unit, so speed
+changes preserve vocal pitch. Audio configuration notifications restart and
+reschedule this graph when the default output device changes.
 
 The interface uses the bundled Iosevka Regular font and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface, including the compact
@@ -273,6 +282,15 @@ Bundled font provenance:
 - Source: [`PkgTTF-Iosevka-34.7.0.zip`](https://github.com/be5invis/Iosevka/releases/download/v34.7.0/PkgTTF-Iosevka-34.7.0.zip)
 - SHA-256: `2fe6f742431e66f218b713ecca986370612bc27594a96a8ab45a41e9ebbaf5e3`
 - License: [SIL Open Font License, Version 1.1](resources/fonts/IOSEVKA-LICENSE.md)
+
+Bundled window icon provenance:
+
+- Assets: Iconoir xmark, minus, and maximize from version 7.11.1
+- Source: [Iconoir commit `59e3d5d969c59b3fb652a556795e08c1b3371c5b`](https://github.com/iconoir-icons/iconoir/tree/59e3d5d969c59b3fb652a556795e08c1b3371c5b/icons/regular)
+- Xmark SHA-256: `61aa0a4913a440aaafcc45064a87e24fe8eb22ba4abc4c5ef020530928ed8daf`
+- Minus SHA-256: `babb05bca016bffdd38cbd1dcaeef6ccdf42fc8654124dee169a412eeed6d425`
+- Maximize SHA-256: `3a3048cdc0e8e4aef5d68353b5434f0c0e074dc672b6c0abf25a5a64bc5cc8f4`
+- License: [MIT License](resources/icons/iconoir/LICENSE)
 
 The application builds each visible interactive control once per frame. Each
 control record contains a stable functional name, rectangle, action, state,

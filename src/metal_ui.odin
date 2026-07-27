@@ -32,6 +32,14 @@ foreign core_graphics {
 	CGContextClearRect :: proc "c" (ctx: rawptr, rect: Rect) ---
 	CGContextFillRect :: proc "c" (ctx: rawptr, rect: Rect) ---
 	CGContextSetRGBFillColor :: proc "c" (ctx: rawptr, red, green, blue, alpha: f64) ---
+	CGContextSetRGBStrokeColor :: proc "c" (ctx: rawptr, red, green, blue, alpha: f64) ---
+	CGContextSetLineWidth :: proc "c" (ctx: rawptr, width: f64) ---
+	CGContextSetLineCap :: proc "c" (ctx: rawptr, cap: i32) ---
+	CGContextSetLineJoin :: proc "c" (ctx: rawptr, join: i32) ---
+	CGContextBeginPath :: proc "c" (ctx: rawptr) ---
+	CGContextMoveToPoint :: proc "c" (ctx: rawptr, x, y: f64) ---
+	CGContextAddLineToPoint :: proc "c" (ctx: rawptr, x, y: f64) ---
+	CGContextStrokePath :: proc "c" (ctx: rawptr) ---
 	CGContextSaveGState :: proc "c" (ctx: rawptr) ---
 	CGContextRestoreGState :: proc "c" (ctx: rawptr) ---
 	CGContextClipToRect :: proc "c" (ctx: rawptr, rect: Rect) ---
@@ -205,6 +213,9 @@ UI_State :: struct {
 	url_probe_due_tick: uint,
 	url_probe_pending:  bool,
 	save_source_browser_choice: bool,
+	resize_edges:        u8,
+	resize_start_mouse:  Point,
+	resize_start_frame:  Rect,
 	needs_redraw:       bool,
 }
 
@@ -242,6 +253,11 @@ CF_Range :: struct {
 UI_FONT_NAME :: "Iosevka"
 SMALL_FONT_SIZE :: 10.5
 APP_HEADER_HEIGHT :: 38.0
+WINDOW_STYLE :: uint(14)
+WINDOW_MINIMIZE_STYLE :: uint(15)
+WINDOW_RESIZE_INSET :: 6.0
+WINDOW_MIN_WIDTH :: 1100.0
+WINDOW_MIN_HEIGHT :: 720.0
 TRACE_FOREIGN_LIFETIMES :: #config(VT_TRACE_FOREIGN_LIFETIMES, false)
 
 Text_Align :: enum {
@@ -267,6 +283,9 @@ UI_Action_Kind :: enum {
 	Command_Palette_Search,
 	Command_Palette_Result,
 	Command_Palette_Disabled,
+	Window_Close,
+	Window_Minimize,
+	Window_Zoom,
 	Mode_Toggle,
 	Open_Source_Modal,
 	Cancel_Source_Modal,
@@ -1054,6 +1073,72 @@ app_header_rect_for_size :: proc(width, height: f64) -> UI_Rect {
 
 app_header_rect :: proc() -> UI_Rect {
 	return app_header_rect_for_size(ui.width, ui.height)
+}
+
+window_control_rect_for_size :: proc(index: int, height: f64) -> UI_Rect {
+	return UI_Rect{
+		38*f64(index),
+		height-31,
+		30,
+		30,
+	}
+}
+
+window_control_rect :: proc(index: int) -> UI_Rect {
+	return window_control_rect_for_size(index, ui.height)
+}
+
+window_icon_rect :: proc(index: int) -> UI_Rect {
+	control := window_control_rect(index)
+	return UI_Rect{control.x+5, control.y+5, 20, 20}
+}
+
+app_title_rect_for_size :: proc(width, height: f64) -> UI_Rect {
+	mode := mode_button_rect_for_size(width, height)
+	x := 122.0
+	return UI_Rect{
+		x,
+		height-APP_HEADER_HEIGHT+2,
+		max(0, mode.x-x-12),
+		APP_HEADER_HEIGHT-2,
+	}
+}
+
+app_title_rect :: proc() -> UI_Rect {
+	return app_title_rect_for_size(ui.width, ui.height)
+}
+
+window_resize_edges_for_size :: proc(
+	point: Point,
+	width, height: f64,
+) -> u8 {
+	edges := u8(0)
+	if point.x <= WINDOW_RESIZE_INSET {edges |= 1}
+	if point.x >= width-WINDOW_RESIZE_INSET {edges |= 2}
+	if point.y <= WINDOW_RESIZE_INSET {edges |= 4}
+	if point.y >= height-WINDOW_RESIZE_INSET {edges |= 8}
+	return edges
+}
+
+window_frame_after_drag :: proc(
+	start: Rect,
+	edges: u8,
+	delta: Point,
+) -> Rect {
+	frame := start
+	if edges&1 != 0 {
+		frame.size.width = max(WINDOW_MIN_WIDTH, start.size.width-delta.x)
+		frame.origin.x = start.origin.x+start.size.width-frame.size.width
+	} else if edges&2 != 0 {
+		frame.size.width = max(WINDOW_MIN_WIDTH, start.size.width+delta.x)
+	}
+	if edges&4 != 0 {
+		frame.size.height = max(WINDOW_MIN_HEIGHT, start.size.height-delta.y)
+		frame.origin.y = start.origin.y+start.size.height-frame.size.height
+	} else if edges&8 != 0 {
+		frame.size.height = max(WINDOW_MIN_HEIGHT, start.size.height+delta.y)
+	}
+	return frame
 }
 
 mode_button_rect :: proc() -> UI_Rect {
@@ -2930,6 +3015,126 @@ fill_overlay_border :: proc(ctx: rawptr, rect: UI_Rect, color: [4]f64) {
 	fill_overlay_rect(ctx, UI_Rect{rect.x + rect.w - 1, rect.y, 1, rect.h}, color)
 }
 
+Window_Icon_Point :: struct {
+	point: Point,
+	move:  bool,
+}
+
+window_icon_xmark_points :: proc() -> [8]Window_Icon_Point {
+	return {
+		{{6.75827, 17.2426}, true},
+		{{12.0009, 12}, false},
+		{{17.2435, 6.75736}, true},
+		{{12.0009, 12}, false},
+		{{12.0009, 12}, true},
+		{{6.75827, 6.75736}, false},
+		{{12.0009, 12}, true},
+		{{17.2435, 17.2426}, false},
+	}
+}
+
+window_icon_minus_points :: proc() -> [2]Window_Icon_Point {
+	return {
+		{{6, 12}, true},
+		{{18, 12}, false},
+	}
+}
+
+window_icon_maximize_points :: proc() -> [12]Window_Icon_Point {
+	return {
+		{{7, 4}, true},
+		{{4, 4}, false},
+		{{4, 7}, false},
+		{{17, 4}, true},
+		{{20, 4}, false},
+		{{20, 7}, false},
+		{{7, 20}, true},
+		{{4, 20}, false},
+		{{4, 17}, false},
+		{{17, 20}, true},
+		{{20, 20}, false},
+		{{20, 17}, false},
+	}
+}
+
+draw_window_icon_path :: proc(
+	ctx: rawptr,
+	rect: UI_Rect,
+	color: [4]f64,
+	points: []Window_Icon_Point,
+) {
+	CGContextSaveGState(ctx)
+	defer CGContextRestoreGState(ctx)
+	CGContextClipToRect(
+		ctx,
+		Rect{
+			Point{rect.x*ui.scale, rect.y*ui.scale},
+			Size{rect.w*ui.scale, rect.h*ui.scale},
+		},
+	)
+	CGContextSetRGBStrokeColor(
+		ctx,
+		color[0],
+		color[1],
+		color[2],
+		color[3],
+	)
+	CGContextSetLineWidth(
+		ctx,
+		1.5*ui.scale*min(rect.w, rect.h)/24,
+	)
+	CGContextSetLineCap(ctx, 1)
+	CGContextSetLineJoin(ctx, 1)
+	CGContextBeginPath(ctx)
+	for command in points {
+		x := (rect.x+command.point.x*rect.w/24)*ui.scale
+		y := (rect.y+(24-command.point.y)*rect.h/24)*ui.scale
+		if command.move {
+			CGContextMoveToPoint(ctx, x, y)
+		} else {
+			CGContextAddLineToPoint(ctx, x, y)
+		}
+	}
+	CGContextStrokePath(ctx)
+}
+
+draw_window_controls :: proc(ctx: rawptr) {
+	colors := [3][4]f64{
+		{0.98, 0.35, 0.09, 1},
+		{0.47, 0.49, 0.46, 1},
+		{0.27, 0.72, 0.73, 1},
+	}
+	for index in 0..<3 {
+		control := window_control_rect(index)
+		background := [4]f64{0.052, 0.055, 0.052, 1}
+		if contains(control, ui.mouse) {
+			background = [4]f64{0.09, 0.095, 0.09, 1}
+		}
+		fill_overlay_rect(ctx, control, background)
+	}
+	xmark := window_icon_xmark_points()
+	draw_window_icon_path(
+		ctx,
+		window_icon_rect(0),
+		colors[0],
+		xmark[:],
+	)
+	minus := window_icon_minus_points()
+	draw_window_icon_path(
+		ctx,
+		window_icon_rect(1),
+		colors[1],
+		minus[:],
+	)
+	maximize := window_icon_maximize_points()
+	draw_window_icon_path(
+		ctx,
+		window_icon_rect(2),
+		colors[2],
+		maximize[:],
+	)
+}
+
 flash_badge_rect :: proc(target: flash.Target, label_length: int, view_width, view_height: f64) -> UI_Rect {
 	width := max(16, 8 + f64(label_length) * 8)
 	height := 18.0
@@ -4265,14 +4470,11 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	_, _, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, _ :=
 		layout_rects()
 
-	header := app_header_rect()
-	title_rect := header
-	title_rect.y += 2
 	draw_text_in_rect(
 		ctx,
 		small_font,
 		"VOCAL TRAINING",
-		title_rect,
+		app_title_rect(),
 		.Start,
 		.Center,
 		bright,
@@ -5321,6 +5523,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		danger,
 	)
 	draw_backup_warning(ctx, small_font, bright, muted, orange, danger)
+	draw_window_controls(ctx)
 	draw_flash_hints(ctx, small_font)
 	return pixels
 }
@@ -5636,6 +5839,41 @@ add_pointer_control :: proc(
 	})
 }
 
+add_window_controls :: proc(array, element_class: Id) {
+	actions := [3]UI_Action_Kind{
+		.Window_Close,
+		.Window_Minimize,
+		.Window_Zoom,
+	}
+	names := [3]string{
+		"window close",
+		"window minimize",
+		"window zoom",
+	}
+	labels := [3]string{
+		"Close window",
+		"Minimize window",
+		"Zoom window",
+	}
+	flash_labels := [3]string{
+		"close window",
+		"minimize window",
+		"zoom window",
+	}
+	for action, index in actions {
+		add_ax_element(
+			array,
+			element_class,
+			labels[index],
+			"AXButton",
+			window_control_rect(index),
+			action,
+			flash_label = flash_labels[index],
+			functional_name = names[index],
+		)
+	}
+}
+
 build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allocator) {
 	previous_temp := context.temp_allocator
 	defer context.temp_allocator = previous_temp
@@ -5654,6 +5892,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 	element_class := objc_getClass("VocalAccessibilityElement")
 	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
 		layout_rects()
+	add_window_controls(array, element_class)
 	if library_recovery_state.required {
 		modal := recovery_modal_rect()
 		if library_recovery_state.analysis_complete {
@@ -6487,6 +6726,22 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		return activate_command_palette_result(action.index)
 	case .Command_Palette_Disabled:
 		return false
+	case .Window_Close:
+		msg_void(state.window, sel_registerName("close"))
+	case .Window_Minimize:
+		msg_void_i(
+			state.window,
+			sel_registerName("setStyleMask:"),
+			int(WINDOW_MINIMIZE_STYLE),
+		)
+		msg_void_id(state.window, sel_registerName("miniaturize:"), nil)
+		msg_void_i(
+			state.window,
+			sel_registerName("setStyleMask:"),
+			int(WINDOW_STYLE),
+		)
+	case .Window_Zoom:
+		msg_void_id(state.window, sel_registerName("zoom:"), nil)
 	case .Mode_Toggle:
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 	case .Open_Source_Modal:
@@ -7899,6 +8154,50 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 	if activate_registered_target_at_point(point, click_count) {return}
 }
 
+ui_action_is_window :: proc(kind: UI_Action_Kind) -> bool {
+	return kind == .Window_Close ||
+	       kind == .Window_Minimize ||
+	       kind == .Window_Zoom
+}
+
+begin_window_resize :: proc(point: Point) -> bool {
+	edges := window_resize_edges_for_size(point, ui.width, ui.height)
+	if edges == 0 {return false}
+	cancel_ui_flash()
+	ui.resize_edges = edges
+	ui.text_drag_active = false
+	ui.source_scrubbing = false
+	ui.resize_start_mouse = msg_point(
+		objc_getClass("NSEvent"),
+		sel_registerName("mouseLocation"),
+	)
+	ui.resize_start_frame = msg_rect(state.window, sel_registerName("frame"))
+	return true
+}
+
+resize_window_from_current_mouse :: proc() {
+	mouse := msg_point(
+		objc_getClass("NSEvent"),
+		sel_registerName("mouseLocation"),
+	)
+	delta := Point{
+		mouse.x-ui.resize_start_mouse.x,
+		mouse.y-ui.resize_start_mouse.y,
+	}
+	frame := window_frame_after_drag(
+		ui.resize_start_frame,
+		ui.resize_edges,
+		delta,
+	)
+	msg_void_rect_b(
+		state.window,
+		sel_registerName("setFrame:display:"),
+		frame,
+		true,
+	)
+	ui.needs_redraw = true
+}
+
 on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -7909,6 +8208,18 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		window_point,
 		nil,
 	)
+	if begin_window_resize(ui.mouse) {return}
+	window_control := find_ui_control_at_point(
+		ui_build.controls[:],
+		ui.mouse,
+		.Primary_Press,
+	)
+	if window_control != nil &&
+	   ui_action_is_window(window_control.action.kind) {
+		cancel_ui_flash()
+		_ = activate_ui_action(window_control.action)
+		return
+	}
 	click_count := msg_uint(event, sel_registerName("clickCount"))
 	if !command_palette.is_open(&command_palette_state) &&
 	   !ui.source_modal_open && !ui.source_details_open &&
@@ -7917,6 +8228,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	   !ui.data_modal_open && !ui.notification_modal_open &&
 	   contains(app_header_rect(), ui.mouse) &&
 	   !contains(ui_control_rect(.Mode_Toggle), ui.mouse) {
+		cancel_ui_flash()
 		if click_count >= 2 {
 			msg_void_id(state.window, sel_registerName("performZoom:"), nil)
 		} else {
@@ -7968,6 +8280,10 @@ on_metal_mouse_moved :: proc "c" (self: Id, command: Sel, event: Id) {
 on_metal_mouse_dragged :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if ui.resize_edges != 0 {
+		resize_window_from_current_mouse()
+		return
+	}
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	ui.mouse = msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
 	if update_text_pointer_selection(ui.mouse) {
@@ -7984,6 +8300,10 @@ on_metal_mouse_dragged :: proc "c" (self: Id, command: Sel, event: Id) {
 on_metal_mouse_up :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	ui.text_drag_active = false
+	if ui.resize_edges != 0 {
+		ui.resize_edges = 0
+		ui.needs_redraw = true
+	}
 	if ui.source_scrubbing {
 		ui.source_scrubbing = false
 		ui.needs_redraw = true
@@ -8750,6 +9070,32 @@ register_accessibility_class :: proc() {
 	objc_registerClassPair(class)
 }
 
+window_can_become_key :: proc "c" (self: Id, command: Sel) -> bool {
+	return true
+}
+
+register_window_class :: proc() -> Id {
+	class := objc_allocateClassPair(
+		objc_getClass("NSWindow"),
+		"VocalTrainingWindow",
+		0,
+	)
+	class_addMethod(
+		class,
+		sel_registerName("canBecomeKeyWindow"),
+		rawptr(window_can_become_key),
+		"B@:",
+	)
+	class_addMethod(
+		class,
+		sel_registerName("canBecomeMainWindow"),
+		rawptr(window_can_become_key),
+		"B@:",
+	)
+	objc_registerClassPair(class)
+	return class
+}
+
 launch_should_activate :: proc(value: cstring) -> bool {
 	return value == nil || string(value) != "0"
 }
@@ -8780,18 +9126,23 @@ build_metal_window :: proc() {
 	assert(palette_error == nil, "Unable to initialize the command palette")
 
 	frame := Rect{Point{120, 100}, Size{1100, 720}}
+	window_class := register_window_class()
 	state.window = msg_id_rect_u_u_b(
-		msg_id(objc_getClass("NSWindow"), sel_registerName("alloc")),
+		msg_id(window_class, sel_registerName("alloc")),
 		sel_registerName("initWithContentRect:styleMask:backing:defer:"),
 		frame,
-		32783,
+		WINDOW_STYLE,
 		2,
 		false,
 	)
 	msg_void_id(state.window, sel_registerName("setTitle:"), nsstring("Vocal Training"))
-	msg_void_i(state.window, sel_registerName("setTitleVisibility:"), 1)
-	msg_void_bool(state.window, sel_registerName("setTitlebarAppearsTransparent:"), true)
-	msg_void_i(state.window, sel_registerName("setTitlebarSeparatorStyle:"), 0)
+	msg_void_bool(state.window, sel_registerName("setOpaque:"), true)
+	msg_void_bool(state.window, sel_registerName("setHasShadow:"), false)
+	msg_void_size(
+		state.window,
+		sel_registerName("setMinSize:"),
+		Size{WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT},
+	)
 	msg_void_bool(state.window, sel_registerName("setAcceptsMouseMovedEvents:"), true)
 	register_accessibility_class()
 	view_class := register_metal_view_class()

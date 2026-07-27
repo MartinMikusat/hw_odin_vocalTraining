@@ -22,6 +22,149 @@ launch_activation_defaults_to_foreground_test :: proc(t: ^testing.T) {
 	testing.expect(t, !launch_should_activate(cstring("0")))
 }
 
+window_icon_points_use_iconoir_viewbox_test :: proc(
+	t: ^testing.T,
+	points: []Window_Icon_Point,
+	path_length: int,
+) {
+	for point, index in points {
+		testing.expect(t, point.point.x >= 0 && point.point.x <= 24)
+		testing.expect(t, point.point.y >= 0 && point.point.y <= 24)
+		testing.expect_value(t, point.move, index%path_length == 0)
+	}
+}
+
+@(test)
+window_icons_match_iconoir_paths_test :: proc(t: ^testing.T) {
+	xmark := window_icon_xmark_points()
+	testing.expect_value(t, len(xmark), 8)
+	window_icon_points_use_iconoir_viewbox_test(t, xmark[:], 2)
+
+	minus := window_icon_minus_points()
+	testing.expect_value(t, len(minus), 2)
+	window_icon_points_use_iconoir_viewbox_test(t, minus[:], 2)
+
+	maximize := window_icon_maximize_points()
+	testing.expect_value(t, len(maximize), 12)
+	window_icon_points_use_iconoir_viewbox_test(t, maximize[:], 3)
+}
+
+@(test)
+window_header_geometry_separates_controls_title_and_mode_test :: proc(
+	t: ^testing.T,
+) {
+	height := 720.0
+	close := window_control_rect_for_size(0, height)
+	minimize := window_control_rect_for_size(1, height)
+	zoom := window_control_rect_for_size(2, height)
+	title := app_title_rect_for_size(1100, height)
+	mode := mode_button_rect_for_size(1100, height)
+	testing.expect_value(t, close, UI_Rect{0, 689, 30, 30})
+	testing.expect_value(t, minimize, UI_Rect{38, 689, 30, 30})
+	testing.expect_value(t, zoom, UI_Rect{76, 689, 30, 30})
+	testing.expect(t, zoom.x+zoom.w < title.x)
+	testing.expect(t, title.x+title.w < mode.x)
+}
+
+@(test)
+window_resize_geometry_detects_edges_and_enforces_minimum_test :: proc(
+	t: ^testing.T,
+) {
+	testing.expect_value(
+		t,
+		window_resize_edges_for_size({550, 360}, 1100, 720),
+		u8(0),
+	)
+	testing.expect_value(
+		t,
+		window_resize_edges_for_size({0, 360}, 1100, 720),
+		u8(1),
+	)
+	testing.expect_value(
+		t,
+		window_resize_edges_for_size({1100, 360}, 1100, 720),
+		u8(2),
+	)
+	testing.expect_value(
+		t,
+		window_resize_edges_for_size({550, 0}, 1100, 720),
+		u8(4),
+	)
+	testing.expect_value(
+		t,
+		window_resize_edges_for_size({0, 720}, 1100, 720),
+		u8(9),
+	)
+
+	start := Rect{{100, 200}, {1200, 800}}
+	grown := window_frame_after_drag(start, u8(2|8), {100, 50})
+	testing.expect_value(t, grown, Rect{{100, 200}, {1300, 850}})
+	clamped := window_frame_after_drag(start, u8(1|4), {200, 200})
+	testing.expect_value(t, clamped, Rect{{200, 280}, {1100, 720}})
+}
+
+@(test)
+window_controls_remain_registered_over_modal_content_test :: proc(
+	t: ^testing.T,
+) {
+	previous_state := state
+	previous_ui := ui
+	previous_ui_build := ui_build
+	previous_recovery := library_recovery_state
+	previous_pending := major_change_pending
+	defer {
+		state = previous_state
+		ui = previous_ui
+		ui_build = previous_ui_build
+		library_recovery_state = previous_recovery
+		major_change_pending = previous_pending
+	}
+	state = App_State{active_source=-1}
+	ui = UI_State{
+		width = 1100,
+		height = 720,
+		mode = .Play,
+		randomize_help_open = true,
+		active_exercise = -1,
+		source_details_index = -1,
+		source_modal_refetch_index = -1,
+		exercise_rename_index = -1,
+		exercise_metadata_index = -1,
+		transcript_active_match = -1,
+	}
+	library_recovery_state = {}
+	major_change_pending = {}
+
+	frame_arena: mem_virtual.Arena
+	frame_error := mem_virtual.arena_init_static(
+		&frame_arena,
+		1024*1024,
+		4096,
+	)
+	testing.expect(t, frame_error == nil)
+	if frame_error != nil {return}
+	defer mem_virtual.arena_destroy(&frame_arena)
+	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+
+	actions := [3]UI_Action_Kind{
+		.Window_Close,
+		.Window_Minimize,
+		.Window_Zoom,
+	}
+	for action in actions {
+		control := find_ui_control_by_action(action)
+		testing.expect(t, control != nil)
+		if control == nil {continue}
+		testing.expect(t, .Primary_Press in control.flags)
+		testing.expect(t, .Accessibility in control.flags)
+		testing.expect(t, .Flash in control.flags)
+		testing.expect(t, .Enabled in control.flags)
+		testing.expect_value(t, control.accessibility_role, "AXButton")
+	}
+	testing.expect(t, find_ui_control_by_action(.Close_Randomize_Help) != nil)
+}
+
 @(test)
 successful_clip_commit_resets_exercise_output_test :: proc(t: ^testing.T) {
 	previous_state := state
