@@ -443,11 +443,18 @@ Run the dependency-free watcher during development:
 ./dev.sh
 ```
 
-It fingerprints the source, build scripts, and `Info.plist` every half-second.
-A successful change rebuilds and relaunches the debug app behind the active
-application. The initial launch activates normally. A failed build leaves the
-current app running. Metal validation is enabled. Press `Ctrl-C` to stop the
-watcher and app.
+For debug and ASan modes, the watcher builds a stable AppKit host and loads the
+application from a generation-specific dylib. A source edit builds a new
+dylib. The host swaps it at a frame boundary and preserves the window, active
+workflow, selections, playback objects, library connection, search state, and
+UI allocations. It defers the swap while media, metadata, recovery, or CLI work
+is active.
+
+Changes to the host contract, application metadata, or bundled resources
+rebuild and restart the host. An incompatible state layout also requests a
+controlled restart with exit status 75. A failed module build leaves the
+current generation active. Trace and release modes keep the full rebuild path.
+Metal validation is enabled. Press `Ctrl-C` to stop the watcher and app.
 
 The watcher initializes `build/dev-support/library.sqlite3` from the canonical
 development library. It preserves this working copy between launches.

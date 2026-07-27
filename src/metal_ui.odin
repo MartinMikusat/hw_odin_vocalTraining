@@ -12,6 +12,7 @@ import CF "core:sys/darwin/CoreFoundation"
 import command_palette "command_palette:."
 import flash "flash:."
 import match_sorter "match_sorter:."
+import hot_reload "../dev/hot_reload_contract"
 
 foreign import metal "system:Metal.framework"
 foreign metal {
@@ -7587,6 +7588,7 @@ fragment float4 texture_fragment(TextureOut in [[stage_in]], texture2d<float> im
 		&error,
 	)
 	if library == nil {return false}
+	defer msg_void(library, sel_registerName("release"))
 	solid_vertex := msg_id_id(
 		library,
 		sel_registerName("newFunctionWithName:"),
@@ -7607,8 +7609,13 @@ fragment float4 texture_fragment(TextureOut in [[stage_in]], texture2d<float> im
 		sel_registerName("newFunctionWithName:"),
 		nsstring("texture_fragment"),
 	)
+	defer msg_void(solid_vertex, sel_registerName("release"))
+	defer msg_void(solid_fragment, sel_registerName("release"))
+	defer msg_void(texture_vertex, sel_registerName("release"))
+	defer msg_void(texture_fragment, sel_registerName("release"))
 
 	desc := msg_id(objc_getClass("MTLRenderPipelineDescriptor"), sel_registerName("new"))
+	defer msg_void(desc, sel_registerName("release"))
 	msg_void_id(desc, sel_registerName("setVertexFunction:"), solid_vertex)
 	msg_void_id(desc, sel_registerName("setFragmentFunction:"), solid_fragment)
 	attachment := msg_id_uint(
@@ -7625,6 +7632,7 @@ fragment float4 texture_fragment(TextureOut in [[stage_in]], texture2d<float> im
 	)
 
 	texture_desc := msg_id(objc_getClass("MTLRenderPipelineDescriptor"), sel_registerName("new"))
+	defer msg_void(texture_desc, sel_registerName("release"))
 	msg_void_id(texture_desc, sel_registerName("setVertexFunction:"), texture_vertex)
 	msg_void_id(texture_desc, sel_registerName("setFragmentFunction:"), texture_fragment)
 	texture_attachment := msg_id_uint(
@@ -9100,10 +9108,18 @@ launch_should_activate :: proc(value: cstring) -> bool {
 	return value == nil || string(value) != "0"
 }
 
-build_metal_window :: proc() {
+vocal_gui_initialize :: proc(
+	services: ^hot_reload.Host_Services = nil,
+) -> bool {
 	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
+	if services != nil {app = Id(services.app)}
 	msg_void_i(app, sel_registerName("setActivationPolicy:"), 0)
-	register_delegate(app)
+	if services == nil {
+		register_delegate(app)
+	} else {
+		state.delegate_target = Id(services.delegate)
+		msg_void_id(app, sel_registerName("setDelegate:"), state.delegate_target)
+	}
 
 	state.url_input = CONTROL_URL
 	state.status = CONTROL_STATUS
@@ -9126,7 +9142,7 @@ build_metal_window :: proc() {
 	assert(palette_error == nil, "Unable to initialize the command palette")
 
 	frame := Rect{Point{120, 100}, Size{1100, 720}}
-	window_class := register_window_class()
+	window_class := Id(services.window_class) if services != nil else register_window_class()
 	state.window = msg_id_rect_u_u_b(
 		msg_id(window_class, sel_registerName("alloc")),
 		sel_registerName("initWithContentRect:styleMask:backing:defer:"),
@@ -9144,8 +9160,8 @@ build_metal_window :: proc() {
 		Size{WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT},
 	)
 	msg_void_bool(state.window, sel_registerName("setAcceptsMouseMovedEvents:"), true)
-	register_accessibility_class()
-	view_class := register_metal_view_class()
+	if services == nil {register_accessibility_class()}
+	view_class := Id(services.view_class) if services != nil else register_metal_view_class()
 	ui.view = msg_id_rect(
 		msg_id(view_class, sel_registerName("alloc")),
 		sel_registerName("initWithFrame:"),
@@ -9173,30 +9189,32 @@ build_metal_window :: proc() {
 	}
 	if !compile_pipelines() {
 		fmt.eprintln("Unable to compile Metal UI pipelines")
-		return
+		return false
 	}
 
 	if len(state.sources) > 0 {load_source_player(len(state.sources) - 1)}
 	// The Objective-C runtime requires the exact floating-point signature, so
 	// construct the repeating timer through a typed send.
-	timer_send := transmute(proc "c" (
-		_: Id,
-		_: Sel,
-		_: f64,
-		_: Id,
-		_: Sel,
-		_: Id,
-		_: bool,
-	) -> Id)send_address
-	_ = timer_send(
-		objc_getClass("NSTimer"),
-		sel_registerName("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
-		1.0 / 60.0,
-		state.delegate_target,
-		sel_registerName("metalFrame:"),
-		nil,
-		true,
-	)
+	if services == nil {
+		timer_send := transmute(proc "c" (
+			_: Id,
+			_: Sel,
+			_: f64,
+			_: Id,
+			_: Sel,
+			_: Id,
+			_: bool,
+		) -> Id)send_address
+		_ = timer_send(
+			objc_getClass("NSTimer"),
+			sel_registerName("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+			1.0 / 60.0,
+			state.delegate_target,
+			sel_registerName("metalFrame:"),
+			nil,
+			true,
+		)
+	}
 
 	screen := msg_id(objc_getClass("NSScreen"), sel_registerName("mainScreen"))
 	msg_void_rect_b(
@@ -9215,5 +9233,11 @@ build_metal_window :: proc() {
 	if !cli_ipc_server_start() {set_text(state.status, "CLI control socket is unavailable")}
 	validate_startup_helpers()
 	request_next_missing_source_metadata()
+	return true
+}
+
+build_metal_window :: proc() {
+	if !vocal_gui_initialize() {return}
+	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
 	msg_void(app, sel_registerName("run"))
 }

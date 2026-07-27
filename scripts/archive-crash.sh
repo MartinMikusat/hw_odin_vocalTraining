@@ -8,6 +8,7 @@ MODE=$1
 APP=$2
 STATUS=$3
 EXECUTABLE="$APP/Contents/MacOS/VocalTraining"
+MODULE="$ROOT/build/hot-reload/$MODE/vocal-training.dylib"
 TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
 CRASH_TIME=$(date '+%s')
 DEST="build/crashes/$TIMESTAMP-$MODE"
@@ -17,8 +18,14 @@ cp "$EXECUTABLE" "$DEST/VocalTraining"
 if [ -d "$APP.dSYM" ]; then
   cp -R "$APP.dSYM" "$DEST/VocalTraining.app.dSYM"
 fi
+if [ -f "$MODULE" ]; then
+  cp "$MODULE" "$DEST/vocal-training.dylib"
+fi
+if [ -d "$MODULE.dSYM" ]; then
+  cp -R "$MODULE.dSYM" "$DEST/vocal-training.dylib.dSYM"
+fi
 
-printf '[vocal-training] executable and dSYM captured; waiting for macOS crash report...\n'
+printf '[vocal-training] executable, module, and dSYMs captured; waiting for macOS crash report...\n'
 attempt=0
 while [ "$attempt" -lt 30 ]; do
   REPORT=$(ls -t "$HOME"/Library/Logs/DiagnosticReports/VocalTraining-*.ips 2>/dev/null | sed -n '1p' || true)
@@ -41,6 +48,10 @@ done
   printf 'git_revision=%s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)"
   printf 'built_binary=%s\n' "$EXECUTABLE"
   xcrun dwarfdump --uuid "$EXECUTABLE" 2>/dev/null || true
+  if [ -f "$MODULE" ]; then
+    printf 'hot_reload_module=%s\n' "$MODULE"
+    xcrun dwarfdump --uuid "$MODULE" 2>/dev/null || true
+  fi
 } > "$DEST/metadata.txt"
 
 printf '[vocal-training] crash artifacts: %s\n' "$DEST"

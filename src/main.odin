@@ -14,6 +14,8 @@ import "base:runtime"
 import mem_virtual "core:mem/virtual"
 import match_sorter "match_sorter:."
 
+HOT_RELOAD_MODULE :: #config(HOT_RELOAD_MODULE, false)
+
 Id  :: rawptr
 Sel :: rawptr
 
@@ -2750,7 +2752,7 @@ jobs_shutdown :: proc() {
 	}
 }
 
-main :: proc() {
+vocal_process_main :: proc(args := os.args) {
 	if !memory_init() { fmt.eprintln("Unable to initialize memory arenas"); return }
 	defer memory_destroy()
 	defer helper_statuses_destroy()
@@ -2781,8 +2783,8 @@ main :: proc() {
 	system_address = os.dlsym(libsystem_handle, "system")
 	if system_address == nil { fmt.eprintln("Unable to resolve system"); return }
 	state.active_source = -1
-	if len(os.args) > 1 {
-		request, parse_result, parsed := cli_parse_request(os.args[1:])
+	if len(args) > 1 {
+		request, parse_result, parsed := cli_parse_request(args[1:])
 		result := parse_result
 		if parsed {
 			if routed_result, routed := cli_ipc_try_request(request); routed {
@@ -2838,4 +2840,10 @@ main :: proc() {
 	build_metal_window()
 	metal_player_clear()
 	msg_void(pool, sel_registerName("drain"))
+}
+
+when !HOT_RELOAD_MODULE {
+	main :: proc() {
+		vocal_process_main()
+	}
 }
