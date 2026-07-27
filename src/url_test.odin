@@ -4,6 +4,7 @@ import "core:testing"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
+import os2 "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
 import "base:runtime"
@@ -1901,6 +1902,318 @@ portable_library_install_replaces_database_and_memory_together_test :: proc(
 	)
 	testing.expect(t, notifications_counted)
 	testing.expect_value(t, notification_count, 1)
+}
+
+Library_Transaction_Test_Context :: struct {
+	database: ^SQLite_DB,
+	previous_state: App_State,
+	previous_database: ^SQLite_DB,
+	previous_fallback: bool,
+	previous_last_imported_source: int,
+}
+
+library_transaction_test_begin :: proc(
+	database_path := ":memory:",
+) -> (Library_Transaction_Test_Context, bool) {
+	fixture := Library_Transaction_Test_Context{
+		previous_state = state,
+		previous_database = library_database,
+		previous_fallback = library_legacy_fallback,
+		previous_last_imported_source = last_imported_source,
+	}
+	path := strings.clone_to_cstring(database_path)
+	defer delete(path)
+	if sqlite3_open_v2(
+		path,
+		&fixture.database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) != SQLITE_OK {
+		return {}, false
+	}
+	if !database_create_schema(fixture.database) {
+		sqlite3_close(fixture.database)
+		return {}, false
+	}
+	state = {}
+	state.sources = make([dynamic]Source_Video)
+	state.hints = make([dynamic]Import_Hint)
+	state.exercises = make([dynamic]Exercise)
+	transcripts, transcripts_created := transcript_generation_create(0)
+	if !transcripts_created {
+		app_state_collections_destroy(&state)
+		state = fixture.previous_state
+		sqlite3_close(fixture.database)
+		return {}, false
+	}
+	state.transcripts = transcripts
+	library_database = fixture.database
+	library_legacy_fallback = false
+	return fixture, true
+}
+
+library_transaction_test_end :: proc(fixture: ^Library_Transaction_Test_Context) {
+	app_state_collections_destroy(&state)
+	state = fixture.previous_state
+	library_database = fixture.previous_database
+	library_legacy_fallback = fixture.previous_fallback
+	last_imported_source = fixture.previous_last_imported_source
+	sqlite3_close(fixture.database)
+	fixture^ = {}
+}
+
+@(test)
+failed_import_commit_keeps_live_library_state_test :: proc(t: ^testing.T) {
+	fixture, fixture_ready := library_transaction_test_begin()
+	testing.expect(t, fixture_ready)
+	if !fixture_ready {return}
+	defer library_transaction_test_end(&fixture)
+	state.pending_hint = 7
+	state.has_pending_hint = true
+	source, source_copied := clone_source_video(Source_Video{
+		id = "old-source",
+		video_id = "old-video",
+		title = "Old",
+		url = "https://youtu.be/old-video",
+		media_path = "/tmp/old.mp4",
+		duration = 30,
+	})
+	testing.expect(t, source_copied)
+	if !source_copied {return}
+	append(&state.sources, source)
+
+	testing.expect(t, database_save_state(fixture.database))
+	testing.expect(t, sqlite_execute(
+		fixture.database,
+		`CREATE TRIGGER fail_source_insert
+		 BEFORE INSERT ON sources
+		 BEGIN
+		   SELECT RAISE(ABORT, 'forced source insert failure');
+		 END`,
+	))
+
+	job := Import_Job{
+		accepted = 1,
+		last_video_id = "new-video",
+		pending_hint = 12,
+		has_pending_hint = true,
+		has_source_update = true,
+		updated_source = {
+			id = "old-source",
+			video_id = "old-video",
+			title = "Refetched",
+			url = "https://youtu.be/old-video",
+			media_path = "/tmp/old.mp4",
+			duration = 45,
+		},
+	}
+	job.new_sources = make([dynamic]Source_Video)
+	job.new_hints = make([dynamic]Import_Hint)
+	defer {
+		delete(job.new_sources)
+		delete(job.new_hints)
+	}
+	append(&job.new_sources, Source_Video{
+		id = "new-source",
+		video_id = "new-video",
+		title = "New",
+		url = "https://youtu.be/new-video",
+		media_path = "/tmp/new.mp4",
+		duration = 60,
+	})
+	append(&job.new_hints, Import_Hint{source_id = "new-source", seconds = 12})
+
+	last_imported_source = 0
+	testing.expect(t, !import_job_apply(&job))
+	testing.expect_value(t, len(state.sources), 1)
+	testing.expect_value(t, state.sources[0].id, "old-source")
+	testing.expect_value(t, state.sources[0].title, "Old")
+	testing.expect_value(t, len(state.hints), 0)
+	testing.expect_value(t, state.pending_hint, 7)
+	testing.expect(t, state.has_pending_hint)
+	testing.expect_value(t, last_imported_source, 0)
+
+	source_count, source_counted := database_count(fixture.database, "sources")
+	testing.expect(t, source_counted)
+	testing.expect_value(t, source_count, 1)
+}
+
+@(test)
+successful_import_commit_survives_database_reload_test :: proc(t: ^testing.T) {
+	temporary_file, temporary_error := os2.create_temp_file(
+		"",
+		"vocal-training-library-transaction-*.sqlite3",
+	)
+	testing.expect(t, temporary_error == nil)
+	if temporary_error != nil {return}
+	database_path, path_error := strings.clone(os2.name(temporary_file))
+	_ = os2.close(temporary_file)
+	testing.expect(t, path_error == nil)
+	if path_error != nil {return}
+	defer {
+		_ = os.remove(database_path)
+		delete(database_path)
+	}
+
+	fixture, fixture_ready := library_transaction_test_begin(database_path)
+	testing.expect(t, fixture_ready)
+	if !fixture_ready {return}
+	defer library_transaction_test_end(&fixture)
+
+	job := Import_Job{
+		accepted = 1,
+		last_video_id = "new-video",
+		pending_hint = 12,
+		has_pending_hint = true,
+		has_transcript_update = true,
+	}
+	job.new_sources = make([dynamic]Source_Video)
+	job.new_hints = make([dynamic]Import_Hint)
+	job.transcripts, _ = transcript_generation_create(1)
+	defer {
+		delete(job.new_sources)
+		delete(job.new_hints)
+		transcript_generation_destroy(&job.transcripts)
+	}
+	append(&job.new_sources, Source_Video{
+		id = "new-source",
+		video_id = "new-video",
+		title = "New",
+		url = "https://youtu.be/new-video",
+		media_path = "/tmp/new.mp4",
+		duration = 60,
+	})
+	append(&job.new_hints, Import_Hint{source_id = "new-source", seconds = 12})
+	testing.expect(t, transcript_append_copy(&job.transcripts, Transcript_Segment{
+		id = "new-source-0",
+		source_id = "new-source",
+		start_seconds = 1,
+		duration_seconds = 2,
+		text = "Warm up",
+	}))
+
+	testing.expect(t, import_job_apply(&job))
+	testing.expect_value(t, len(state.sources), 1)
+	testing.expect_value(t, state.sources[0].title, "New")
+	testing.expect_value(t, len(state.hints), 1)
+	testing.expect_value(t, len(state.transcripts.segments), 1)
+	testing.expect_value(t, state.pending_hint, 12)
+	testing.expect_value(t, last_imported_source, 0)
+
+	app_state_collections_destroy(&state)
+	state = {}
+	sqlite3_close(fixture.database)
+	fixture.database = nil
+	library_database = nil
+
+	c_path := strings.clone_to_cstring(database_path)
+	defer delete(c_path)
+	reopened := sqlite3_open_v2(
+		c_path,
+		&fixture.database,
+		SQLITE_OPEN_READWRITE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, reopened)
+	if !reopened {return}
+	library_database = fixture.database
+	testing.expect(t, database_create_schema(fixture.database))
+	testing.expect(t, database_load_state(fixture.database, &state))
+	testing.expect_value(t, len(state.sources), 1)
+	testing.expect_value(t, state.sources[0].title, "New")
+	testing.expect_value(t, len(state.hints), 1)
+	testing.expect_value(t, state.hints[0].seconds, 12)
+	testing.expect_value(t, len(state.transcripts.segments), 1)
+	testing.expect_value(t, state.transcripts.segments[0].text, "Warm up")
+}
+
+@(test)
+repair_commit_publishes_only_after_database_success_test :: proc(t: ^testing.T) {
+	fixture, fixture_ready := library_transaction_test_begin()
+	testing.expect(t, fixture_ready)
+	if !fixture_ready {return}
+	defer library_transaction_test_end(&fixture)
+	source, source_copied := clone_source_video(Source_Video{
+		id = "source-1",
+		video_id = "video-1",
+		title = "Source",
+		url = "https://youtu.be/video-1",
+		media_path = "/tmp/source.mp4",
+		duration = 30,
+	})
+	testing.expect(t, source_copied)
+	if !source_copied {return}
+	append(&state.sources, source)
+	exercise, exercise_copied := clone_exercise(Exercise{
+		id = "exercise-1",
+		source_id = "source-1",
+		name = "Original",
+		start_seconds = 2,
+		end_seconds = 8,
+		clip_path = "/tmp/original.mp4",
+	})
+	testing.expect(t, exercise_copied)
+	if !exercise_copied {return}
+	append(&state.exercises, exercise)
+
+	testing.expect(t, database_save_state(fixture.database))
+	testing.expect(t, sqlite_execute(
+		fixture.database,
+		`CREATE TRIGGER fail_exercise_insert
+		 BEFORE INSERT ON exercises
+		 BEGIN
+		   SELECT RAISE(ABORT, 'forced exercise insert failure');
+		 END`,
+	))
+
+	index, repaired := repair_exercise_apply(Exercise{
+		id = "exercise-1",
+		source_id = "source-1",
+		name = "Repaired",
+		start_seconds = 2,
+		end_seconds = 8,
+		clip_path = "/tmp/repaired.mp4",
+	})
+	testing.expect(t, !repaired)
+	testing.expect_value(t, index, -1)
+	testing.expect_value(t, state.exercises[0].name, "Original")
+	testing.expect_value(t, state.exercises[0].clip_path, "/tmp/original.mp4")
+
+	statement, prepared := sqlite_prepare(
+		fixture.database,
+		"SELECT name, clip_path FROM exercises WHERE id = 'exercise-1'",
+	)
+	testing.expect(t, prepared)
+	if !prepared {return}
+	testing.expect_value(t, sqlite3_step(statement), SQLITE_ROW)
+	name := sqlite3_column_text(statement, 0)
+	clip_path := sqlite3_column_text(statement, 1)
+	testing.expect(t, name != nil && clip_path != nil)
+	if name != nil {testing.expect_value(t, string(name), "Original")}
+	if clip_path != nil {
+		testing.expect_value(t, string(clip_path), "/tmp/original.mp4")
+	}
+	sqlite3_finalize(statement)
+
+	testing.expect(t, sqlite_execute(fixture.database, "DROP TRIGGER fail_exercise_insert"))
+	index, repaired = repair_exercise_apply(Exercise{
+		id = "exercise-1",
+		source_id = "source-1",
+		name = "Repaired",
+		start_seconds = 2,
+		end_seconds = 8,
+		clip_path = "/tmp/repaired.mp4",
+	})
+	testing.expect(t, repaired)
+	testing.expect_value(t, index, 0)
+	testing.expect_value(t, state.exercises[0].name, "Repaired")
+
+	loaded: App_State
+	testing.expect(t, database_load_state(fixture.database, &loaded))
+	defer app_state_collections_destroy(&loaded)
+	testing.expect_value(t, len(loaded.exercises), 1)
+	testing.expect_value(t, loaded.exercises[0].name, "Repaired")
+	testing.expect_value(t, loaded.exercises[0].clip_path, "/tmp/repaired.mp4")
 }
 
 @(test)

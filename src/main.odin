@@ -1390,15 +1390,18 @@ import_worker :: proc(t: ^thread.Thread) {
 
 import_job_apply :: proc(job: ^Import_Job) -> bool {
 	if job == nil || job.accepted <= 0 {return false}
+	candidate, candidate_copied := app_state_collections_clone(&state)
+	if !candidate_copied {return false}
+	defer app_state_collections_destroy(&candidate)
+
 	if job.has_source_update {
 		updated := false
-		for &source, index in state.sources {
+		for &source in candidate.sources {
 			if source.video_id != job.updated_source.video_id {continue}
 			copy, copied := clone_source_video(job.updated_source)
 			if !copied {return false}
 			delete_source_video(&source)
 			source = copy
-			last_imported_source = index
 			updated = true
 			break
 		}
@@ -1407,22 +1410,27 @@ import_job_apply :: proc(job: ^Import_Job) -> bool {
 	for source in job.new_sources {
 		copy, copied := clone_source_video(source)
 		if !copied {return false}
-		append(&state.sources, copy)
+		append(&candidate.sources, copy)
 	}
 	for hint in job.new_hints {
 		copy, copied := clone_import_hint(hint)
 		if !copied {return false}
-		append(&state.hints, copy)
+		append(&candidate.hints, copy)
 	}
 	if job.has_transcript_update {
-		install_transcript_generation(job.transcripts)
-		job.transcripts = {}
+		transcripts, transcripts_copied := transcript_generation_copy(
+			job.transcripts.segments[:],
+		)
+		if !transcripts_copied {return false}
+		transcript_generation_destroy(&candidate.transcripts)
+		candidate.transcripts = transcripts
 	}
+	if !commit_library_state(&candidate) {return false}
 	for source, index in state.sources {
 		if source.video_id == job.last_video_id {last_imported_source = index; break}
 	}
 	if job.has_pending_hint {state.pending_hint, state.has_pending_hint = job.pending_hint, true}
-	return save_library()
+	return true
 }
 
 on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
@@ -2116,6 +2124,20 @@ export_worker :: proc(t: ^thread.Thread) {
 	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("exportFinished:"), nil, false)
 }
 
+repair_exercise_apply :: proc(value: Exercise) -> (int, bool) {
+	index := exercise_index_for_id(state.exercises[:], value.id)
+	if index < 0 {return -1, false}
+	candidate, candidate_copied := app_state_collections_clone(&state)
+	if !candidate_copied {return -1, false}
+	defer app_state_collections_destroy(&candidate)
+	repaired, repaired_copied := clone_exercise(value)
+	if !repaired_copied {return -1, false}
+	delete_exercise(&candidate.exercises[index])
+	candidate.exercises[index] = repaired
+	if !commit_library_state(&candidate) {return -1, false}
+	return index, true
+}
+
 on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -2160,8 +2182,7 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		return
 	}
 	if job.operation == .Repair {
-		index := exercise_index_for_id(state.exercises[:], job.exercise.id)
-		if index < 0 {
+		if exercise_index_for_id(state.exercises[:], job.exercise.id) < 0 {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
@@ -2169,18 +2190,8 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			)
 			return
 		}
-		repaired, copied := clone_exercise(job.exercise)
-		if !copied {
-			_ = notification_finish(
-				job.notification_id,
-				.Error,
-				"Unable to store the rebuilt exercise",
-			)
-			return
-		}
-		delete_exercise(&state.exercises[index])
-		state.exercises[index] = repaired
-		if !save_library() {
+		index, repaired := repair_exercise_apply(job.exercise)
+		if !repaired {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
@@ -2188,8 +2199,9 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			)
 			return
 		}
+		exercise := &state.exercises[index]
 		refresh_exercises()
-		if !metal_player_load(repaired.clip_path) {
+		if !metal_player_load(exercise.clip_path) {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
@@ -2197,14 +2209,14 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			)
 			return
 		}
-		ui.player_duration = repaired.end_seconds - repaired.start_seconds
+		ui.player_duration = exercise.end_seconds - exercise.start_seconds
 		set_source_playback_active(false)
 		start_loaded_playback_at(0)
 		ui.active_exercise = index
 		_ = notification_finish(
 			job.notification_id,
 			.Success,
-			fmt.tprintf("Rebuilt and playing %s", repaired.name),
+			fmt.tprintf("Rebuilt and playing %s", exercise.name),
 		)
 		return
 	}

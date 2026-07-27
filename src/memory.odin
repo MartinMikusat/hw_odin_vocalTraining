@@ -249,6 +249,62 @@ delete_exercise :: proc(exercise: ^Exercise, allocator := context.allocator) {
 	exercise^ = {}
 }
 
+app_state_collections_clone :: proc(source: ^App_State) -> (App_State, bool) {
+	if source == nil {return {}, false}
+	result: App_State
+	copied := false
+	defer if !copied {app_state_collections_destroy(&result)}
+
+	sources, sources_error := make([dynamic]Source_Video, 0, len(source.sources))
+	if sources_error != nil {return {}, false}
+	result.sources = sources
+	hints, hints_error := make([dynamic]Import_Hint, 0, len(source.hints))
+	if hints_error != nil {return {}, false}
+	result.hints = hints
+	exercises, exercises_error := make([dynamic]Exercise, 0, len(source.exercises))
+	if exercises_error != nil {return {}, false}
+	result.exercises = exercises
+
+	for value in source.sources {
+		copy, ok := clone_source_video(value)
+		if !ok {return {}, false}
+		append(&result.sources, copy)
+	}
+	for value in source.hints {
+		copy, ok := clone_import_hint(value)
+		if !ok {return {}, false}
+		append(&result.hints, copy)
+	}
+	for value in source.exercises {
+		copy, ok := clone_exercise(value)
+		if !ok {return {}, false}
+		append(&result.exercises, copy)
+	}
+	transcripts, transcripts_ok := transcript_generation_copy(source.transcripts.segments[:])
+	if !transcripts_ok {return {}, false}
+	result.transcripts = transcripts
+	copied = true
+	return result, true
+}
+
+app_state_collections_replace :: proc(destination, replacement: ^App_State) {
+	if destination == nil || replacement == nil {return}
+	previous: App_State
+	previous.sources = destination.sources
+	previous.transcripts = destination.transcripts
+	previous.hints = destination.hints
+	previous.exercises = destination.exercises
+	destination.sources = replacement.sources
+	destination.transcripts = replacement.transcripts
+	destination.hints = replacement.hints
+	destination.exercises = replacement.exercises
+	replacement.sources = nil
+	replacement.transcripts = {}
+	replacement.hints = nil
+	replacement.exercises = nil
+	app_state_collections_destroy(&previous)
+}
+
 app_state_collections_destroy :: proc(value: ^App_State) {
 	if value == nil {return}
 	for &source in value.sources {delete_source_video(&source)}

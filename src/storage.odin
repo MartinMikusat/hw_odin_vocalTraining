@@ -345,22 +345,27 @@ manifest_path :: proc() -> string {
 	return fmt.tprintf("%s/library.json", app_support_dir())
 }
 
-save_legacy_library :: proc() -> bool {
+save_legacy_library_state :: proc(value: ^App_State) -> bool {
+	if value == nil {return false}
 	scratch, ok := growing_arena_create()
 	if !ok { return false }
 	defer growing_arena_destroy(scratch)
 	allocator := mem_virtual.arena_allocator(scratch)
 	data := Persisted_State{
 		version = 1,
-		sources = state.sources,
-		segments = state.transcripts.segments,
-		hints = state.hints,
-		exercises = state.exercises,
+		sources = value.sources,
+		segments = value.transcripts.segments,
+		hints = value.hints,
+		exercises = value.exercises,
 	}
 	encoded, err := json.marshal(data, {pretty=true, use_spaces=true, spaces=2}, allocator)
 	if err != nil { return false }
 	os.make_directory(app_support_dir())
 	return os.write_entire_file(manifest_path(), encoded)
+}
+
+save_legacy_library :: proc() -> bool {
+	return save_legacy_library_state(&state)
 }
 
 load_legacy_library :: proc() {
@@ -857,30 +862,7 @@ portable_library_read :: proc(path: string) -> (App_State, Portable_Library_Erro
 
 portable_library_install :: proc(imported: ^App_State) -> Portable_Library_Error {
 	if library_database == nil || library_legacy_fallback {return .Database}
-	if !database_save_collections(
-		library_database,
-		imported.sources[:],
-		imported.transcripts.segments[:],
-		imported.hints[:],
-		imported.exercises[:],
-	) {
-		return .Database
-	}
-	previous: App_State
-	previous.sources = state.sources
-	previous.transcripts = state.transcripts
-	previous.hints = state.hints
-	previous.exercises = state.exercises
-	state.sources = imported.sources
-	state.transcripts = imported.transcripts
-	state.hints = imported.hints
-	state.exercises = imported.exercises
-	imported.sources = nil
-	imported.transcripts = {}
-	imported.hints = nil
-	imported.exercises = nil
-	app_state_collections_destroy(&previous)
-	invalidate_transcript_matches()
+	if !commit_library_state(imported) {return .Database}
 	return .None
 }
 
@@ -1010,8 +992,26 @@ database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bo
 }
 
 save_library :: proc() -> bool {
-	if library_legacy_fallback {return save_legacy_library()}
-	return database_save_state(library_database)
+	return save_library_state(&state)
+}
+
+save_library_state :: proc(value: ^App_State) -> bool {
+	if value == nil {return false}
+	if library_legacy_fallback {return save_legacy_library_state(value)}
+	return database_save_collections(
+		library_database,
+		value.sources[:],
+		value.transcripts.segments[:],
+		value.hints[:],
+		value.exercises[:],
+	)
+}
+
+commit_library_state :: proc(candidate: ^App_State) -> bool {
+	if !save_library_state(candidate) {return false}
+	app_state_collections_replace(&state, candidate)
+	invalidate_transcript_matches()
+	return true
 }
 
 load_library :: proc() {
