@@ -1072,8 +1072,22 @@ cli_segment_range_rejects_wrong_source_and_reverse_order_test :: proc(t: ^testin
 @(test)
 persisted_state_json_round_trip_test :: proc(t: ^testing.T) {
 	original := Persisted_State{version=1}
-	append(&original.sources, Source_Video{id="source-1", video_id="abc", title="Warmup", duration=90})
-	append(&original.exercises, Exercise{id="exercise-1", source_id="source-1", name="Scale", start_seconds=12, end_seconds=24})
+	append(&original.sources, Source_Video{
+		id="source-1",
+		video_id="abc",
+		title="Warmup",
+		url="https://youtu.be/abc",
+		media_path="/tmp/source.mp4",
+		duration=90,
+	})
+	append(&original.exercises, Exercise{
+		id="exercise-1",
+		source_id="source-1",
+		name="Scale",
+		start_seconds=12,
+		end_seconds=24,
+		clip_path="/tmp/exercise.mp4",
+	})
 	encoded, marshal_error := json.marshal(original)
 	defer delete(encoded)
 	defer delete(original.sources)
@@ -1083,12 +1097,20 @@ persisted_state_json_round_trip_test :: proc(t: ^testing.T) {
 	unmarshal_error := json.unmarshal(encoded, &restored, .JSON)
 	defer {
 		for source in restored.sources {
-			delete(source.id); delete(source.video_id); delete(source.title)
+			delete(source.id)
+			delete(source.video_id)
+			delete(source.title)
+			delete(source.url)
+			delete(source.media_path)
 		}
 		for exercise in restored.exercises {
-			delete(exercise.id); delete(exercise.source_id); delete(exercise.name)
+			delete(exercise.id)
+			delete(exercise.source_id)
+			delete(exercise.name)
+			delete(exercise.clip_path)
 		}
-		delete(restored.sources); delete(restored.exercises)
+		delete(restored.sources)
+		delete(restored.exercises)
 	}
 	testing.expect(t, unmarshal_error == nil)
 	testing.expect_value(t, restored.sources[0].title, "Warmup")

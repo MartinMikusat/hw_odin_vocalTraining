@@ -86,6 +86,8 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 	if ui.mode == .Play {mode = "play"}
 	overlay := "none"
 	switch {
+	case library_recovery_state.required: overlay = "library-recovery"
+	case major_change_pending.open: overlay = "backup-warning"
 	case command_palette.is_open(&command_palette_state): overlay = "command-palette"
 	case ui.notification_modal_open: overlay = "notification-history"
 	case ui.randomize_help_open: overlay = "randomize-help"

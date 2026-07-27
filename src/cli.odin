@@ -39,6 +39,7 @@ CLI_Request :: struct {
 	to_segment: string,
 	name: string,
 	max_height: int,
+	allow_without_backup: bool,
 	baseline_path: string,
 	scenario: string,
 }
@@ -245,12 +246,17 @@ cli_parse_positive_int :: proc(value: string) -> (int, bool) {
 }
 
 cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string) -> (string, bool) {
-	for index := 0; index < len(args); index += 2 {
-		if index+1 >= len(args) {return fmt.tprintf("Missing value for %s", args[index]), false}
+	for index := 0; index < len(args); {
 		flag := args[index]
 		valid := false
 		for candidate in allowed {if flag == candidate {valid = true; break}}
 		if !valid {return fmt.tprintf("Unknown option: %s", flag), false}
+		if flag == "--allow-without-backup" {
+			request.allow_without_backup = true
+			index += 1
+			continue
+		}
+		if index+1 >= len(args) {return fmt.tprintf("Missing value for %s", args[index]), false}
 		value := args[index+1]
 		switch flag {
 		case "--url": request.url = value
@@ -265,6 +271,7 @@ cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string
 			if !ok {return "--max-height must be a positive integer", false}
 			request.max_height = height
 		}
+		index += 2
 	}
 	return "", true
 }
@@ -285,7 +292,7 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 	switch {
 	case group == "source" && action == "add":
 		request.command = .Source_Add
-		allowed = []string{"--url", "--max-height"}
+		allowed = []string{"--url", "--max-height", "--allow-without-backup"}
 	case group == "source" && action == "list":
 		request.command = .Source_List
 		if len(remaining) != 0 {return {}, cli_error(request.command, .Usage, "usage", "source list does not accept options"), false}
@@ -398,6 +405,16 @@ cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
 	if import_job != nil || export_job != nil {return cli_error(request.command, .Busy, "busy", "Another media operation is active")}
 	video_id, valid_url := parse_video_id(request.url)
 	if !valid_url {return cli_error(request.command, .Invalid, "invalid_url", "The URL is not a supported YouTube video URL")}
+	backup := library_backup_create(library_database)
+	defer library_backup_result_destroy(&backup)
+	if backup.status == .Failed && !request.allow_without_backup {
+		return cli_error(
+			request.command,
+			.Storage,
+			"backup_failed",
+			"Unable to verify a library backup; pass --allow-without-backup to continue",
+		)
+	}
 
 	existing := cli_find_source(video_id)
 	if existing == nil {
@@ -408,6 +425,7 @@ cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
 	job := import_job_create(request.url)
 	if job == nil {return cli_error(request.command, .Storage, "allocation_failed", "Unable to allocate the import job")}
 	defer import_job_destroy(job)
+	job.allow_without_backup = request.allow_without_backup
 	allocator := mem_virtual.arena_allocator(job.arena)
 	append(&job.qualities, Import_Quality{video_id=strings.clone(video_id, allocator), height=request.max_height})
 	if import_job_process_url(job, request.url) {job.accepted = 1} else {job.failed = 1}

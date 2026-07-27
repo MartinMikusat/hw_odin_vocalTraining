@@ -396,6 +396,37 @@ notification_history_initialize :: proc() {
 	notification_history.persistence_available = notification_database_load()
 }
 
+notification_history_rebind_database :: proc() -> bool {
+	if !notification_history.initialized ||
+	   library_database == nil ||
+	   library_legacy_fallback {
+		return false
+	}
+	for &notification in notification_history.entries {
+		notification_destroy(&notification)
+	}
+	resize(&notification_history.entries, 0)
+	resize(&notification_history.footer_task_ids, 0)
+	notification_history.current_id = 0
+	notification_history.selected_id = 0
+	notification_history.next_memory_id = -1
+	now_ms := notification_now_ms()
+	if !notification_database_mark_interrupted(now_ms) ||
+	   !notification_database_load() {
+		for &notification in notification_history.entries {
+			notification_destroy(&notification)
+		}
+		resize(&notification_history.entries, 0)
+		notification_history.persistence_available = false
+		return false
+	}
+	notification_history.persistence_available = true
+	if latest := notification_latest(); latest != nil {
+		notification_present(latest)
+	}
+	return true
+}
+
 notification_history_destroy :: proc() {
 	for &notification in notification_history.entries {
 		notification_destroy(&notification)

@@ -7,6 +7,7 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import "core:time"
+import "core:unicode/utf8"
 import mem_virtual "core:mem/virtual"
 import "base:runtime"
 
@@ -509,7 +510,30 @@ database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 			exercise_id TEXT PRIMARY KEY,
 			last_sequence INTEGER NOT NULL
 		);
-		PRAGMA user_version = 4;
+		CREATE TABLE IF NOT EXISTS library_meta (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			current_revision INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS library_revisions (
+			revision INTEGER PRIMARY KEY,
+			committed_at_ms INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS library_changes (
+			revision INTEGER NOT NULL REFERENCES library_revisions(revision)
+				ON DELETE CASCADE,
+			entity_kind INTEGER NOT NULL,
+			entity_id TEXT NOT NULL,
+			numeric_key INTEGER NOT NULL DEFAULT 0,
+			operation INTEGER NOT NULL,
+			PRIMARY KEY (
+				revision, entity_kind, entity_id, numeric_key
+			)
+		);
+		INSERT OR IGNORE INTO library_meta (id, current_revision) VALUES (1, 1);
+		INSERT OR IGNORE INTO library_revisions (
+			revision, committed_at_ms
+		) VALUES (1, 0);
+		PRAGMA user_version = 5;
 	`)
 }
 
@@ -635,9 +659,30 @@ database_save_collections :: proc(
 	exercises: []Exercise,
 ) -> bool {
 	if database == nil {return false}
+	previous: App_State
+	load_result := database_load_state_result(database, &previous)
+	defer library_load_result_destroy(&load_result)
+	if load_result.mode != .Ready {return false}
+	defer app_state_collections_destroy(&previous)
+	candidate, candidate_copied := app_state_collections_copy(
+		sources,
+		segments,
+		hints,
+		exercises,
+	)
+	if !candidate_copied {return false}
+	defer app_state_collections_destroy(&candidate)
+	if !library_state_valid(&candidate) {return false}
 	if !sqlite_execute(database, "BEGIN IMMEDIATE") {return false}
 	committed := false
 	defer if !committed {sqlite_execute(database, "ROLLBACK")}
+	if _, revision_recorded := library_revision_record_changes(
+		database,
+		&previous,
+		&candidate,
+	); !revision_recorded {
+		return false
+	}
 	if !sqlite_execute(database, "DELETE FROM transcript_segments; DELETE FROM import_hints; DELETE FROM exercises; DELETE FROM sources;") {return false}
 	for source, position in sources {
 		if !database_insert_source(database, source, position) {return false}
@@ -860,9 +905,18 @@ portable_library_read :: proc(path: string) -> (App_State, Portable_Library_Erro
 	return result, .None
 }
 
-portable_library_install :: proc(imported: ^App_State) -> Portable_Library_Error {
+portable_library_install :: proc(
+	imported: ^App_State,
+	allow_without_backup := false,
+) -> Portable_Library_Error {
 	if library_database == nil || library_legacy_fallback {return .Database}
-	if !commit_library_state(imported) {return .Database}
+	if !commit_library_state(
+		imported,
+		.Library_Replacement,
+		allow_without_backup,
+	) {
+		return .Database
+	}
 	return .None
 }
 
@@ -891,13 +945,124 @@ database_state_counts_match :: proc(database: ^SQLite_DB) -> bool {
 	return true
 }
 
-database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bool {
+library_load_failure :: proc(
+	database: ^SQLite_DB,
+	stage: Library_Load_Stage,
+	detail: string,
+) -> Library_Load_Result {
+	return {
+		mode = .Recovery_Required,
+		stage = stage,
+		sqlite_code = database != nil ? int(sqlite3_extended_errcode(database)) : 0,
+		detail = strings.clone(detail),
+	}
+}
+
+library_load_result_destroy :: proc(result: ^Library_Load_Result) {
+	if result == nil {return}
+	delete(result.detail)
+	result^ = {}
+}
+
+sqlite_column_required_string :: proc(
+	statement: ^SQLite_Statement,
+	index: int,
+	allocator := context.allocator,
+) -> (string, bool) {
+	if sqlite3_column_type(statement, i32(index)) == SQLITE_NULL {return "", false}
+	value := sqlite3_column_text(statement, i32(index))
+	if value == nil {return "", false}
+	text := string(value)
+	if !utf8.valid_string(text) {return "", false}
+	copy, error := strings.clone(text, allocator)
+	return copy, error == nil
+}
+
+library_state_valid :: proc(value: ^App_State) -> bool {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if value == nil {return false}
+	index, indexed := library_state_index_build(value)
+	if !indexed {return false}
+	defer library_state_index_destroy(&index)
+	for source in value.sources {
+		if !portable_identifier_valid(source.id) ||
+		   !portable_identifier_valid(source.video_id) ||
+		   len(source.title) == 0 ||
+		   len(source.url) == 0 ||
+		   len(source.media_path) == 0 ||
+		   !utf8.valid_string(source.title) ||
+		   !utf8.valid_string(source.url) ||
+		   !utf8.valid_string(source.media_path) ||
+		   !utf8.valid_string(source.metadata.vcodec) ||
+		   !utf8.valid_string(source.metadata.acodec) ||
+		   !utf8.valid_string(source.metadata.ext) ||
+		   !utf8.valid_string(source.metadata.format_id) ||
+		   !portable_seconds_valid(source.duration) ||
+		   !portable_seconds_valid(source.metadata.fps) ||
+		   source.metadata.width < 0 ||
+		   source.metadata.height < 0 ||
+		   source.metadata.filesize_approx < 0 {
+			return false
+		}
+		switch source.metadata_status {
+		case .Missing, .Available, .Unavailable:
+		case: return false
+		}
+	}
+	for segment in value.transcripts.segments {
+		if !portable_identifier_valid(segment.id) ||
+		   !utf8.valid_string(segment.text) ||
+		   !portable_seconds_valid(segment.start_seconds) ||
+		   !portable_seconds_valid(segment.duration_seconds) {
+			return false
+		}
+		source_index, source_found := index.sources[segment.source_id]
+		if !source_found ||
+		   segment.start_seconds > value.sources[source_index].duration {
+			return false
+		}
+	}
+	for hint in value.hints {
+		source_index, source_found := index.sources[hint.source_id]
+		if !source_found ||
+		   !portable_seconds_valid(hint.seconds) ||
+		   hint.seconds > value.sources[source_index].duration {
+			return false
+		}
+	}
+	for exercise in value.exercises {
+		source_index, source_found := index.sources[exercise.source_id]
+		if !portable_identifier_valid(exercise.id) ||
+		   !source_found ||
+		   len(exercise.name) == 0 ||
+		   !utf8.valid_string(exercise.name) ||
+		   !utf8.valid_string(exercise.clip_path) ||
+		   !valid_exercise_range(
+				exercise.start_seconds,
+				exercise.end_seconds,
+				value.sources[source_index].duration,
+		   ) {
+			return false
+		}
+	}
+	return true
+}
+
+database_load_state_result :: proc(
+	database: ^SQLite_DB,
+	destination: ^App_State,
+) -> Library_Load_Result {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if database == nil || destination == nil {
+		return library_load_failure(database, .Open, "The library database is not open")
+	}
 	sources := make([dynamic]Source_Video)
 	hints := make([dynamic]Import_Hint)
 	exercises := make([dynamic]Exercise)
 	transcripts, transcript_ok := transcript_generation_create(256)
-	if !transcript_ok {return false}
+	if !transcript_ok {
+		return library_load_failure(database, .Transcripts, "Unable to allocate transcript storage")
+	}
 	loaded := false
 	defer if !loaded {
 		for &source in sources {delete_source_video(&source)}
@@ -908,25 +1073,31 @@ database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bo
 	}
 
 	statement, ok := sqlite_prepare(database, "SELECT id, video_id, title, url, media_path, duration, metadata_status, width, height, fps, video_codec, audio_codec, container, format_id, file_size FROM sources ORDER BY position")
-	if !ok {return false}
-	for sqlite3_step(statement) == SQLITE_ROW {
+	if !ok {return library_load_failure(database, .Sources, "Unable to read sources")}
+	for {
+		step := sqlite3_step(statement)
+		if step == SQLITE_DONE {break}
+		if step != SQLITE_ROW {
+			sqlite3_finalize(statement)
+			return library_load_failure(database, .Sources, "The source scan did not finish")
+		}
 		source := Source_Video{}
 		copied: bool
-		source.id, copied = sqlite_column_string(statement, 0); if !copied {sqlite3_finalize(statement); return false}
-		source.video_id, copied = sqlite_column_string(statement, 1); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
-		source.title, copied = sqlite_column_string(statement, 2); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
-		source.url, copied = sqlite_column_string(statement, 3); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
-		stored_media_path, stored_media_path_copied := sqlite_column_string(statement, 4, context.temp_allocator)
-		if !stored_media_path_copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
+		source.id, copied = sqlite_column_required_string(statement, 0); if !copied {sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source identifier is invalid")}
+		source.video_id, copied = sqlite_column_required_string(statement, 1); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source video identifier is invalid")}
+		source.title, copied = sqlite_column_required_string(statement, 2); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source title is invalid")}
+		source.url, copied = sqlite_column_required_string(statement, 3); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source URL is invalid")}
+		stored_media_path, stored_media_path_copied := sqlite_column_required_string(statement, 4, context.temp_allocator)
+		if !stored_media_path_copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source media path is invalid")}
 		source.media_path, copied = database_file_path_for_runtime(stored_media_path)
-		if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
+		if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "Unable to resolve a source media path")}
 		source.duration = sqlite3_column_double(statement, 5)
 		source.metadata_status = Source_Metadata_Status(sqlite3_column_int(statement, 6))
 		source.metadata.width = int(sqlite3_column_int(statement, 7)); source.metadata.height = int(sqlite3_column_int(statement, 8)); source.metadata.fps = sqlite3_column_double(statement, 9)
-		source.metadata.vcodec, copied = sqlite_column_string(statement, 10); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
-		source.metadata.acodec, copied = sqlite_column_string(statement, 11); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
-		source.metadata.ext, copied = sqlite_column_string(statement, 12); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
-		source.metadata.format_id, copied = sqlite_column_string(statement, 13); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return false}
+		source.metadata.vcodec, copied = sqlite_column_required_string(statement, 10); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source video codec is invalid")}
+		source.metadata.acodec, copied = sqlite_column_required_string(statement, 11); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source audio codec is invalid")}
+		source.metadata.ext, copied = sqlite_column_required_string(statement, 12); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source container is invalid")}
+		source.metadata.format_id, copied = sqlite_column_required_string(statement, 13); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source format identifier is invalid")}
 		source.metadata.filesize_approx = sqlite3_column_int64(statement, 14)
 		source.media_available = os.exists(source.media_path)
 		append(&sources, source)
@@ -940,20 +1111,36 @@ database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bo
 		JOIN sources AS source ON source.id = transcript.source_id
 		ORDER BY source.position, transcript.position
 	`)
-	if !ok {return false}
-	for sqlite3_step(statement) == SQLITE_ROW {
+	if !ok {return library_load_failure(database, .Transcripts, "Unable to read transcripts")}
+	for {
+		step := sqlite3_step(statement)
+		if step == SQLITE_DONE {break}
+		if step != SQLITE_ROW {
+			sqlite3_finalize(statement)
+			return library_load_failure(database, .Transcripts, "The transcript scan did not finish")
+		}
 		segment := Transcript_Segment{start_seconds=sqlite3_column_double(statement, 2), duration_seconds=sqlite3_column_double(statement, 3)}
-		segment.id, _ = sqlite_column_string(statement, 0, context.temp_allocator)
-		segment.source_id, _ = sqlite_column_string(statement, 1, context.temp_allocator)
-		segment.text, _ = sqlite_column_string(statement, 4, context.temp_allocator)
-		if !transcript_append_copy(&transcripts, segment) {sqlite3_finalize(statement); return false}
+		valid: bool
+		segment.id, valid = sqlite_column_required_string(statement, 0, context.temp_allocator)
+		if !valid {sqlite3_finalize(statement); return library_load_failure(database, .Transcripts, "A transcript identifier is invalid")}
+		segment.source_id, valid = sqlite_column_required_string(statement, 1, context.temp_allocator)
+		if !valid {sqlite3_finalize(statement); return library_load_failure(database, .Transcripts, "A transcript source is invalid")}
+		segment.text, valid = sqlite_column_required_string(statement, 4, context.temp_allocator)
+		if !valid {sqlite3_finalize(statement); return library_load_failure(database, .Transcripts, "Transcript text is invalid")}
+		if !transcript_append_copy(&transcripts, segment) {sqlite3_finalize(statement); return library_load_failure(database, .Transcripts, "Unable to allocate transcript text")}
 	}
 	sqlite3_finalize(statement)
 
 	statement, ok = sqlite_prepare(database, "SELECT source_id, seconds FROM import_hints ORDER BY position")
-	if !ok {return false}
-	for sqlite3_step(statement) == SQLITE_ROW {
-		source_id, copied := sqlite_column_string(statement, 0); if !copied {sqlite3_finalize(statement); return false}
+	if !ok {return library_load_failure(database, .Hints, "Unable to read import hints")}
+	for {
+		step := sqlite3_step(statement)
+		if step == SQLITE_DONE {break}
+		if step != SQLITE_ROW {
+			sqlite3_finalize(statement)
+			return library_load_failure(database, .Hints, "The import-hint scan did not finish")
+		}
+		source_id, copied := sqlite_column_required_string(statement, 0); if !copied {sqlite3_finalize(statement); return library_load_failure(database, .Hints, "An import-hint source is invalid")}
 		append(&hints, Import_Hint{source_id=source_id, seconds=sqlite3_column_double(statement, 1)})
 	}
 	sqlite3_finalize(statement)
@@ -967,28 +1154,52 @@ database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bo
 		 LEFT JOIN exercise_randomization r ON r.exercise_id = e.id
 		 ORDER BY e.position`,
 	)
-	if !ok {return false}
-	for sqlite3_step(statement) == SQLITE_ROW {
+	if !ok {return library_load_failure(database, .Exercises, "Unable to read exercises")}
+	for {
+		step := sqlite3_step(statement)
+		if step == SQLITE_DONE {break}
+		if step != SQLITE_ROW {
+			sqlite3_finalize(statement)
+			return library_load_failure(database, .Exercises, "The exercise scan did not finish")
+		}
 		exercise := Exercise{
 			start_seconds = sqlite3_column_double(statement, 3),
 			end_seconds = sqlite3_column_double(statement, 4),
 			last_randomized_sequence = sqlite3_column_int64(statement, 6),
 		}
 		copied: bool
-		exercise.id, copied = sqlite_column_string(statement, 0); if !copied {sqlite3_finalize(statement); return false}
-		exercise.source_id, copied = sqlite_column_string(statement, 1); if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return false}
-		exercise.name, copied = sqlite_column_string(statement, 2); if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return false}
-		stored_clip_path, stored_clip_path_copied := sqlite_column_string(statement, 5, context.temp_allocator)
-		if !stored_clip_path_copied {delete_exercise(&exercise); sqlite3_finalize(statement); return false}
+		exercise.id, copied = sqlite_column_required_string(statement, 0); if !copied {sqlite3_finalize(statement); return library_load_failure(database, .Exercises, "An exercise identifier is invalid")}
+		exercise.source_id, copied = sqlite_column_required_string(statement, 1); if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return library_load_failure(database, .Exercises, "An exercise source is invalid")}
+		exercise.name, copied = sqlite_column_required_string(statement, 2); if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return library_load_failure(database, .Exercises, "An exercise name is invalid")}
+		stored_clip_path, stored_clip_path_copied := sqlite_column_required_string(statement, 5, context.temp_allocator)
+		if !stored_clip_path_copied {delete_exercise(&exercise); sqlite3_finalize(statement); return library_load_failure(database, .Exercises, "An exercise clip path is invalid")}
 		exercise.clip_path, copied = database_file_path_for_runtime(stored_clip_path)
-		if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return false}
+		if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return library_load_failure(database, .Exercises, "Unable to resolve an exercise clip path")}
 		append(&exercises, exercise)
 	}
 	sqlite3_finalize(statement)
 
-	destination.sources = sources; destination.hints = hints; destination.exercises = exercises; destination.transcripts = transcripts
+	candidate := App_State{
+		sources = sources,
+		hints = hints,
+		exercises = exercises,
+		transcripts = transcripts,
+	}
+	if !library_state_valid(&candidate) {
+		return library_load_failure(database, .Validation, "The library contains invalid or inconsistent records")
+	}
+	destination.sources = sources
+	destination.hints = hints
+	destination.exercises = exercises
+	destination.transcripts = transcripts
 	loaded = true
-	return true
+	return {mode=.Ready}
+}
+
+database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bool {
+	result := database_load_state_result(database, destination)
+	defer library_load_result_destroy(&result)
+	return result.mode == .Ready
 }
 
 save_library :: proc() -> bool {
@@ -996,7 +1207,7 @@ save_library :: proc() -> bool {
 }
 
 save_library_state :: proc(value: ^App_State) -> bool {
-	if value == nil {return false}
+	if value == nil || !library_storage_writable() {return false}
 	if library_legacy_fallback {return save_legacy_library_state(value)}
 	return database_save_collections(
 		library_database,
@@ -1007,46 +1218,160 @@ save_library_state :: proc(value: ^App_State) -> bool {
 	)
 }
 
-commit_library_state :: proc(candidate: ^App_State) -> bool {
+commit_library_state :: proc(
+	candidate: ^App_State,
+	change_kind := Library_Change_Kind.Routine,
+	allow_without_backup := false,
+) -> bool {
+	if change_kind != .Routine {
+		backup := library_backup_create(library_database)
+		defer library_backup_result_destroy(&backup)
+		if backup.status == .Failed && !allow_without_backup {return false}
+		if backup.status == .Failed {
+			_ = notification_post(
+				.Error,
+				"Continuing without a verified library backup",
+				backup.detail,
+			)
+		}
+	}
 	if !save_library_state(candidate) {return false}
 	app_state_collections_replace(&state, candidate)
 	invalidate_transcript_matches()
 	return true
 }
 
-load_library :: proc() {
+load_library :: proc() -> Library_Load_Result {
 	os.make_directory(app_support_dir())
-	database: ^SQLite_DB
+	if !library_recovery_reconcile_activation() {
+		failure := library_load_failure(
+			nil,
+			.Open,
+			"Recovery activation is incomplete. The database files were preserved.",
+		)
+		library_recovery_block(failure)
+		return failure
+	}
 	path := database_path()
-	c_path := strings.clone_to_cstring(path)
-	defer delete(c_path)
-	if sqlite3_open_v2(c_path, &database, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, nil) != SQLITE_OK {
-		if database != nil {sqlite3_close(database)}
-		library_legacy_fallback = true
-		load_legacy_library()
-		return
+	database_exists := os.exists(path)
+	candidate: App_State
+	if database_exists {
+		read_database, opened := library_database_open_path(path, SQLITE_OPEN_READONLY)
+		if !opened {
+			failure := library_load_failure(nil, .Open, "Unable to open the library database")
+			library_recovery_require(failure)
+			return failure
+		}
+		schema_version, version_read := library_database_user_version(
+			read_database,
+		)
+		if !version_read {
+			sqlite3_close(read_database)
+			failure := library_load_failure(
+				nil,
+				.Schema,
+				"Unable to read the library schema version",
+			)
+			library_recovery_block(failure)
+			return failure
+		}
+		if schema_version > LIBRARY_SCHEMA_VERSION {
+			sqlite3_close(read_database)
+			failure := library_load_failure(
+				nil,
+				.Schema,
+				fmt.tprintf(
+					"The library uses schema version %d. This application supports version %d.",
+					schema_version,
+					LIBRARY_SCHEMA_VERSION,
+				),
+			)
+			failure.schema_version = schema_version
+			library_recovery_block(failure)
+			return failure
+		}
+		load_result := database_load_state_result(read_database, &candidate)
+		if load_result.mode != .Ready {
+			sqlite3_close(read_database)
+			library_recovery_require(load_result)
+			return load_result
+		}
+		if schema_version < LIBRARY_SCHEMA_VERSION {
+			backup := library_backup_create(read_database, false)
+			backup_created := backup.status != .Failed
+			library_backup_result_destroy(&backup)
+			if !backup_created {
+				app_state_collections_destroy(&candidate)
+				sqlite3_close(read_database)
+				failure := library_load_failure(
+					nil,
+					.Migration,
+					"Unable to create a verified backup before migration",
+				)
+				library_recovery_require(failure)
+				return failure
+			}
+		}
+		sqlite3_close(read_database)
+	}
+
+	database, opened := library_database_open_path(
+		path,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+	)
+	if !opened {
+		app_state_collections_destroy(&candidate)
+		failure := library_load_failure(nil, .Open, "Unable to open the library database for writing")
+		library_recovery_require(failure)
+		return failure
+	}
+	if !database_create_schema(database) {
+		app_state_collections_destroy(&candidate)
+		failure := library_load_failure(database, .Migration, "Unable to migrate the library database")
+		sqlite3_close(database)
+		library_recovery_require(failure)
+		return failure
 	}
 	library_database = database
-	if !database_create_schema(database) {
-		library_legacy_fallback = true
-		load_legacy_library()
-		return
+	library_legacy_fallback = false
+	library_storage_mode = .Ready
+	if database_exists {
+		app_state_collections_replace(&state, &candidate)
+	} else {
+		load_result := database_load_state_result(database, &state)
+		if load_result.mode != .Ready {
+			sqlite3_close(database)
+			library_database = nil
+			library_recovery_require(load_result)
+			return load_result
+		}
+		library_load_result_destroy(&load_result)
 	}
 	source_auth_saved_browser = database_source_auth_browser_load(database)
 	legacy_exists := os.exists(manifest_path())
 	if legacy_exists {
+		app_state_collections_destroy(&state)
 		load_legacy_library()
 		if !database_save_state(database) || !database_state_counts_match(database) || !database_integrity_ok(database) {
-			library_legacy_fallback = true
-			return
+			failure := library_load_failure(database, .Migration, "Unable to migrate the legacy library")
+			sqlite3_close(database)
+			library_database = nil
+			library_recovery_require(failure)
+			return failure
 		}
 		_ = os.remove(manifest_path())
-		return
 	}
-	_ = database_load_state(database, &state)
+	if _, found := library_backup_latest(context.temp_allocator); !found {
+		backup := library_backup_create(database)
+		library_backup_result_destroy(&backup)
+	}
+	return {mode=.Ready}
 }
 
 database_close :: proc() {
 	if library_database != nil {sqlite3_close(library_database)}
 	library_database = nil
+	if library_storage_mode != .Recovery_Required {
+		library_storage_mode = .Closed
+	}
 }

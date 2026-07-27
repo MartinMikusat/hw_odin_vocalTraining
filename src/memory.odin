@@ -287,6 +287,40 @@ app_state_collections_clone :: proc(source: ^App_State) -> (App_State, bool) {
 	return result, true
 }
 
+app_state_collections_copy :: proc(
+	sources: []Source_Video,
+	segments: []Transcript_Segment,
+	hints: []Import_Hint,
+	exercises: []Exercise,
+) -> (App_State, bool) {
+	result: App_State
+	result.sources = make([dynamic]Source_Video, 0, len(sources))
+	result.hints = make([dynamic]Import_Hint, 0, len(hints))
+	result.exercises = make([dynamic]Exercise, 0, len(exercises))
+	loaded := false
+	defer if !loaded {app_state_collections_destroy(&result)}
+	for source in sources {
+		copy, copied := clone_source_video(source)
+		if !copied {return {}, false}
+		append(&result.sources, copy)
+	}
+	for hint in hints {
+		copy, copied := clone_import_hint(hint)
+		if !copied {return {}, false}
+		append(&result.hints, copy)
+	}
+	for exercise in exercises {
+		copy, copied := clone_exercise(exercise)
+		if !copied {return {}, false}
+		append(&result.exercises, copy)
+	}
+	transcripts, copied := transcript_generation_copy(segments)
+	if !copied {return {}, false}
+	result.transcripts = transcripts
+	loaded = true
+	return result, true
+}
+
 app_state_collections_replace :: proc(destination, replacement: ^App_State) {
 	if destination == nil || replacement == nil {return}
 	previous: App_State

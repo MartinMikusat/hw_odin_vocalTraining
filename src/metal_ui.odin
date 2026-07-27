@@ -326,6 +326,13 @@ UI_Action_Kind :: enum {
 	Import_Library,
 	Cancel_Library_Import,
 	Confirm_Library_Import,
+	Recovery_Backup_Only,
+	Recovery_Backup_With_Salvage,
+	Recovery_Salvage_Only,
+	Recovery_Cancel,
+	Recovery_Confirm,
+	Backup_Warning_Cancel,
+	Backup_Warning_Continue,
 }
 
 AX_Action :: struct {
@@ -1284,6 +1291,35 @@ data_modal_action_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 
 data_modal_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
+}
+
+recovery_modal_rect :: proc() -> UI_Rect {
+	width := min(max(680, ui.width * 0.68), 860)
+	height := min(max(500, ui.height * 0.72), 620)
+	return UI_Rect{(ui.width-width)/2, (ui.height-height)/2, width, height}
+}
+
+recovery_action_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
+	return UI_Rect{
+		modal.x + 24,
+		modal.y + modal.h - 268 - f64(row)*58,
+		modal.w - 48,
+		44,
+	}
+}
+
+recovery_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 24, 124, 38}
+}
+
+recovery_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + modal.w - 224, modal.y + 24, 200, 38}
+}
+
+backup_warning_modal_rect :: proc() -> UI_Rect {
+	width := min(max(600, ui.width*0.58), 760)
+	height := 330.0
+	return UI_Rect{(ui.width-width)/2, (ui.height-height)/2, width, height}
 }
 
 notification_modal_rect_for_size :: proc(
@@ -3420,6 +3456,241 @@ draw_data_modal :: proc(
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
 }
 
+draw_library_recovery :: proc(
+	ctx, font: rawptr,
+	bright, muted, dim, orange, cyan, danger: [4]f64,
+) {
+	if !library_recovery_state.required {return}
+	modal := recovery_modal_rect()
+	fill_overlay_rect(
+		ctx,
+		UI_Rect{0, 0, ui.width, ui.height},
+		[4]f64{0.008, 0.009, 0.009, 0.96},
+	)
+	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	header := UI_Rect{modal.x, modal.y + modal.h - 58, modal.w, 58}
+	fill_overlay_rect(ctx, header, [4]f64{0.12, 0.035, 0.028, 1})
+	title := "LIBRARY RECOVERY REQUIRED"
+	if !library_recovery_state.recovery_allowed {
+		title = "LIBRARY VERSION NOT SUPPORTED"
+	}
+	draw_text_in_rect(
+		ctx,
+		font,
+		title,
+		UI_Rect{header.x + 20, header.y, header.w - 40, header.h},
+		.Start,
+		.Center,
+		bright,
+	)
+	failure := library_recovery_state.failure
+	draw_text_in_rect(
+		ctx,
+		font,
+		fmt.tprintf("STORAGE READ FAILED / %s", failure.stage),
+		UI_Rect{modal.x + 24, modal.y + modal.h - 106, modal.w - 48, 24},
+		.Start,
+		.Center,
+		danger,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		failure.detail,
+		UI_Rect{modal.x + 24, modal.y + modal.h - 140, modal.w - 48, 28},
+		.Start,
+		.Center,
+		bright,
+	)
+	report := &library_recovery_state.report
+	if !library_recovery_state.recovery_allowed {
+		draw_text_in_rect(
+			ctx,
+			font,
+			"This database cannot be changed by this application version. No files were modified.",
+			UI_Rect{modal.x + 24, modal.y + modal.h - 196, modal.w - 48, 28},
+			.Start,
+			.Center,
+			danger,
+		)
+		return
+	}
+	if !library_recovery_state.analysis_complete {
+		draw_text_in_rect(
+			ctx,
+			font,
+			"Recovery analysis did not produce a valid replacement library.",
+			UI_Rect{modal.x + 24, modal.y + modal.h - 196, modal.w - 48, 28},
+			.Start,
+			.Center,
+			danger,
+		)
+		return
+	}
+	draw_text_in_rect(
+		ctx,
+		font,
+		fmt.tprintf(
+			"%03d SOURCES   %04d SEGMENTS   %03d HINTS   %03d EXERCISES",
+			report.recovered_sources,
+			report.recovered_segments,
+			report.recovered_hints,
+			report.recovered_exercises,
+		),
+		UI_Rect{modal.x + 24, modal.y + modal.h - 184, modal.w - 48, 26},
+		.Start,
+		.Center,
+		cyan,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		fmt.tprintf(
+			"%d REJECTED RECORDS   %d INCOMPLETE TABLES   %d REPLAYED DELETIONS",
+			report.rejected_records,
+			report.incomplete_tables,
+			report.replayed_deletions,
+		),
+		UI_Rect{modal.x + 24, modal.y + modal.h - 214, modal.w - 48, 24},
+		.Start,
+		.Center,
+		muted,
+	)
+	if library_recovery_state.backup_ready &&
+	   !library_recovery_state.merge_ready {
+		draw_text_in_rect(
+			ctx,
+			font,
+			"Validated newer records could not be combined. The verified backup remains available.",
+			UI_Rect{modal.x + 24, modal.y + modal.h - 244, modal.w - 48, 22},
+			.Start,
+			.Center,
+			danger,
+		)
+	}
+
+	if library_recovery_state.confirm_open {
+		draw_text_in_rect(
+			ctx,
+			font,
+			"The failed database will move to the Recovery folder. The application will activate a verified replacement.",
+			UI_Rect{modal.x + 24, modal.y + modal.h - 286, modal.w - 48, 44},
+			.Start,
+			.Center,
+			bright,
+		)
+		cancel := ui_control_rect(.Recovery_Cancel)
+		confirm := ui_control_rect(.Recovery_Confirm)
+		fill_overlay_rect(ctx, cancel, [4]f64{0.052, 0.055, 0.052, 1})
+		fill_overlay_rect(ctx, confirm, [4]f64{0.15, 0.061, 0.032, 1})
+		fill_overlay_border(ctx, confirm, orange)
+		draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
+		draw_text_in_rect(ctx, font, "ACTIVATE RECOVERY", confirm, .Center, .Center, bright)
+		return
+	}
+
+	kinds := [3]UI_Action_Kind{
+		.Recovery_Backup_Only,
+		.Recovery_Backup_With_Salvage,
+		.Recovery_Salvage_Only,
+	}
+	labels := [3]string{
+		"RESTORE VERIFIED BACKUP",
+		"RESTORE BACKUP AND VALID NEWER RECORDS",
+		"RECOVER VALID RECORDS WITHOUT A BACKUP",
+	}
+	details := [3]string{
+		"Discard all changes after the selected backup revision",
+		"Apply validated newer rows and logged deletions to the backup",
+		"Build a new library from the readable rows in the failed database",
+	}
+	for kind, index in kinds {
+		control := find_ui_control_by_action(kind)
+		if control == nil {continue}
+		rect := control.rect
+		color := [4]f64{0.052, 0.055, 0.052, 1}
+		if contains(rect, ui.mouse) {color = [4]f64{0.09, 0.095, 0.09, 1}}
+		fill_overlay_rect(ctx, rect, color)
+		draw_text_in_rect(
+			ctx,
+			font,
+			labels[index],
+			UI_Rect{rect.x + 12, rect.y + 11, rect.w - 24, 20},
+			.Start,
+			.Center,
+			bright,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			details[index],
+			UI_Rect{rect.x + 12, rect.y - 7, rect.w - 24, 18},
+			.Start,
+			.Center,
+			muted,
+		)
+	}
+}
+
+draw_backup_warning :: proc(
+	ctx, font: rawptr,
+	bright, muted, orange, danger: [4]f64,
+) {
+	if !major_change_pending.open {return}
+	modal := backup_warning_modal_rect()
+	fill_overlay_rect(
+		ctx,
+		UI_Rect{0, 0, ui.width, ui.height},
+		[4]f64{0.008, 0.009, 0.009, 0.94},
+	)
+	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	header := UI_Rect{modal.x, modal.y + modal.h - 56, modal.w, 56}
+	fill_overlay_rect(ctx, header, [4]f64{0.12, 0.035, 0.028, 1})
+	draw_text_in_rect(
+		ctx,
+		font,
+		"VERIFIED BACKUP FAILED",
+		UI_Rect{header.x + 20, header.y, header.w - 40, header.h},
+		.Start,
+		.Center,
+		bright,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		major_change_pending.detail,
+		UI_Rect{modal.x + 24, modal.y + modal.h - 118, modal.w - 48, 28},
+		.Start,
+		.Center,
+		danger,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"Continuing will change the library without a new verified restore point.",
+		UI_Rect{modal.x + 24, modal.y + modal.h - 170, modal.w - 48, 32},
+		.Start,
+		.Center,
+		bright,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"Cancel the operation unless the existing backups are sufficient.",
+		UI_Rect{modal.x + 24, modal.y + modal.h - 206, modal.w - 48, 28},
+		.Start,
+		.Center,
+		muted,
+	)
+	cancel := ui_control_rect(.Backup_Warning_Cancel)
+	confirm := ui_control_rect(.Backup_Warning_Continue)
+	fill_overlay_rect(ctx, cancel, [4]f64{0.052, 0.055, 0.052, 1})
+	fill_overlay_rect(ctx, confirm, [4]f64{0.15, 0.061, 0.032, 1})
+	fill_overlay_border(ctx, confirm, orange)
+	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
+	draw_text_in_rect(ctx, font, "CONTINUE WITHOUT BACKUP", confirm, .Center, .Center, bright)
+}
+
 notification_kind_text :: proc(kind: Notification_Kind) -> string {
 	switch kind {
 	case .Info:        return "INFO"
@@ -5015,6 +5286,17 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		)
 	}
 	draw_command_palette(ctx, small_font, bright, muted, dim, orange, cyan)
+	draw_library_recovery(
+		ctx,
+		small_font,
+		bright,
+		muted,
+		dim,
+		orange,
+		cyan,
+		danger,
+	)
+	draw_backup_warning(ctx, small_font, bright, muted, orange, danger)
 	draw_flash_hints(ctx, small_font)
 	return pixels
 }
@@ -5348,6 +5630,87 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 	element_class := objc_getClass("VocalAccessibilityElement")
 	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
 		layout_rects()
+	if library_recovery_state.required {
+		modal := recovery_modal_rect()
+		if library_recovery_state.analysis_complete {
+			if library_recovery_state.confirm_open {
+				add_ax_element(
+					array,
+					element_class,
+					"Cancel library recovery",
+					"AXButton",
+					recovery_cancel_rect(modal),
+					.Recovery_Cancel,
+					flash_label = "cancel recovery",
+				)
+				add_ax_element(
+					array,
+					element_class,
+					"Activate recovered library",
+					"AXButton",
+					recovery_confirm_rect(modal),
+					.Recovery_Confirm,
+					flash_label = "activate recovery",
+				)
+			} else if library_recovery_state.backup_ready {
+				add_ax_element(
+					array,
+					element_class,
+					"Restore verified backup",
+					"AXButton",
+					recovery_action_rect(modal, 0),
+					.Recovery_Backup_Only,
+					flash_label = "restore backup",
+				)
+				if library_recovery_state.merge_ready {
+					add_ax_element(
+						array,
+						element_class,
+						"Restore backup and valid newer records",
+						"AXButton",
+						recovery_action_rect(modal, 1),
+						.Recovery_Backup_With_Salvage,
+						flash_label = "restore newer records",
+					)
+				}
+			} else if library_recovery_state.salvage_ready {
+				add_ax_element(
+					array,
+					element_class,
+					"Recover valid records without a backup",
+					"AXButton",
+					recovery_action_rect(modal, 0),
+					.Recovery_Salvage_Only,
+					flash_label = "recover valid records",
+				)
+			}
+		}
+		validate_ui_controls()
+		return
+	}
+	if major_change_pending.open {
+		modal := backup_warning_modal_rect()
+		add_ax_element(
+			array,
+			element_class,
+			"Cancel operation without a verified backup",
+			"AXButton",
+			recovery_cancel_rect(modal),
+			.Backup_Warning_Cancel,
+			flash_label = "cancel operation",
+		)
+		add_ax_element(
+			array,
+			element_class,
+			"Continue operation without a verified backup",
+			"AXButton",
+			recovery_confirm_rect(modal),
+			.Backup_Warning_Continue,
+			flash_label = "continue without backup",
+		)
+		validate_ui_controls()
+		return
+	}
 	if ui.randomize_help_open {
 		modal := randomize_help_modal_rect()
 		add_ax_element(
@@ -6230,6 +6593,35 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		close_data_modal()
 	case .Confirm_Library_Import:
 		confirm_library_import()
+	case .Recovery_Backup_Only:
+		library_recovery_state.option = .Backup_Only
+		library_recovery_state.confirm_open = true
+	case .Recovery_Backup_With_Salvage:
+		library_recovery_state.option = .Backup_With_Salvage
+		library_recovery_state.confirm_open = true
+	case .Recovery_Salvage_Only:
+		library_recovery_state.option = .Salvage_Only
+		library_recovery_state.confirm_open = true
+	case .Recovery_Cancel:
+		library_recovery_state.confirm_open = false
+	case .Recovery_Confirm:
+		option := library_recovery_state.option
+		library_recovery_state.working = true
+		if !library_recovery_activate(option) {
+			library_recovery_state.working = false
+			set_text(state.status, "Library recovery activation failed")
+			ui.status_error = true
+		} else {
+			_ = notification_post(
+				.Success,
+				"Library recovery activated",
+				"The verified replacement library is active. The failed database remains in the Recovery folder.",
+			)
+		}
+	case .Backup_Warning_Cancel:
+		major_change_backup_cancel()
+	case .Backup_Warning_Continue:
+		major_change_backup_continue()
 	case .Rename:
 		open_exercise_rename()
 	case .Metadata:

@@ -32,6 +32,22 @@ The application stores its SQLite library and downloaded media in
 `library.json` file after it verifies the new database. Only download media you
 are authorized to download.
 
+The application validates all required library rows before it enables writes.
+If the read fails, the application blocks normal controls and opens Library
+Recovery. It can restore the newest verified backup alone, or add valid newer
+records and logged deletions. If no backup exists, it can build a library from
+valid readable rows. Recovery keeps the failed database and its SQLite sidecar
+files in the `Recovery` directory.
+
+If the database comes from a newer application schema, this version keeps it
+read-only and asks for a compatible application. It does not offer recovery
+actions that could replace the newer database.
+
+The application keeps the newest 10 verified database backups in `Backups`.
+It creates a backup before source imports, source refetches, library
+replacement, and schema migration. If a pre-change backup fails, the GUI
+requires explicit confirmation before it continues.
+
 ### Workflow
 
 Use the mode control in the title strip to separate the two workflows. **Create**
@@ -186,7 +202,9 @@ build/vocal-training clip list --source VIDEO_ID
 ```
 
 `source add` selects compatible media at or below 1080p. Use `--max-height N`
-to set another limit. The command downloads one URL at a time.
+to set another limit. The command downloads one URL at a time. If backup
+verification fails, the command stops. Add `--allow-without-backup` to
+explicitly continue without a new restore point.
 
 `clip create` starts at the first segment start. It ends at the last segment
 start plus its duration. The command saves the MP4 as an exercise.
@@ -285,11 +303,14 @@ executes the selected opaque identifier. One session arena owns each open
 entry snapshot. Query, result, and ranked-index buffers retain their capacity
 between edits and sessions.
 
-SQLite stores sources, transcript segments, hints, exercises, and source
-metadata. It also stores the newest 10,000 structured notifications. The main
-thread commits state changes in transactions. A startup worker fills missing
-metadata from existing yt-dlp files. Startup marks an unfinished notification
-as interrupted when the previous process did not finalize its operation.
+SQLite stores sources, transcript segments, hints, exercises, source metadata,
+library revisions, and entity changes. It also stores the newest 10,000
+structured notifications. The main thread commits records, revisions, and
+change rows in one transaction. `src/library_recovery.odin` owns verified
+backups, tolerant row salvage, recovery candidates, and crash-safe activation.
+A startup worker fills missing metadata from existing yt-dlp files. Startup
+marks an unfinished notification as interrupted when the previous process did
+not finalize its operation.
 
 The portable library format is a separate JSON data-transfer schema. It omits
 runtime file paths. Import derives each source and clip path from the selected

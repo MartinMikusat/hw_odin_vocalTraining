@@ -113,6 +113,26 @@ App_State :: struct {
 
 state: App_State
 send_address: rawptr
+
+Major_Change_Pending_Kind :: enum {
+	None,
+	Source_Import,
+	Source_Refetch,
+	Library_Replacement,
+}
+
+Major_Change_Pending :: struct {
+	open: bool,
+	allow_once: bool,
+	kind: Major_Change_Pending_Kind,
+	source_index: int,
+	maximum_height: int,
+	auth_browser: Source_Auth_Browser,
+	detail: string,
+}
+
+major_change_pending: Major_Change_Pending
+major_change_backup_override: bool
 system_address: rawptr
 last_imported_source: int = -1
 
@@ -153,6 +173,7 @@ Import_Job :: struct {
 	last_video_id: string,
 	pending_hint: f64,
 	has_pending_hint: bool,
+	allow_without_backup: bool,
 	accepted: int,
 	failed: int,
 	existing_sources: int,
@@ -1425,7 +1446,13 @@ import_job_apply :: proc(job: ^Import_Job) -> bool {
 		transcript_generation_destroy(&candidate.transcripts)
 		candidate.transcripts = transcripts
 	}
-	if !commit_library_state(&candidate) {return false}
+	if !commit_library_state(
+		&candidate,
+		.Source_Import,
+		job.allow_without_backup,
+	) {
+		return false
+	}
 	for source, index in state.sources {
 		if source.video_id == job.last_video_id {last_imported_source = index; break}
 	}
@@ -1832,6 +1859,59 @@ library_recovery_start :: proc() -> bool {
 	return true
 }
 
+major_change_backup_preflight :: proc(
+	kind: Major_Change_Pending_Kind,
+	source_index := -1,
+	maximum_height := 0,
+	auth_browser := Source_Auth_Browser.None,
+) -> bool {
+	if major_change_pending.allow_once {
+		major_change_pending.allow_once = false
+		major_change_backup_override = true
+		return true
+	}
+	backup := library_backup_create(library_database)
+	defer library_backup_result_destroy(&backup)
+	if backup.status != .Failed {return true}
+	delete(major_change_pending.detail)
+	major_change_pending = {
+		open = true,
+		kind = kind,
+		source_index = source_index,
+		maximum_height = maximum_height,
+		auth_browser = auth_browser,
+		detail = strings.clone(backup.detail),
+	}
+	ui.needs_redraw = true
+	return false
+}
+
+major_change_backup_cancel :: proc() {
+	delete(major_change_pending.detail)
+	major_change_pending = {}
+	ui.needs_redraw = true
+}
+
+major_change_backup_continue :: proc() {
+	kind := major_change_pending.kind
+	source_index := major_change_pending.source_index
+	maximum_height := major_change_pending.maximum_height
+	auth_browser := major_change_pending.auth_browser
+	delete(major_change_pending.detail)
+	major_change_pending = {allow_once=true}
+	switch kind {
+	case .Source_Import:
+		on_import(nil, nil, nil)
+	case .Source_Refetch:
+		refetch_source(source_index, maximum_height, auth_browser)
+	case .Library_Replacement:
+		confirm_library_import()
+	case .None:
+		major_change_pending.allow_once = false
+	}
+	ui.needs_redraw = true
+}
+
 refetch_source :: proc(
 	source_index: int,
 	maximum_height := 0,
@@ -1840,9 +1920,20 @@ refetch_source :: proc(
 	if import_job != nil { set_text(state.status, "An import is already running"); return }
 	if source_index < 0 || source_index >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
 	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
+	if !major_change_backup_preflight(
+		.Source_Refetch,
+		source_index,
+		maximum_height,
+		auth_browser,
+	) {
+		return
+	}
 	source := &state.sources[source_index]
+	allow_without_backup := major_change_backup_override
+	major_change_backup_override = false
 	job := import_job_create(source.url, source.video_id)
 	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
+	job.allow_without_backup = allow_without_backup
 	if maximum_height > 0 {
 		allocator := mem_virtual.arena_allocator(job.arena)
 		append(
@@ -1928,8 +2019,12 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 		}
 		return
 	}
+	if !major_change_backup_preflight(.Source_Import) {return}
+	allow_without_backup := major_change_backup_override
+	major_change_backup_override = false
 	job := import_job_create(input)
 	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
+	job.allow_without_backup = allow_without_backup
 	worker := thread.create(import_worker)
 	if worker == nil { import_job_destroy(job); set_text(state.status, "Unable to start import worker"); return }
 	job.thread = worker
@@ -2586,8 +2681,14 @@ confirm_library_import :: proc() {
 		set_error_status("Wait for the active media or metadata operation")
 		return
 	}
+	if !major_change_backup_preflight(.Library_Replacement) {return}
+	allow_without_backup := major_change_backup_override
+	major_change_backup_override = false
 	metal_player_clear()
-	if install_error := portable_library_install(&pending_library_import);
+	if install_error := portable_library_install(
+		&pending_library_import,
+		allow_without_backup,
+	);
 	   install_error != .None {
 		set_error_status(portable_library_error_text(install_error))
 		return
@@ -2664,6 +2765,8 @@ main :: proc() {
 	}
 	defer match_sorter.search_context_destroy(&transcript_search_context)
 	defer app_state_memory_destroy()
+	defer library_recovery_state_destroy()
+	defer delete(major_change_pending.detail)
 	defer source_probe_results_clear()
 	defer source_probe_cache_clear()
 	defer database_close()
@@ -2686,12 +2789,27 @@ main :: proc() {
 				result = routed_result
 			} else if cli_command_requires_gui(request.command) {
 				result = cli_error(request.command, .Busy, "gui_not_running", "The UI command requires a running application")
-			} else if !cli_library_try_acquire() {
-				result = cli_error(request.command, .Busy, "busy", "The app owns the library, but its CLI control socket is not ready")
-			} else {
-				load_library()
-				result = cli_execute(request)
-			}
+				} else if !cli_library_try_acquire() {
+					result = cli_error(request.command, .Busy, "busy", "The app owns the library, but its CLI control socket is not ready")
+				} else {
+					load_result := load_library()
+					if load_result.mode != .Ready {
+						error_code := "library_recovery_required"
+						if load_result.stage == .Schema &&
+						   load_result.schema_version > LIBRARY_SCHEMA_VERSION {
+							error_code = "library_schema_newer"
+						}
+						result = cli_error(
+							request.command,
+							.Storage,
+							error_code,
+							load_result.detail,
+						)
+					} else {
+						result = cli_execute(request)
+					}
+					library_load_result_destroy(&load_result)
+				}
 		}
 		fmt.println(result.output)
 		delete(result.output)
@@ -2701,8 +2819,20 @@ main :: proc() {
 		fmt.eprintln("Vocal Training is already running or the library is busy")
 		return
 	}
-	load_library()
+	load_result := load_library()
 	notification_history_initialize()
+	if load_result.mode != .Ready {
+		_ = notification_post(
+			.Error,
+			"Library recovery is required",
+			load_result.detail,
+			persist = false,
+		)
+		if library_recovery_state.recovery_allowed {
+			_ = library_recovery_analyze()
+		}
+	}
+	library_load_result_destroy(&load_result)
 	defer notification_history_destroy()
 	pool := msg_id(objc_getClass("NSAutoreleasePool"), sel_registerName("new"))
 	build_metal_window()
