@@ -114,6 +114,15 @@ send_address: rawptr
 system_address: rawptr
 last_imported_source: int = -1
 
+Helper_Status :: struct {
+	checked: bool,
+	available: bool,
+	reason: string,
+}
+
+yt_dlp_helper_status: Helper_Status
+ffmpeg_helper_status: Helper_Status
+
 Import_Phase :: enum {
 	Preparing,
 	Validating_Existing_Media,
@@ -654,24 +663,56 @@ helper_available :: proc(name: string) -> (available: bool, reason: string) {
 	return true, ""
 }
 
-require_helper :: proc(name: string) -> bool {
+helper_status :: proc(name: string) -> ^Helper_Status {
+	switch name {
+	case "yt-dlp":
+		return &yt_dlp_helper_status
+	case "ffmpeg":
+		return &ffmpeg_helper_status
+	}
+	return nil
+}
+
+check_helper_once :: proc(name: string) -> ^Helper_Status {
+	status := helper_status(name)
+	if status == nil {return nil}
+	if status.checked {return status}
 	available, reason := helper_available(name)
-	if available { return true }
-	set_text(state.status, reason)
+	status.available = available
+	status.reason = strings.clone(reason)
+	status.checked = true
+	return status
+}
+
+helper_statuses_destroy :: proc() {
+	delete(yt_dlp_helper_status.reason)
+	delete(ffmpeg_helper_status.reason)
+	yt_dlp_helper_status = {}
+	ffmpeg_helper_status = {}
+}
+
+require_helper :: proc(name: string) -> bool {
+	status := check_helper_once(name)
+	if status == nil {
+		set_text(state.status, fmt.tprintf("%s is not a supported media helper", name))
+		return false
+	}
+	if status.available { return true }
+	set_text(state.status, status.reason)
 	return false
 }
 
 validate_startup_helpers :: proc() {
-	yt_dlp_available, yt_dlp_reason := helper_available("yt-dlp")
-	ffmpeg_available, ffmpeg_reason := helper_available("ffmpeg")
-	if yt_dlp_available && ffmpeg_available { return }
+	yt_dlp := check_helper_once("yt-dlp")
+	ffmpeg := check_helper_once("ffmpeg")
+	if yt_dlp.available && ffmpeg.available { return }
 
 	message := "Vocal Training checked its media helpers before starting."
-	if !yt_dlp_available {
-		message = fmt.tprintf("%s\n\n%s. YouTube import and refetch are unavailable.", message, yt_dlp_reason)
+	if !yt_dlp.available {
+		message = fmt.tprintf("%s\n\n%s. YouTube import and refetch are unavailable.", message, yt_dlp.reason)
 	}
-	if !ffmpeg_available {
-		message = fmt.tprintf("%s\n\n%s. Import, refetch, preview, and exercise export are unavailable.", message, ffmpeg_reason)
+	if !ffmpeg.available {
+		message = fmt.tprintf("%s\n\n%s. Import, refetch, preview, and exercise export are unavailable.", message, ffmpeg.reason)
 	}
 	message = fmt.tprintf("%s\n\nNo media task was started. Contact the person who provided this app.", message)
 	set_text(state.status, message)
@@ -2338,6 +2379,7 @@ jobs_shutdown :: proc() {
 main :: proc() {
 	if !memory_init() { fmt.eprintln("Unable to initialize memory arenas"); return }
 	defer memory_destroy()
+	defer helper_statuses_destroy()
 	defer cli_library_release()
 	if error := match_sorter.search_context_init(
 		&transcript_search_context,

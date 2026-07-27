@@ -113,6 +113,55 @@ youtube_json3_caption_mapping_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+new_caption_generation_indexes_the_imported_source_test :: proc(t: ^testing.T) {
+	support, found := os.lookup_env("VT_APP_SUPPORT_DIR")
+	defer delete(support)
+	testing.expect(t, found)
+	if !found {return}
+	source_directory := fmt.tprintf("%s/sources", support)
+	os.make_directory(source_directory)
+	caption_file := fmt.tprintf("%s/new-video.en.json3", source_directory)
+	fixture := `{"events":[{"tStartMs":1250,"dDurationMs":750,"segs":[{"utf8":"Warm up"}]}]}`
+	testing.expect(t, os.write_entire_file(caption_file, transmute([]byte)fixture))
+	defer os.remove(caption_file)
+
+	previous := [1]Transcript_Segment{{
+		id="old-0",
+		source_id="old",
+		start_seconds=0,
+		duration_seconds=1,
+		text="Old",
+	}}
+	source := Source_Video{id="new", video_id="new-video"}
+	generation, count, ok := build_transcript_generation(&source, previous[:])
+	testing.expect(t, ok)
+	if !ok {return}
+	defer transcript_generation_destroy(&generation)
+	testing.expect_value(t, count, 1)
+
+	segments, base_index, found_source := transcript_source_segments(&generation, "new")
+	testing.expect(t, found_source)
+	testing.expect_value(t, base_index, 1)
+	testing.expect_value(t, len(segments), 1)
+	testing.expect_value(t, segments[0].text, "Warm up")
+}
+
+@(test)
+media_helper_status_is_reused_after_the_first_check_test :: proc(t: ^testing.T) {
+	previous := ffmpeg_helper_status
+	defer {ffmpeg_helper_status = previous}
+	ffmpeg_helper_status = Helper_Status{
+		checked=true,
+		available=true,
+		reason="cached",
+	}
+	status := check_helper_once("ffmpeg")
+	testing.expect(t, status == &ffmpeg_helper_status)
+	testing.expect(t, status.available)
+	testing.expect_value(t, status.reason, "cached")
+}
+
+@(test)
 source_context_metadata_maps_selected_download_format_test :: proc(t: ^testing.T) {
 	fixture := `{"width":1920,"height":1080,"fps":30,"vcodec":"avc1.640028","acodec":"mp4a.40.2","ext":"mp4","format_id":"137+140","filesize_approx":76886301}`
 	metadata: Source_Context_Metadata

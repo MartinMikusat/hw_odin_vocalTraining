@@ -278,6 +278,7 @@ build_transcript_generation :: proc(source: ^Source_Video, previous: []Transcrip
 	}
 
 	destination := mem_virtual.arena_allocator(generation.arena)
+	source_start := len(generation.segments)
 	count := 0
 	for event, index in captions.events {
 		parts, parts_error := make([]string, len(event.segments), scratch_allocator)
@@ -306,6 +307,13 @@ build_transcript_generation :: proc(source: ^Source_Video, previous: []Transcrip
 			text=text,
 		})
 		count += 1
+	}
+	if count > 0 {
+		append(&generation.source_spans, Transcript_Source_Span{
+			source_id=generation.segments[source_start].source_id,
+			start=source_start,
+			count=count,
+		})
 	}
 	return generation, count, true
 }
