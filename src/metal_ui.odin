@@ -982,7 +982,19 @@ focused_text :: proc() -> ^string {
 
 focused_text_changed :: proc(target: ^string) {
 	if target == &ui.command_palette_query {
-		command_palette.set_query(&command_palette_state, ui.command_palette_query)
+		search_error := command_palette.set_query(
+			&command_palette_state,
+			ui.command_palette_query,
+		)
+		if search_error != .None {
+			ui_set_string(
+				&ui.command_palette_query,
+				command_palette.query(&command_palette_state),
+			)
+			_ = notification_post_error(
+				"Command palette search contains invalid UTF-8.",
+			)
+		}
 		ui.command_palette_scroll = 0
 		ensure_command_palette_selection_visible()
 	}
@@ -2263,29 +2275,35 @@ transcript_ranked_indices :: proc(
 	base_index: int,
 	query: string,
 	allocator := context.allocator,
-) -> []int {
+) -> ([]int, match_sorter.Search_Error) {
 	if len(query) == 0 {
+		for segment in segments {
+			if !match_sorter.valid_utf8(segment.text) {
+				return nil, .Invalid_UTF8
+			}
+		}
 		result := make([]int, len(segments), allocator)
 		for &index, local_index in result {
 			index = base_index+local_index
 		}
-		return result
+		return result, .None
 	}
 	previous_temp := context.temp_allocator
 	defer context.temp_allocator = previous_temp
-	keys := []match_sorter.Typed_Key(Transcript_Segment){{getter=transcript_text_value}}
-	ranked := match_sorter.match_indices(
+	keys := []match_sorter.Key(Transcript_Segment){{getter=transcript_text_value}}
+	ranked, search_error := match_sorter.match_indices(
 		search,
 		segments,
 		query,
-		match_sorter.Typed_Options(Transcript_Segment){keys=keys},
+		match_sorter.Options(Transcript_Segment){keys=keys},
 		context.temp_allocator,
 	)
+	if search_error != .None {return nil, search_error}
 	result := make([]int, len(ranked), allocator)
 	for local_index, result_index in ranked {
 		result[result_index] = base_index+local_index
 	}
-	return result
+	return result, .None
 }
 
 invalidate_transcript_matches :: proc(reset_scroll := true) {
@@ -2305,14 +2323,20 @@ ensure_transcript_matches :: proc() {
 			state.sources[state.active_source].id,
 		)
 		if found {
-			indices := transcript_ranked_indices(
+			indices, search_error := transcript_ranked_indices(
 				&transcript_search_context,
 				segments,
 				base_index,
 				ui.transcript_search,
 				context.temp_allocator,
 			)
-			append(&ui.transcript_matches, ..indices)
+			if search_error == .None {
+				append(&ui.transcript_matches, ..indices)
+			} else {
+				_ = notification_post_error(
+					"Transcript search stopped because text contains invalid UTF-8.",
+				)
+			}
 		}
 	}
 	ui.transcript_matches_dirty = false
@@ -6944,7 +6968,23 @@ begin_command_palette :: proc() -> bool {
 	ui_set_string(&ui.command_palette_query, "")
 	ui.command_palette_scroll = 0
 	entries := build_command_palette_entries()
-	command_palette.open(&command_palette_state, entries[:], palette_active_context())
+	search_error := command_palette.open(
+		&command_palette_state,
+		entries[:],
+		palette_active_context(),
+	)
+	if search_error != .None {
+		clear(&command_palette_actions)
+		ui.focus = ui.palette_previous_focus
+		ui.caret_byte_offset = ui.palette_previous_caret
+		ui.selection_anchor_byte = ui.palette_previous_selection_anchor
+		ui.text_scroll_x = ui.palette_previous_text_scroll
+		_ = notification_post_error(
+			"Command palette entries contain invalid UTF-8.",
+		)
+		ui.needs_redraw = true
+		return false
+	}
 	ui.focus = .Command_Palette
 	collapse_text_selection(0)
 	ui.text_scroll_x = 0
@@ -7057,7 +7097,19 @@ on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
 	#partial switch control.action.kind {
 	case .Command_Palette_Search:
 		ui_set_string(&ui.command_palette_query, string(cstring(utf8)))
-		command_palette.set_query(&command_palette_state, ui.command_palette_query)
+		search_error := command_palette.set_query(
+			&command_palette_state,
+			ui.command_palette_query,
+		)
+		if search_error != .None {
+			ui_set_string(
+				&ui.command_palette_query,
+				command_palette.query(&command_palette_state),
+			)
+			_ = notification_post_error(
+				"Command palette search contains invalid UTF-8.",
+			)
+		}
 		ui.command_palette_scroll = 0
 		ensure_command_palette_selection_visible()
 	case .URL:

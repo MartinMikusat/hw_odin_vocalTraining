@@ -3481,13 +3481,25 @@ transcript_search_ranks_matches_and_returns_original_indices_test :: proc(t: ^te
 		{source_id="a", text="voice warmup routine"},
 		{source_id="a", text="warmup"},
 	}
-	indices := transcript_ranked_indices(&search, segments, 4, "warmup")
+	indices, search_error := transcript_ranked_indices(
+		&search,
+		segments,
+		4,
+		"warmup",
+	)
 	defer delete(indices)
+	testing.expect_value(t, search_error, match_sorter.Search_Error.None)
 	testing.expect_value(t, len(indices), 2)
 	testing.expect_value(t, indices[0], 5)
 	testing.expect_value(t, indices[1], 4)
-	missing := transcript_ranked_indices(&search, segments, 4, "zzzz")
+	missing, missing_error := transcript_ranked_indices(
+		&search,
+		segments,
+		4,
+		"zzzz",
+	)
 	defer delete(missing)
+	testing.expect_value(t, missing_error, match_sorter.Search_Error.None)
 	testing.expect_value(t, len(missing), 0)
 }
 
@@ -3500,11 +3512,54 @@ empty_transcript_search_keeps_active_source_in_chronological_order_test :: proc(
 		{source_id="a", text="first"},
 		{source_id="a", text="second"},
 	}
-	indices := transcript_ranked_indices(&search, segments, 8, "")
+	indices, search_error := transcript_ranked_indices(
+		&search,
+		segments,
+		8,
+		"",
+	)
 	defer delete(indices)
+	testing.expect_value(t, search_error, match_sorter.Search_Error.None)
 	testing.expect_value(t, len(indices), 2)
 	testing.expect_value(t, indices[0], 8)
 	testing.expect_value(t, indices[1], 9)
+}
+
+@(test)
+transcript_search_rejects_invalid_utf8_without_results_test :: proc(
+	t: ^testing.T,
+) {
+	search: match_sorter.Search_Context
+	testing.expect(t, match_sorter.search_context_init(&search) == nil)
+	defer match_sorter.search_context_destroy(&search)
+	invalid_bytes := []byte{0xe2, 0x82}
+	segments := []Transcript_Segment{
+		{source_id = "a", text = transmute(string)invalid_bytes},
+	}
+	indices, search_error := transcript_ranked_indices(
+		&search,
+		segments,
+		0,
+		"voice",
+	)
+	testing.expect_value(
+		t,
+		search_error,
+		match_sorter.Search_Error.Invalid_UTF8,
+	)
+	testing.expect(t, indices == nil)
+	indices, search_error = transcript_ranked_indices(
+		&search,
+		segments,
+		0,
+		"",
+	)
+	testing.expect_value(
+		t,
+		search_error,
+		match_sorter.Search_Error.Invalid_UTF8,
+	)
+	testing.expect(t, indices == nil)
 }
 
 @(test)
