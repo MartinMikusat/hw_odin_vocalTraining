@@ -20,6 +20,31 @@ launch_activation_defaults_to_foreground_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+successful_clip_commit_resets_exercise_output_test :: proc(t: ^testing.T) {
+	previous_state := state
+	previous_ui := ui
+	defer {
+		delete(ui.exercise_name)
+		state = previous_state
+		ui = previous_ui
+	}
+	state = App_State{}
+	ui = UI_State{}
+	state.range_start = 12
+	state.range_end = 18
+	state.has_start = true
+	state.has_end = true
+	ui.focus = .None
+	ui_set_string(&ui.exercise_name, "Scale")
+	reset_exercise_output()
+	testing.expect_value(t, state.range_start, 0)
+	testing.expect_value(t, state.range_end, 0)
+	testing.expect(t, !state.has_start)
+	testing.expect(t, !state.has_end)
+	testing.expect_value(t, ui.exercise_name, "")
+}
+
+@(test)
 parse_standard_youtube_url_test :: proc(t: ^testing.T) {
 	id, ok := parse_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1m20s")
 	testing.expect(t, ok)

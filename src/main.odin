@@ -1818,6 +1818,20 @@ on_set_end :: proc "c" (self: Id, command: Sel, sender: Id) {
 	} else { set_text(state.status, "No active source player") }
 }
 
+reset_exercise_output :: proc() {
+	state.range_start = 0
+	state.range_end = 0
+	state.has_start = false
+	state.has_end = false
+	ui_set_string(&ui.exercise_name, "")
+	if ui.focus == .Exercise_Name {
+		clear_marked_text()
+		collapse_text_selection(0)
+		ui.text_scroll_x = 0
+	}
+	ui.needs_redraw = true
+}
+
 on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -2057,7 +2071,18 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		return
 	}
 	append(&state.exercises, exercise)
-	save_library()
+	if !save_library() {
+		stored := pop(&state.exercises)
+		delete_exercise(&stored)
+		_ = os.remove(job.exercise.clip_path)
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"The clip was created, but the library update failed",
+		)
+		return
+	}
+	reset_exercise_output()
 	refresh_exercises()
 	_ = notification_finish(
 		job.notification_id,
