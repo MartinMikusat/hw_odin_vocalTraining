@@ -161,6 +161,7 @@ UI_State :: struct {
 	exercise_rename_index: int,
 	exercise_metadata_open: bool,
 	exercise_metadata_index: int,
+	randomize_help_open: bool,
 	data_modal_open: bool,
 	notification_modal_open: bool,
 	library_import_confirm_open: bool,
@@ -290,6 +291,8 @@ UI_Action_Kind :: enum {
 	Exercise_Search,
 	Exercise,
 	Randomize,
+	Open_Randomize_Help,
+	Close_Randomize_Help,
 	Exercise_Name,
 	Cancel_Exercise_Rename,
 	Confirm_Exercise_Rename,
@@ -1245,6 +1248,25 @@ exercise_metadata_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
 }
 
+randomize_help_modal_rect :: proc() -> UI_Rect {
+	width := min(max(720, ui.width * 0.6), 920)
+	height := min(max(640, ui.height * 0.72), 700)
+	return UI_Rect{(ui.width - width) / 2, (ui.height - height) / 2, width, height}
+}
+
+randomize_help_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
+}
+
+randomize_help_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
+	return UI_Rect{
+		modal.x + 24,
+		modal.y + modal.h - 284 - f64(row) * 30,
+		modal.w - 48,
+		29,
+	}
+}
+
 data_modal_rect :: proc() -> UI_Rect {
 	width := min(max(560, ui.width * 0.5), 680)
 	height := min(max(330, ui.height * 0.42), 390)
@@ -1379,6 +1401,7 @@ open_notification_history :: proc(notification_id: i64 = 0) {
 	if ui.data_modal_open {close_data_modal()}
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.randomize_help_open {close_randomize_help()}
 	if ui.source_details_open {close_source_details()}
 	if ui.source_modal_open {close_source_modal()}
 	ui.notification_modal_open = true
@@ -1545,6 +1568,26 @@ close_exercise_metadata :: proc() {
 	ui.needs_redraw = true
 }
 
+open_randomize_help :: proc() {
+	cancel_ui_flash()
+	if ui.exercise_rename_open {close_exercise_rename()}
+	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.data_modal_open {close_data_modal()}
+	if ui.notification_modal_open {close_notification_history()}
+	if ui.source_details_open {close_source_details()}
+	if ui.source_modal_open {close_source_modal()}
+	ui.randomize_help_open = true
+	ui.focus = .None
+	ui.text_drag_active = false
+	ui.needs_redraw = true
+}
+
+close_randomize_help :: proc() {
+	cancel_ui_flash()
+	ui.randomize_help_open = false
+	ui.needs_redraw = true
+}
+
 open_data_modal :: proc() {
 	cancel_ui_flash()
 	app_state_collections_destroy(&pending_library_import)
@@ -1634,6 +1677,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.source_details_open {close_source_details()}
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.randomize_help_open {close_randomize_help()}
 	if ui.data_modal_open {close_data_modal()}
 	if ui.notification_modal_open {close_notification_history()}
 	ui.source_scrubbing = false
@@ -1950,6 +1994,19 @@ control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
 	gap := 6.0
 	cell_w := (controls.w - gap * f64(count - 1)) / f64(count)
 	return UI_Rect{controls.x + f64(slot) * (cell_w + gap), controls.y, cell_w, controls.h}
+}
+
+randomize_primary_rect :: proc(controls: UI_Rect) -> UI_Rect {
+	rect := control_rect(controls, 10)
+	help_width := min(rect.h, rect.w)
+	rect.w -= help_width
+	return rect
+}
+
+randomize_help_rect :: proc(controls: UI_Rect) -> UI_Rect {
+	rect := control_rect(controls, 10)
+	help_width := min(rect.h, rect.w)
+	return UI_Rect{rect.x + rect.w - help_width, rect.y, help_width, rect.h}
 }
 
 source_content_rect :: proc(source_search, source_panel: UI_Rect) -> UI_Rect {
@@ -3074,6 +3131,172 @@ draw_exercise_metadata :: proc(
 	draw_text_in_rect(ctx, font, "VIEW SOURCE", source_button, .Center, .Center, source_enabled ? cyan : dim)
 }
 
+draw_randomize_help :: proc(
+	ctx, font: rawptr,
+	bright, muted, dim, cyan: [4]f64,
+) {
+	if !ui.randomize_help_open {return}
+	modal := randomize_help_modal_rect()
+	close_button := ui_control_rect(.Close_Randomize_Help)
+	fill_overlay_rect(
+		ctx,
+		UI_Rect{0, 0, ui.width, ui.height},
+		[4]f64{0.008, 0.009, 0.009, 0.88},
+	)
+	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
+	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	draw_text_in_rect(
+		ctx,
+		font,
+		"HOW RANDOMIZE SELECTS AN EXERCISE",
+		UI_Rect{header.x + 20, header.y, header.w - 40, header.h},
+		.Start,
+		.Center,
+		bright,
+	)
+	explanation := [7]string{
+		"Randomize draws from the complete exercise library. Search text does not limit the draw.",
+		"The active exercise is skipped when another exercise is available.",
+		"A selected exercise returns to weight 2.",
+		"Each skipped Randomize draw adds 1, up to weight 6.",
+		"Never-selected exercises start at weight 6. Manual playback does not change the history.",
+		"Weight 6 has three times the chance of weight 2, but each draw remains random.",
+		"Randomize history stays on this device and is not included in library exports.",
+	}
+	for line, line_index in explanation {
+		draw_text_in_rect(
+			ctx,
+			font,
+			line,
+			UI_Rect{
+				modal.x + 24,
+				modal.y + modal.h - 88 - f64(line_index) * 22,
+				modal.w - 48,
+				21,
+			},
+			.Start,
+			.Center,
+			line_index == 0 ? bright : muted,
+			10,
+		)
+	}
+	draw_text_in_rect(
+		ctx,
+		font,
+		"HIGHEST CHANCE ON THE NEXT DRAW",
+		UI_Rect{modal.x + 24, modal.y + modal.h - 250, 276, 24},
+		.Start,
+		.Center,
+		cyan,
+	)
+	if len(state.exercises) > 1 &&
+	   ui.active_exercise >= 0 &&
+	   ui.active_exercise < len(state.exercises) {
+		draw_text_in_rect(
+			ctx,
+			font,
+			fmt.tprintf(
+				"ACTIVE EXCLUDED: %s",
+				state.exercises[ui.active_exercise].name,
+			),
+			UI_Rect{modal.x + 310, modal.y + modal.h - 250, modal.w - 334, 24},
+			.End,
+			.Center,
+			muted,
+			10,
+		)
+	}
+	draw_text_in_rect(
+		ctx,
+		font,
+		"EXERCISE",
+		UI_Rect{modal.x + 34, modal.y + modal.h - 274, modal.w - 250, 22},
+		.Start,
+		.Center,
+		muted,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"WEIGHT",
+		UI_Rect{modal.x + modal.w - 202, modal.y + modal.h - 274, 74, 22},
+		.End,
+		.Center,
+		muted,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"CHANCE",
+		UI_Rect{modal.x + modal.w - 112, modal.y + modal.h - 274, 78, 22},
+		.End,
+		.Center,
+		muted,
+	)
+	candidates: [RANDOM_EXERCISE_HELP_LIMIT]Random_Exercise_Candidate
+	candidate_count, total_weight := random_exercise_ranked_candidates(
+		state.exercises[:],
+		ui.active_exercise,
+		candidates[:],
+	)
+	if candidate_count == 0 {
+		draw_text_in_rect(
+			ctx,
+			font,
+			"NO EXERCISES ARE AVAILABLE",
+			randomize_help_row_rect(modal, 0),
+			.Center,
+			.Center,
+			dim,
+		)
+	}
+	for candidate, row_index in candidates[:candidate_count] {
+		row := randomize_help_row_rect(modal, row_index)
+		if row_index % 2 == 0 {
+			fill_overlay_rect(ctx, row, [4]f64{0.043, 0.046, 0.043, 1})
+		}
+		exercise := &state.exercises[candidate.exercise_index]
+		draw_text_in_rect(
+			ctx,
+			font,
+			exercise.name,
+			UI_Rect{row.x + 10, row.y, row.w - 230, row.h},
+			.Start,
+			.Center,
+			bright,
+			10,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			fmt.tprintf("%d", candidate.weight),
+			UI_Rect{row.x + row.w - 192, row.y, 74, row.h},
+			.End,
+			.Center,
+			cyan,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			fmt.tprintf(
+				"%.1f%%",
+				f64(candidate.weight) / f64(total_weight) * 100,
+			),
+			UI_Rect{row.x + row.w - 102, row.y, 78, row.h},
+			.End,
+			.Center,
+			cyan,
+		)
+	}
+	close_color := [4]f64{0.052, 0.055, 0.052, 1}
+	if contains(close_button, ui.mouse) {
+		close_color = [4]f64{0.09, 0.095, 0.09, 1}
+	}
+	fill_overlay_rect(ctx, close_button, close_color)
+	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
+}
+
 draw_data_modal :: proc(
 	ctx, font: rawptr,
 	bright, muted, dim, orange, cyan: [4]f64,
@@ -3679,6 +3902,16 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		if enabled && contains(rect, ui.mouse) {color = [4]f32{0.105, 0.112, 0.104, 1}}
 		if enabled && index == 2 && contains(rect, ui.mouse) {color = [4]f32{0.23, 0.083, 0.035, 1}}
 		push_rect(vertices, rect, color)
+	}
+	if ui.mode == .Play {
+		help := ui_control_rect(.Open_Randomize_Help)
+		if help.w > 0 {
+			color := panel_alt
+			if contains(help, ui.mouse) {
+				color = [4]f32{0.105, 0.112, 0.104, 1}
+			}
+			push_rect(vertices, help, color)
+		}
 	}
 	focus_rect := UI_Rect{}
 	#partial switch ui.focus {
@@ -4340,6 +4573,18 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			button_color,
 		)
 	}
+	if ui.mode == .Play {
+		help := ui_control_rect(.Open_Randomize_Help)
+		draw_text_in_rect(
+			ctx,
+			small_font,
+			"?",
+			help,
+			.Center,
+			.Center,
+			ink,
+		)
+	}
 
 	range_text := "RANGE --:--:-- → --:--:-- / CLIP --:--:--"
 	if state.has_start || state.has_end {
@@ -4507,6 +4752,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	draw_source_details(ctx, small_font, bright, muted, cyan)
 	draw_exercise_rename(ctx, small_font, bright, muted, dim, orange)
 	draw_exercise_metadata(ctx, small_font, bright, muted, dim, orange, cyan, danger)
+	draw_randomize_help(ctx, small_font, bright, muted, dim, cyan)
 	draw_data_modal(ctx, small_font, bright, muted, dim, orange, cyan)
 	draw_notification_history(
 		ctx,
@@ -4953,6 +5199,9 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Randomize {
 		return ui.mode == .Play && len(state.exercises) > 0
 	}
+	if kind == .Open_Randomize_Help {
+		return ui.mode == .Play
+	}
 	if kind == .Rename || kind == .Metadata {
 		return import_job == nil &&
 		       ui.active_exercise >= 0 &&
@@ -5099,6 +5348,20 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 	element_class := objc_getClass("VocalAccessibilityElement")
 	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
 		layout_rects()
+	if ui.randomize_help_open {
+		modal := randomize_help_modal_rect()
+		add_ax_element(
+			array,
+			element_class,
+			"Close Randomize help",
+			"AXButton",
+			randomize_help_close_rect(modal),
+			.Close_Randomize_Help,
+			flash_label = "close randomize help",
+		)
+		validate_ui_controls()
+		return
+	}
 	if ui.notification_modal_open {
 		modal := notification_modal_rect()
 		add_ax_element(
@@ -5737,6 +6000,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		if action_index < 0 {continue}
 		kind := kinds[action_index]
 		rect := control_rect(controls, action_index)
+		if kind == .Randomize {rect = randomize_primary_rect(controls)}
 		if rect.w > 0 {
 			add_ax_element(
 				array,
@@ -5748,6 +6012,17 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				flash_label = flash_labels[action_index],
 			)
 		}
+	}
+	if ui.mode == .Play {
+		add_ax_element(
+			array,
+			element_class,
+			"Explain Randomize selection",
+			"AXButton",
+			randomize_help_rect(controls),
+			.Open_Randomize_Help,
+			flash_label = "randomize help",
+		)
 	}
 	if ui.mode == .Create {
 		add_ax_element(
@@ -5888,6 +6163,10 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		on_play_exercise(nil, nil, nil)
 	case .Randomize:
 		return randomize_exercise()
+	case .Open_Randomize_Help:
+		open_randomize_help()
+	case .Close_Randomize_Help:
+		close_randomize_help()
 	case .Exercise_Name:
 		focus_text_input(.Exercise_Name)
 	case .Cancel_Exercise_Rename:
@@ -6259,6 +6538,7 @@ begin_command_palette :: proc() -> bool {
 	cancel_ui_flash()
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.randomize_help_open {close_randomize_help()}
 	if ui.data_modal_open {close_data_modal()}
 	if ui.notification_modal_open {close_notification_history()}
 	ui.palette_previous_focus = ui.focus
@@ -6322,6 +6602,7 @@ activate_command_palette_result :: proc(result_index: int) -> bool {
 	if ui.source_details_open {close_source_details()}
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.randomize_help_open {close_randomize_help()}
 	if ui.data_modal_open {close_data_modal()}
 	if ui.notification_modal_open {close_notification_history()}
 	if action.kind == .Source {set_ui_mode(.Create)}
@@ -7111,6 +7392,12 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 		return
 	}
 	clear_marked_text()
+	if ui.randomize_help_open {
+		modal := randomize_help_modal_rect()
+		if !contains(modal, point) {close_randomize_help(); return}
+		_ = activate_registered_target_at_point(point, click_count)
+		return
+	}
 	if ui.notification_modal_open {
 		modal := notification_modal_rect()
 		if !contains(modal, point) {close_notification_history(); return}
@@ -7182,6 +7469,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if !command_palette.is_open(&command_palette_state) &&
 	   !ui.source_modal_open && !ui.source_details_open &&
 	   !ui.exercise_rename_open && !ui.exercise_metadata_open &&
+	   !ui.randomize_help_open &&
 	   !ui.data_modal_open && !ui.notification_modal_open &&
 	   contains(app_header_rect(), ui.mouse) &&
 	   !contains(ui_control_rect(.Mode_Toggle), ui.mouse) {
@@ -7203,6 +7491,7 @@ on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if command_palette.is_open(&command_palette_state) {return}
 	if ui.source_modal_open || ui.source_details_open ||
 	   ui.exercise_rename_open || ui.exercise_metadata_open ||
+	   ui.randomize_help_open ||
 	   ui.data_modal_open || ui.notification_modal_open ||
 	   ui.mode != .Create {
 		return
@@ -7282,7 +7571,7 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	if ui.source_modal_open || ui.source_details_open ||
 	   ui.exercise_rename_open || ui.exercise_metadata_open ||
-	   ui.data_modal_open {
+	   ui.randomize_help_open || ui.data_modal_open {
 		return
 	}
 	delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
@@ -7647,6 +7936,10 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	if ui.exercise_metadata_open && key == 53 {close_exercise_metadata(); return}
 	if ui.exercise_rename_open && key == 53 {close_exercise_rename(); return}
+	if ui.randomize_help_open {
+		if key == 53 {close_randomize_help()}
+		return
+	}
 	if ui.data_modal_open && key == 53 {close_data_modal(); return}
 	if ui.notification_modal_open {
 		if key == 53 {close_notification_history(); return}
@@ -7692,6 +7985,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		   !ui.source_details_open &&
 		   !ui.exercise_rename_open &&
 		   !ui.exercise_metadata_open &&
+		   !ui.randomize_help_open &&
 		   !ui.data_modal_open &&
 		   !ui.notification_modal_open &&
 		   state.player != nil {

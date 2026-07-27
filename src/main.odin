@@ -2325,6 +2325,12 @@ on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
 
 RANDOM_EXERCISE_BASE_WEIGHT :: 2
 RANDOM_EXERCISE_SKIPPED_CAP :: i64(4)
+RANDOM_EXERCISE_HELP_LIMIT  :: 10
+
+Random_Exercise_Candidate :: struct {
+	exercise_index: int,
+	weight:         int,
+}
 
 random_exercise_latest_sequence :: proc(exercises: []Exercise) -> i64 {
 	latest: i64
@@ -2361,6 +2367,45 @@ random_exercise_total_weight :: proc(
 		)
 	}
 	return total
+}
+
+random_exercise_ranked_candidates :: proc(
+	exercises: []Exercise,
+	active_exercise: int,
+	output: []Random_Exercise_Candidate,
+) -> (count, total_weight: int) {
+	total_weight = random_exercise_total_weight(exercises, active_exercise)
+	if len(output) == 0 || total_weight <= 0 {return}
+	latest := random_exercise_latest_sequence(exercises)
+	exclude_active :=
+		len(exercises) > 1 &&
+		active_exercise >= 0 &&
+		active_exercise < len(exercises)
+	for exercise, exercise_index in exercises {
+		if exclude_active && exercise_index == active_exercise {continue}
+		candidate := Random_Exercise_Candidate{
+			exercise_index = exercise_index,
+			weight = random_exercise_weight(
+				exercise.last_randomized_sequence,
+				latest,
+			),
+		}
+		insert_at := count
+		for ranked, ranked_index in output[:count] {
+			if candidate.weight > ranked.weight {
+				insert_at = ranked_index
+				break
+			}
+		}
+		if insert_at >= len(output) {continue}
+		move_end := min(count, len(output) - 1)
+		for destination := move_end; destination > insert_at; destination -= 1 {
+			output[destination] = output[destination - 1]
+		}
+		output[insert_at] = candidate
+		count = min(count + 1, len(output))
+	}
+	return
 }
 
 random_exercise_index_for_weighted_roll :: proc(

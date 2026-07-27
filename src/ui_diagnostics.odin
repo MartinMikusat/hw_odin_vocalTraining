@@ -88,6 +88,7 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 	switch {
 	case command_palette.is_open(&command_palette_state): overlay = "command-palette"
 	case ui.notification_modal_open: overlay = "notification-history"
+	case ui.randomize_help_open: overlay = "randomize-help"
 	case ui.exercise_metadata_open: overlay = "exercise-metadata"
 	case ui.exercise_rename_open: overlay = "exercise-rename"
 	case ui.source_modal_open: overlay = "source-modal"

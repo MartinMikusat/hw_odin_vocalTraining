@@ -45,6 +45,8 @@ or more exercises exist, Randomize does not select the active exercise.
 Exercises skipped by recent Randomize selections receive up to three times the
 selection weight. Manual playback does not change this history. The application
 stores the history locally and does not include it in library exports.
+Select the **?** control inside Randomize to inspect the weighting rules and the
+ten exercises with the highest probability in the next draw.
 
 Press **Add** in the Source Register to open the ingest dialog, then paste one
 or more YouTube URLs with one URL per line. URLs are normalized by video ID,

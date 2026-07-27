@@ -418,7 +418,9 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
 	testing.expect(t, len(ui_build.controls) > 4)
 	randomize := find_ui_control_by_action(.Randomize)
+	randomize_help := find_ui_control_by_action(.Open_Randomize_Help)
 	testing.expect(t, randomize != nil)
+	testing.expect(t, randomize_help != nil)
 	if randomize != nil {
 		testing.expect(t, .Enabled in randomize.flags)
 		testing.expect_value(
@@ -427,6 +429,27 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 			"Play a random exercise",
 		)
 		testing.expect_value(t, randomize.flash_label, "randomize exercise")
+	}
+	if randomize != nil && randomize_help != nil {
+		testing.expect(t, .Enabled in randomize_help.flags)
+		testing.expect_value(
+			t,
+			randomize_help.accessibility_label,
+			"Explain Randomize selection",
+		)
+		testing.expect_value(
+			t,
+			randomize_help.flash_label,
+			"randomize help",
+		)
+		testing.expect_value(
+			t,
+			randomize.rect.x + randomize.rect.w,
+			randomize_help.rect.x,
+		)
+		testing.expect_value(t, randomize.rect.y, randomize_help.rect.y)
+		testing.expect_value(t, randomize.rect.h, randomize_help.rect.h)
+		testing.expect_value(t, randomize_help.rect.w, randomize_help.rect.h)
 	}
 	randomize_registry_index, run_registry_index := -1, -1
 	for control, index in ui_build.controls {
@@ -440,6 +463,18 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	testing.expect(t, randomize_registry_index >= 0)
 	testing.expect(t, run_registry_index >= 0)
 	testing.expect(t, randomize_registry_index < run_registry_index)
+	ui_build.controls = nil
+	mem_virtual.arena_free_all(&frame_arena)
+
+	ui.randomize_help_open = true
+	build_ui_controls(false, frame_allocator)
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	testing.expect_value(
+		t,
+		ui_build.diagnostic_surface.overlay,
+		"randomize-help",
+	)
+	testing.expect(t, find_ui_control_by_action(.Close_Randomize_Help) != nil)
 }
 
 @(test)
@@ -1963,6 +1998,61 @@ random_exercise_weighted_roll_handles_empty_and_single_libraries_test :: proc(
 		random_exercise_index_for_weighted_roll(single[:], 0, 0),
 		0,
 	)
+}
+
+@(test)
+random_exercise_help_ranks_the_next_draw_candidates_test :: proc(
+	t: ^testing.T,
+) {
+	exercises := [4]Exercise{
+		{last_randomized_sequence = 10},
+		{last_randomized_sequence = 9},
+		{last_randomized_sequence = 0},
+		{last_randomized_sequence = 8},
+	}
+	candidates: [RANDOM_EXERCISE_HELP_LIMIT]Random_Exercise_Candidate
+	count, total := random_exercise_ranked_candidates(
+		exercises[:],
+		1,
+		candidates[:],
+	)
+	testing.expect_value(t, count, 3)
+	testing.expect_value(t, total, 12)
+	testing.expect_value(t, candidates[0].exercise_index, 2)
+	testing.expect_value(t, candidates[0].weight, 6)
+	testing.expect_value(t, candidates[1].exercise_index, 3)
+	testing.expect_value(t, candidates[1].weight, 4)
+	testing.expect_value(t, candidates[2].exercise_index, 0)
+	testing.expect_value(t, candidates[2].weight, 2)
+}
+
+@(test)
+random_exercise_help_limits_results_and_keeps_library_order_for_ties_test :: proc(
+	t: ^testing.T,
+) {
+	exercises: [12]Exercise
+	candidates: [RANDOM_EXERCISE_HELP_LIMIT]Random_Exercise_Candidate
+	count, total := random_exercise_ranked_candidates(
+		exercises[:],
+		-1,
+		candidates[:],
+	)
+	testing.expect_value(t, count, RANDOM_EXERCISE_HELP_LIMIT)
+	testing.expect_value(t, total, 72)
+	for candidate, index in candidates {
+		testing.expect_value(t, candidate.exercise_index, index)
+		testing.expect_value(t, candidate.weight, 6)
+	}
+
+	single := [1]Exercise{{last_randomized_sequence = 4}}
+	count, total = random_exercise_ranked_candidates(
+		single[:],
+		0,
+		candidates[:],
+	)
+	testing.expect_value(t, count, 1)
+	testing.expect_value(t, total, 2)
+	testing.expect_value(t, candidates[0].exercise_index, 0)
 }
 
 @(test)
