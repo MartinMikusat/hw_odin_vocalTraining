@@ -2,11 +2,121 @@ package main
 
 import "core:encoding/json"
 import "core:fmt"
+import "core:os"
 import "core:os/os2"
 import "core:strings"
 import "core:thread"
 import mem_virtual "core:mem/virtual"
 import "base:runtime"
+
+Source_Auth_Browser :: enum {
+	None,
+	Brave,
+	Chrome,
+	Firefox,
+	Safari,
+	Edge,
+	Chromium,
+	Vivaldi,
+}
+
+SOURCE_AUTH_BROWSERS :: [7]Source_Auth_Browser{
+	.Brave,
+	.Chrome,
+	.Firefox,
+	.Safari,
+	.Edge,
+	.Chromium,
+	.Vivaldi,
+}
+
+source_auth_browser_name :: proc(browser: Source_Auth_Browser) -> string {
+	switch browser {
+	case .Brave: return "Brave"
+	case .Chrome: return "Google Chrome"
+	case .Firefox: return "Firefox"
+	case .Safari: return "Safari"
+	case .Edge: return "Microsoft Edge"
+	case .Chromium: return "Chromium"
+	case .Vivaldi: return "Vivaldi"
+	case .None: return ""
+	}
+	return ""
+}
+
+source_auth_browser_argument :: proc(browser: Source_Auth_Browser) -> string {
+	switch browser {
+	case .Brave: return "brave"
+	case .Chrome: return "chrome"
+	case .Firefox: return "firefox"
+	case .Safari: return "safari"
+	case .Edge: return "edge"
+	case .Chromium: return "chromium"
+	case .Vivaldi: return "vivaldi"
+	case .None: return ""
+	}
+	return ""
+}
+
+source_auth_browser_from_argument :: proc(value: string) -> Source_Auth_Browser {
+	for browser in SOURCE_AUTH_BROWSERS {
+		if source_auth_browser_argument(browser) == value {return browser}
+	}
+	return .None
+}
+
+source_auth_browser_installed :: proc(browser: Source_Auth_Browser) -> bool {
+	switch browser {
+	case .Brave: return os.exists("/Applications/Brave Browser.app")
+	case .Chrome: return os.exists("/Applications/Google Chrome.app")
+	case .Firefox: return os.exists("/Applications/Firefox.app")
+	case .Safari:
+		return os.exists("/System/Applications/Safari.app") ||
+		       os.exists("/Applications/Safari.app")
+	case .Edge: return os.exists("/Applications/Microsoft Edge.app")
+	case .Chromium: return os.exists("/Applications/Chromium.app")
+	case .Vivaldi: return os.exists("/Applications/Vivaldi.app")
+	case .None: return false
+	}
+	return false
+}
+
+source_auth_browser_installed_count :: proc() -> int {
+	count := 0
+	for browser in SOURCE_AUTH_BROWSERS {
+		if source_auth_browser_installed(browser) {count += 1}
+	}
+	return count
+}
+
+source_probe_auth_required :: proc(stderr: string) -> bool {
+	return strings.contains(stderr, "Sign in to confirm you’re not a bot") ||
+	       strings.contains(stderr, "Sign in to confirm you're not a bot")
+}
+
+source_probe_browser_retry_available :: proc(result: Source_Probe_Result) -> bool {
+	return result.auth_required ||
+	       (result.auth_browser != .None &&
+	        strings.has_suffix(result.error, "SESSION UNAVAILABLE"))
+}
+
+source_probe_command :: proc(
+	url: string,
+	auth_browser := Source_Auth_Browser.None,
+	allocator := context.allocator,
+) -> [dynamic]string {
+	command := make([dynamic]string, allocator)
+	append(&command, helper_command("yt-dlp"))
+	if auth_browser != .None {
+		append(
+			&command,
+			"--cookies-from-browser",
+			source_auth_browser_argument(auth_browser),
+		)
+	}
+	append(&command, "--dump-single-json", "--skip-download", url)
+	return command
+}
 
 Source_Probe_Format_JSON :: struct {
 	height: int,
@@ -29,6 +139,8 @@ Source_Probe_Result :: struct {
 	heights: [dynamic]int,
 	selected_height: int,
 	error: string,
+	auth_required: bool,
+	auth_browser: Source_Auth_Browser,
 }
 
 Source_Probe_Job :: struct {
@@ -38,11 +150,45 @@ Source_Probe_Job :: struct {
 	cached_results: [dynamic]Source_Probe_Result,
 	results: [dynamic]Source_Probe_Result,
 	notification_id: i64,
+	auth_browser: Source_Auth_Browser,
+	used_saved_browser: bool,
+	save_browser_on_success: bool,
 }
 
 source_probe_job: ^Source_Probe_Job
 source_probe_results: [dynamic]Source_Probe_Result
 source_probe_cache: [dynamic]Source_Probe_Result
+source_auth_saved_browser: Source_Auth_Browser
+
+source_auth_preference_save :: proc(browser: Source_Auth_Browser) -> bool {
+	if library_legacy_fallback ||
+	   !database_source_auth_browser_save(library_database, browser) {
+		return false
+	}
+	source_auth_saved_browser = browser
+	return true
+}
+
+source_auth_preference_clear :: proc() -> bool {
+	source_auth_saved_browser = .None
+	return !library_legacy_fallback &&
+	       database_source_auth_browser_clear(library_database)
+}
+
+source_probe_saved_retry_browser :: proc(
+	auth_required: bool,
+	requested_browser: Source_Auth_Browser,
+	saved_browser: Source_Auth_Browser,
+	saved_browser_installed: bool,
+) -> Source_Auth_Browser {
+	if !auth_required ||
+	   requested_browser != .None ||
+	   saved_browser == .None ||
+	   !saved_browser_installed {
+		return .None
+	}
+	return saved_browser
+}
 
 source_probe_result_clone :: proc(result: Source_Probe_Result) -> Source_Probe_Result {
 	copy := Source_Probe_Result{
@@ -52,6 +198,8 @@ source_probe_result_clone :: proc(result: Source_Probe_Result) -> Source_Probe_R
 		duration = result.duration,
 		selected_height = result.selected_height,
 		error = strings.clone(result.error),
+		auth_required = result.auth_required,
+		auth_browser = result.auth_browser,
 	}
 	copy.heights = make([dynamic]int, 0, len(result.heights))
 	append(&copy.heights, ..result.heights[:])
@@ -122,15 +270,36 @@ source_probe_heights :: proc(formats: []Source_Probe_Format_JSON, allocator := c
 	return heights
 }
 
-source_probe_one :: proc(url: string) -> Source_Probe_Result {
+source_probe_one :: proc(
+	url: string,
+	auth_browser := Source_Auth_Browser.None,
+) -> Source_Probe_Result {
 	result := Source_Probe_Result{url=strings.clone(url)}
 	video_id, valid := parse_video_id(url)
 	if !valid {result.error = strings.clone("INVALID YOUTUBE URL"); return result}
 	result.video_id = strings.clone(video_id)
-	command := [4]string{helper_command("yt-dlp"), "--dump-single-json", "--skip-download", url}
-	process_state, stdout, _, process_error := os2.process_exec({command=command[:]}, context.temp_allocator)
+	command := source_probe_command(
+		url,
+		auth_browser,
+		context.temp_allocator,
+	)
+	process_state, stdout, stderr, process_error := os2.process_exec(
+		{command=command[:]},
+		context.temp_allocator,
+	)
 	if process_error != nil || !process_state.success {
-		result.error = strings.clone("METADATA UNAVAILABLE")
+		result.auth_required = source_probe_auth_required(string(stderr))
+		result.auth_browser = auth_browser
+		if result.auth_required {
+			result.error = strings.clone("YOUTUBE SIGN-IN REQUIRED")
+		} else if auth_browser != .None {
+			result.error = strings.clone(fmt.tprintf(
+				"%s SESSION UNAVAILABLE",
+				source_auth_browser_name(auth_browser),
+			))
+		} else {
+			result.error = strings.clone("METADATA UNAVAILABLE")
+		}
 		return result
 	}
 	data: Source_Probe_JSON
@@ -142,6 +311,7 @@ source_probe_one :: proc(url: string) -> Source_Probe_Result {
 	result.duration = data.duration
 	result.heights = source_probe_heights(data.formats)
 	result.selected_height = source_probe_default_height(result.heights[:])
+	result.auth_browser = auth_browser
 	if len(result.heights) == 0 {result.error = strings.clone("NO VIDEO FORMATS")}
 	return result
 }
@@ -163,7 +333,10 @@ source_probe_worker :: proc(t: ^thread.Thread) {
 			if duplicate {continue}
 			cached := false
 			for result in job.cached_results {
-				if result.video_id == video_id {
+				cache_matches_browser :=
+					result.auth_browser == .None ||
+					result.auth_browser == job.auth_browser
+				if result.video_id == video_id && cache_matches_browser {
 					append(&job.results, source_probe_result_clone(result))
 					cached = true
 					break
@@ -171,12 +344,17 @@ source_probe_worker :: proc(t: ^thread.Thread) {
 			}
 			if cached {continue}
 		}
-		append(&job.results, source_probe_one(url))
+		append(&job.results, source_probe_one(url, job.auth_browser))
 	}
 	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("sourceProbeFinished:"), nil, false)
 }
 
-source_probe_request :: proc() {
+source_probe_request :: proc(
+	auth_browser := Source_Auth_Browser.None,
+	save_browser_on_success := false,
+	used_saved_browser := false,
+	existing_notification_id: i64 = 0,
+) {
 	if source_probe_job != nil {return}
 	input := strings.trim_space(ui.url_input)
 	if len(input) == 0 {source_probe_results_clear(); ui.needs_redraw = true; return}
@@ -186,14 +364,41 @@ source_probe_request :: proc() {
 	job.cached_results = make([dynamic]Source_Probe_Result)
 	for result in source_probe_cache {append(&job.cached_results, source_probe_result_clone(result))}
 	job.results = make([dynamic]Source_Probe_Result)
+	job.auth_browser = auth_browser
+	job.used_saved_browser = used_saved_browser
+	job.save_browser_on_success = save_browser_on_success
 	worker := thread.create(source_probe_worker)
 	if worker == nil {source_probe_job_destroy(job); return}
 	job.thread = worker
 	worker.data = job
-	job.notification_id = notification_begin(
-		"Checking YouTube metadata and formats...",
-		"The application reads source metadata without downloading media.",
-	)
+	summary := "Checking YouTube metadata and formats..."
+	detail := "The application reads source metadata without downloading media."
+	if job.auth_browser != .None {
+		browser_name := source_auth_browser_name(job.auth_browser)
+		summary = fmt.tprintf("Checking metadata with %s session...", browser_name)
+		if job.used_saved_browser {
+			detail = fmt.tprintf(
+				"YouTube requested sign-in. The application is retrying with the saved %s choice. It does not store or export browser cookies.",
+				browser_name,
+			)
+		} else {
+			detail = fmt.tprintf(
+				"You selected %s. yt-dlp reads its YouTube session for this request. The application does not store or export browser cookies.",
+				browser_name,
+			)
+		}
+	}
+	if existing_notification_id > 0 {
+		job.notification_id = existing_notification_id
+		_ = notification_update(
+			existing_notification_id,
+			summary,
+			detail,
+			persist_now=true,
+		)
+	} else {
+		job.notification_id = notification_begin(summary, detail)
+	}
 	source_probe_job = job
 	thread.start(worker)
 }
@@ -210,6 +415,9 @@ on_source_probe_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	source_probe_results = job.results
 	job.results = nil
 	notification_id := job.notification_id
+	used_saved_browser := job.used_saved_browser
+	save_browser_on_success := job.save_browser_on_success
+	requested_browser := job.auth_browser
 	probed_input := job.input
 	job.input = ""
 	source_probe_job_destroy(job)
@@ -227,17 +435,157 @@ on_source_probe_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		return
 	}
 	delete(probed_input)
-	_ = notification_finish(
-		notification_id,
-		.Success,
-		fmt.tprintf("Found metadata for %d video(s)", len(source_probe_results)),
+	auth_required := 0
+	failed := 0
+	failed_browser := Source_Auth_Browser.None
+	for result in source_probe_results {
+		if result.auth_required {auth_required += 1}
+		if len(result.error) > 0 {failed += 1}
+		if source_probe_browser_retry_available(result) &&
+		   result.auth_browser != .None {
+			failed_browser = result.auth_browser
+		}
+	}
+	saved_browser_installed :=
+		source_auth_browser_installed(source_auth_saved_browser)
+	saved_retry_browser := source_probe_saved_retry_browser(
+		auth_required > 0,
+		requested_browser,
+		source_auth_saved_browser,
+		saved_browser_installed,
 	)
+	if saved_retry_browser != .None {
+		source_probe_results_clear()
+		source_probe_request(
+			auth_browser=saved_retry_browser,
+			used_saved_browser=true,
+			existing_notification_id=notification_id,
+		)
+		return
+	}
+	if auth_required > 0 &&
+	   requested_browser == .None &&
+	   source_auth_saved_browser != .None &&
+	   !saved_browser_installed {
+		_ = source_auth_preference_clear()
+		ui.save_source_browser_choice = false
+	}
+	saved_browser_failed :=
+		used_saved_browser &&
+		(auth_required > 0 || failed_browser != .None)
+	if saved_browser_failed {
+		_ = source_auth_preference_clear()
+		ui.save_source_browser_choice = false
+	}
+	if auth_required > 0 {
+		detail := "Choose an installed browser in the source dialog. The application uses that browser session only for this request and does not store or export cookies."
+		if saved_browser_failed {
+			detail = "The saved browser session no longer satisfies YouTube. Choose another browser. Enable Save choice for later to replace the saved choice."
+		}
+		_ = notification_finish(
+			notification_id,
+			.Error,
+			"YouTube requires a signed-in browser session",
+			detail,
+		)
+	} else if failed_browser != .None {
+		browser_name := source_auth_browser_name(failed_browser)
+		detail := fmt.tprintf(
+			"Confirm that YouTube is signed in within %s, or choose another installed browser. The application did not store or export browser cookies.",
+			browser_name,
+		)
+		if saved_browser_failed {
+			detail = fmt.tprintf(
+				"The saved %s session could not be used, so the saved choice was removed. Choose another signed-in browser.",
+				browser_name,
+			)
+		}
+		_ = notification_finish(
+			notification_id,
+			.Error,
+			fmt.tprintf("Could not use %s session", browser_name),
+			detail,
+		)
+	} else if failed > 0 {
+		_ = notification_finish(
+			notification_id,
+			.Error,
+			fmt.tprintf("Metadata unavailable for %d video(s)", failed),
+		)
+	} else {
+		summary := fmt.tprintf(
+			"Found metadata for %d video(s)",
+			len(source_probe_results),
+		)
+		save_failed := false
+		if save_browser_on_success {
+			save_failed = !source_auth_preference_save(
+				requested_browser,
+			)
+		}
+		for result in source_probe_results {
+			if result.auth_browser == .None {continue}
+			summary = fmt.tprintf(
+				"Found metadata using %s session",
+				source_auth_browser_name(result.auth_browser),
+			)
+			if save_browser_on_success && !save_failed {
+				summary = fmt.tprintf(
+					"Saved %s for future YouTube requests",
+					source_auth_browser_name(result.auth_browser),
+				)
+			}
+			break
+		}
+		if save_failed {
+			_ = notification_finish(
+				notification_id,
+				.Error,
+				"Metadata found, but the browser choice was not saved",
+				"Select the browser again with Save choice for later enabled.",
+			)
+		} else {
+			_ = notification_finish(
+				notification_id,
+				.Success,
+				summary,
+			)
+		}
+	}
 	ui.needs_redraw = true
+}
+
+source_probe_retry_with_browser :: proc(
+	result_index: int,
+	browser: Source_Auth_Browser,
+) -> bool {
+	if source_probe_job != nil ||
+	   result_index < 0 ||
+	   result_index >= len(source_probe_results) ||
+	   !source_probe_browser_retry_available(source_probe_results[result_index]) ||
+	   browser == .None ||
+	   !source_auth_browser_installed(browser) {
+		return false
+	}
+	save_browser_on_success := ui.save_source_browser_choice
+	source_probe_results_clear()
+	source_probe_request(
+		auth_browser=browser,
+		save_browser_on_success=save_browser_on_success,
+	)
+	return true
 }
 
 source_probe_selected_height :: proc(video_id: string) -> int {
 	for result in source_probe_results {if result.video_id == video_id {return result.selected_height}}
 	return 0
+}
+
+source_probe_selected_browser :: proc(video_id: string) -> Source_Auth_Browser {
+	for result in source_probe_results {
+		if result.video_id == video_id {return result.auth_browser}
+	}
+	return .None
 }
 
 source_probe_ready :: proc(input: string) -> bool {

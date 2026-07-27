@@ -203,6 +203,7 @@ UI_State :: struct {
 	frame_tick:         uint,
 	url_probe_due_tick: uint,
 	url_probe_pending:  bool,
+	save_source_browser_choice: bool,
 	needs_redraw:       bool,
 }
 
@@ -274,6 +275,8 @@ UI_Action_Kind :: enum {
 	URL,
 	Import,
 	Source_Quality,
+	Retry_Source_With_Browser,
+	Toggle_Save_Source_Browser,
 	Stop_Download,
 	View_Status_Source,
 	Open_Notification_History,
@@ -1126,13 +1129,49 @@ source_modal_input_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return source_modal_input_rect_for_text(modal, ui.url_input)
 }
 
+source_probe_row_height :: proc(index: int) -> f64 {
+	if index >= 0 &&
+	   index < len(source_probe_results) &&
+	   source_probe_browser_retry_available(source_probe_results[index]) {
+		return 120
+	}
+	return 62
+}
+
 source_probe_row_rect :: proc(modal: UI_Rect, index: int) -> UI_Rect {
 	input := source_modal_input_rect(modal)
-	return UI_Rect{modal.x + 24, input.y - 70 - f64(index) * 68, modal.w - 48, 62}
+	top := input.y - 8
+	for previous_index in 0 ..< index {
+		top -= source_probe_row_height(previous_index) + 6
+	}
+	height := source_probe_row_height(index)
+	return UI_Rect{modal.x + 24, top - height, modal.w - 48, height}
 }
 
 source_probe_quality_rect :: proc(row: UI_Rect, option_index: int) -> UI_Rect {
 	return UI_Rect{row.x + 390 + f64(option_index) * 66, row.y + 8, 60, 24}
+}
+
+source_probe_browser_rect :: proc(
+	row: UI_Rect,
+	option_index, option_count: int,
+) -> UI_Rect {
+	left := row.x + 10
+	right := row.x + row.w - 10
+	gap := 6.0
+	width := (
+		right - left - f64(max(0, option_count-1))*gap
+	) / f64(max(1, option_count))
+	return UI_Rect{
+		left + f64(option_index)*(width+gap),
+		row.y + 6,
+		width,
+		24,
+	}
+}
+
+source_probe_save_browser_rect :: proc(row: UI_Rect) -> UI_Rect {
+	return UI_Rect{row.x + 10, row.y + 36, 220, 24}
 }
 
 source_modal_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
@@ -1549,6 +1588,7 @@ open_source_modal :: proc() {
 	if ui.source_details_open {close_source_details()}
 	ui.source_modal_refetch_index = -1
 	ui.source_modal_open = true
+	ui.save_source_browser_choice = false
 	focus_text_input(.URL)
 	ui.needs_redraw = true
 	if len(strings.trim_space(ui.url_input)) > 0 && len(source_probe_results) == 0 {schedule_source_probe(1)}
@@ -1560,6 +1600,7 @@ open_refetch_source_modal :: proc(source_index: int) {
 	if ui.source_details_open {close_source_details()}
 	ui.source_modal_refetch_index = source_index
 	ui.source_modal_open = true
+	ui.save_source_browser_choice = false
 	ui.focus = .None
 	ui.text_drag_active = false
 	ui_set_string(&ui.url_input, state.sources[source_index].url)
@@ -1572,6 +1613,7 @@ close_source_modal :: proc() {
 	cancel_ui_flash()
 	ui.source_modal_open = false
 	ui.source_modal_refetch_index = -1
+	ui.save_source_browser_choice = false
 	ui.focus = .None
 	ui.text_drag_active = false
 	ui.has_marked_text = false
@@ -4581,11 +4623,103 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				row := source_probe_row_rect(modal, result_index)
 				fill_overlay_rect(ctx, row, [4]f64{0.028, 0.030, 0.029, 1})
 				if len(result.error) > 0 {
-					draw_text_in_rect(ctx, small_font, fmt.tprintf("%s / %s", result.video_id, result.error), UI_Rect{row.x + 10, row.y, row.w - 20, row.h}, .Start, .Center, orange, 10)
+					if source_probe_browser_retry_available(result) {
+						draw_text_in_rect(
+							ctx,
+							small_font,
+							fmt.tprintf("%s / %s", result.video_id, result.error),
+							UI_Rect{row.x + 10, row.y + 91, row.w - 20, 24},
+							.Start,
+							.Center,
+							danger,
+							10,
+						)
+						explanation := "Choose a signed-in browser. Its YouTube session is used for this request only; cookies are never stored or exported."
+						if source_auth_browser_installed_count() == 0 {
+							explanation = "No supported browser was found. Install or sign in to Brave, Chrome, Firefox, Safari, Edge, Chromium, or Vivaldi, then retry."
+						}
+						if result.auth_browser != .None {
+							explanation = fmt.tprintf(
+								"%s did not satisfy YouTube. Try another signed-in browser. Cookies are never stored or exported.",
+								source_auth_browser_name(result.auth_browser),
+							)
+						}
+						draw_text_in_rect(
+							ctx,
+							small_font,
+							explanation,
+							UI_Rect{row.x + 10, row.y + 64, row.w - 20, 24},
+							.Start,
+							.Center,
+							muted,
+							10,
+						)
+						save_control := ui_control_rect(
+							.Toggle_Save_Source_Browser,
+						)
+						save_fill := [4]f64{0.035, 0.038, 0.036, 1}
+						save_color := muted
+						if ui.save_source_browser_choice {
+							save_fill = [4]f64{0.035, 0.12, 0.12, 1}
+							save_color = cyan
+						} else if contains(save_control, ui.mouse) {
+							save_fill = [4]f64{0.055, 0.060, 0.056, 1}
+						}
+						fill_overlay_rect(ctx, save_control, save_fill)
+						save_label := "[ ] SAVE CHOICE FOR LATER"
+						if ui.save_source_browser_choice {
+							save_label = "[X] SAVE CHOICE FOR LATER"
+						}
+						draw_text_in_rect(
+							ctx,
+							small_font,
+							save_label,
+							save_control,
+							.Center,
+							.Center,
+							save_color,
+						)
+						for browser in SOURCE_AUTH_BROWSERS {
+							control := ui_control_rect_by_value(
+								.Retry_Source_With_Browser,
+								result_index,
+								int(browser),
+							)
+							if control.w == 0 {continue}
+							fill := [4]f64{0.035, 0.12, 0.12, 1}
+							if contains(control, ui.mouse) {
+								fill = [4]f64{0.045, 0.18, 0.18, 1}
+							}
+							fill_overlay_rect(ctx, control, fill)
+							draw_text_in_rect(
+								ctx,
+								small_font,
+								source_auth_browser_name(browser),
+								control,
+								.Center,
+								.Center,
+								cyan,
+							)
+						}
+					} else {
+						draw_text_in_rect(ctx, small_font, fmt.tprintf("%s / %s", result.video_id, result.error), UI_Rect{row.x + 10, row.y, row.w - 20, row.h}, .Start, .Center, orange, 10)
+					}
 					continue
 				}
 				draw_text_in_rect(ctx, small_font, result.title, UI_Rect{row.x + 10, row.y + 30, 370, 24}, .Start, .Center, bright, 10)
-				draw_text_in_rect(ctx, small_font, fmt.tprintf("%s / %s", result.video_id, format_timestamp(result.duration)), UI_Rect{row.x + 10, row.y + 6, 370, 22}, .Start, .Center, muted, 10)
+				metadata_text := fmt.tprintf(
+					"%s / %s",
+					result.video_id,
+					format_timestamp(result.duration),
+				)
+				if result.auth_browser != .None {
+					metadata_text = fmt.tprintf(
+						"%s SESSION / %s",
+						source_auth_browser_name(result.auth_browser),
+						metadata_text,
+					)
+				}
+				draw_text_in_rect(ctx, small_font, metadata_text, UI_Rect{row.x + 10, row.y + 6, 370, 22}, .Start, .Center, muted, 10)
 				for height, option_index in result.heights {
 					quality := ui_control_rect_by_value(.Source_Quality, result_index, height)
 					if quality.w == 0 {break}
@@ -4837,6 +4971,8 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	     .Refetch_Source_Details,
 	     .Import,
 	     .Source_Quality,
+	     .Retry_Source_With_Browser,
+	     .Toggle_Save_Source_Browser,
 	     .Source_Hint_Menu,
 	     .Source_Hint,
 	     .Save,
@@ -4899,6 +5035,16 @@ add_ax_element :: proc(
 	msg_void_id(element, sel_registerName("setAccessibilityParent:"), ui.view)
 	msg_void_id(element, sel_registerName("setAccessibilityRole:"), nsstring(role))
 	msg_void_id(element, sel_registerName("setAccessibilityLabel:"), nsstring(label))
+	if kind == .Toggle_Save_Source_Browser {
+		checked := uint(0)
+		if ui.save_source_browser_choice {checked = 1}
+		value := msg_id_uint(
+			objc_getClass("NSNumber"),
+			sel_registerName("numberWithUnsignedInt:"),
+			checked,
+		)
+		msg_void_id(element, sel_registerName("setAccessibilityValue:"), value)
+	}
 	msg_void_bool(element, sel_registerName("setAccessibilityEnabled:"), enabled)
 	msg_void_rect(element, sel_registerName("setAccessibilityFrame:"), ax_screen_rect(rect))
 	msg_void_id(array, sel_registerName("addObject:"), element)
@@ -5275,6 +5421,51 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		for result, result_index in source_probe_results {
 			if result_index >= 5 {break}
 			row := source_probe_row_rect(modal, result_index)
+			if source_probe_browser_retry_available(result) {
+				save_label := "Save browser choice for later, off"
+				if ui.save_source_browser_choice {
+					save_label = "Save browser choice for later, on"
+				}
+				add_ax_element(
+					array,
+					element_class,
+					save_label,
+					"AXCheckBox",
+					source_probe_save_browser_rect(row),
+					.Toggle_Save_Source_Browser,
+					flash_label = "save browser choice",
+				)
+				installed_count := source_auth_browser_installed_count()
+				installed_index := 0
+				for browser in SOURCE_AUTH_BROWSERS {
+					if !source_auth_browser_installed(browser) {continue}
+					add_ax_element(
+						array,
+						element_class,
+						fmt.tprintf(
+							"Retry using signed-in %s session. Browser cookies are not stored or exported.",
+							source_auth_browser_name(browser),
+						),
+						"AXButton",
+						source_probe_browser_rect(
+							row,
+							installed_index,
+							installed_count,
+						),
+						.Retry_Source_With_Browser,
+						result_index,
+						value = int(browser),
+						flash_label = "use browser session",
+						functional_name = fmt.tprintf(
+							"retry source %s with %s session",
+							result.video_id,
+							source_auth_browser_argument(browser),
+						),
+					)
+					installed_index += 1
+				}
+				continue
+			}
 			for height, option_index in result.heights {
 				quality := source_probe_quality_rect(row, option_index)
 				if quality.x + quality.w > row.x + row.w - 8 {break}
@@ -5629,6 +5820,15 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		if action.index >= 0 && action.index < len(source_probe_results) {
 			source_probe_results[action.index].selected_height = action.value
 		}
+	case .Retry_Source_With_Browser:
+		return source_probe_retry_with_browser(
+			action.index,
+			Source_Auth_Browser(action.value),
+		)
+	case .Toggle_Save_Source_Browser:
+		ui.save_source_browser_choice = !ui.save_source_browser_choice
+		ui.needs_redraw = true
+		return true
 	case .Stop_Download:
 		if import_job != nil {
 			if library_recovery != nil {library_recovery.cancelled = true}
@@ -6120,6 +6320,14 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 	control := find_ax_control(self)
 	if control == nil {return nil}
 	#partial switch control.action.kind {
+	case .Toggle_Save_Source_Browser:
+		checked := uint(0)
+		if ui.save_source_browser_choice {checked = 1}
+		return msg_id_uint(
+			objc_getClass("NSNumber"),
+			sel_registerName("numberWithUnsignedInt:"),
+			checked,
+		)
 	case .Command_Palette_Search:
 		return nsstring(ui.command_palette_query)
 	case .URL:

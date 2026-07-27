@@ -496,8 +496,56 @@ database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 		);
 		CREATE INDEX IF NOT EXISTS notifications_updated_at
 			ON notifications(updated_at_ms);
-		PRAGMA user_version = 2;
+		CREATE TABLE IF NOT EXISTS app_preferences (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		PRAGMA user_version = 3;
 	`)
+}
+
+database_source_auth_browser_load :: proc(
+	database: ^SQLite_DB,
+) -> Source_Auth_Browser {
+	if database == nil {return .None}
+	statement, ok := sqlite_prepare(
+		database,
+		"SELECT value FROM app_preferences WHERE key = 'youtube_auth_browser'",
+	)
+	if !ok {return .None}
+	defer sqlite3_finalize(statement)
+	if sqlite3_step(statement) != SQLITE_ROW {return .None}
+	value := sqlite3_column_text(statement, 0)
+	if value == nil {return .None}
+	return source_auth_browser_from_argument(string(value))
+}
+
+database_source_auth_browser_save :: proc(
+	database: ^SQLite_DB,
+	browser: Source_Auth_Browser,
+) -> bool {
+	if database == nil || browser == .None {return false}
+	statement, ok := sqlite_prepare(
+		database,
+		`INSERT INTO app_preferences (key, value)
+		 VALUES ('youtube_auth_browser', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	)
+	if !ok {return false}
+	defer sqlite3_finalize(statement)
+	return sqlite_bind_text_value(
+		statement,
+		1,
+		source_auth_browser_argument(browser),
+	) && sqlite3_step(statement) == SQLITE_DONE
+}
+
+database_source_auth_browser_clear :: proc(database: ^SQLite_DB) -> bool {
+	if database == nil {return false}
+	return sqlite_execute(
+		database,
+		"DELETE FROM app_preferences WHERE key = 'youtube_auth_browser'",
+	)
 }
 
 database_insert_source :: proc(database: ^SQLite_DB, source: Source_Video, position: int) -> bool {
@@ -911,6 +959,7 @@ load_library :: proc() {
 		load_legacy_library()
 		return
 	}
+	source_auth_saved_browser = database_source_auth_browser_load(database)
 	legacy_exists := os.exists(manifest_path())
 	if legacy_exists {
 		load_legacy_library()

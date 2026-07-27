@@ -2138,6 +2138,271 @@ source_probe_cache_uses_video_id_across_timestamp_urls_test :: proc(t: ^testing.
 }
 
 @(test)
+source_probe_classifies_youtube_browser_challenges_test :: proc(t: ^testing.T) {
+	testing.expect(t, source_probe_auth_required(
+		"ERROR: Sign in to confirm you’re not a bot. Use --cookies-from-browser",
+	))
+	testing.expect(t, source_probe_auth_required(
+		"ERROR: Sign in to confirm you're not a bot.",
+	))
+	testing.expect(t, !source_probe_auth_required("ERROR: Video unavailable"))
+	testing.expect(t, source_probe_browser_retry_available(Source_Probe_Result{
+		error = "YOUTUBE SIGN-IN REQUIRED",
+		auth_required = true,
+	}))
+	testing.expect(t, source_probe_browser_retry_available(Source_Probe_Result{
+		error = "BRAVE SESSION UNAVAILABLE",
+		auth_browser = .Brave,
+	}))
+	testing.expect(t, !source_probe_browser_retry_available(Source_Probe_Result{
+		error = "NO VIDEO FORMATS",
+		auth_browser = .Brave,
+	}))
+}
+
+@(test)
+source_probe_adds_only_the_explicitly_selected_browser_session_test :: proc(
+	t: ^testing.T,
+) {
+	plain := source_probe_command(
+		"https://youtu.be/video",
+		allocator=context.temp_allocator,
+	)
+	plain_has_browser := false
+	for argument in plain {
+		if argument == "--cookies-from-browser" {plain_has_browser = true}
+	}
+	testing.expect(t, !plain_has_browser)
+
+	brave := source_probe_command(
+		"https://youtu.be/video",
+		.Brave,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, brave[1], "--cookies-from-browser")
+	testing.expect_value(t, brave[2], "brave")
+	testing.expect_value(t, source_auth_browser_name(.Brave), "Brave")
+	testing.expect_value(t, source_auth_browser_argument(.Firefox), "firefox")
+	testing.expect_value(
+		t,
+		source_auth_browser_from_argument("safari"),
+		Source_Auth_Browser.Safari,
+	)
+	testing.expect_value(
+		t,
+		source_auth_browser_from_argument("unsupported"),
+		Source_Auth_Browser.None,
+	)
+}
+
+@(test)
+source_browser_choice_round_trips_through_application_preferences_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened :=
+		sqlite3_open_v2(
+			path,
+			&database,
+			SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+			nil,
+		) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+	testing.expect_value(
+		t,
+		database_source_auth_browser_load(database),
+		Source_Auth_Browser.None,
+	)
+	testing.expect(t, database_source_auth_browser_save(database, .Brave))
+	testing.expect_value(
+		t,
+		database_source_auth_browser_load(database),
+		Source_Auth_Browser.Brave,
+	)
+	testing.expect(t, database_save_collections(
+		database,
+		nil,
+		nil,
+		nil,
+		nil,
+	))
+	testing.expect_value(
+		t,
+		database_source_auth_browser_load(database),
+		Source_Auth_Browser.Brave,
+	)
+	testing.expect(t, database_source_auth_browser_clear(database))
+	testing.expect_value(
+		t,
+		database_source_auth_browser_load(database),
+		Source_Auth_Browser.None,
+	)
+}
+
+@(test)
+source_probe_uses_a_saved_browser_only_after_an_authentication_challenge_test :: proc(
+	t: ^testing.T,
+) {
+	browser := source_probe_saved_retry_browser(
+		true,
+		.None,
+		.Brave,
+		true,
+	)
+	testing.expect_value(t, browser, Source_Auth_Browser.Brave)
+
+	browser = source_probe_saved_retry_browser(
+		false,
+		.None,
+		.Brave,
+		true,
+	)
+	testing.expect_value(t, browser, Source_Auth_Browser.None)
+
+	browser = source_probe_saved_retry_browser(
+		true,
+		.Firefox,
+		.Brave,
+		true,
+	)
+	testing.expect_value(t, browser, Source_Auth_Browser.None)
+
+	browser = source_probe_saved_retry_browser(
+		true,
+		.None,
+		.Brave,
+		false,
+	)
+	testing.expect_value(t, browser, Source_Auth_Browser.None)
+}
+
+@(test)
+import_quality_retains_browser_choice_for_the_download_test :: proc(t: ^testing.T) {
+	qualities := make([dynamic]Import_Quality, context.temp_allocator)
+	append(&qualities, Import_Quality{
+		video_id="video",
+		height=1080,
+		exact=true,
+		auth_browser=.Brave,
+	})
+	job := Import_Job{qualities=qualities}
+	height, exact, browser := import_job_selected_quality(&job, "video")
+	testing.expect_value(t, height, 1080)
+	testing.expect(t, exact)
+	testing.expect_value(t, browser, Source_Auth_Browser.Brave)
+}
+
+@(test)
+import_download_adds_only_the_explicitly_selected_browser_session_test :: proc(
+	t: ^testing.T,
+) {
+	plain := import_download_command(
+		"https://youtu.be/video",
+		"/tmp/video.%(ext)s",
+		allocator=context.temp_allocator,
+	)
+	plain_has_browser := false
+	for argument in plain {
+		if argument == "--cookies-from-browser" {plain_has_browser = true}
+	}
+	testing.expect(t, !plain_has_browser)
+
+	brave := import_download_command(
+		"https://youtu.be/video",
+		"/tmp/video.%(ext)s",
+		auth_browser=.Brave,
+		allocator=context.temp_allocator,
+	)
+	testing.expect_value(t, brave[1], "--cookies-from-browser")
+	testing.expect_value(t, brave[2], "brave")
+}
+
+@(test)
+source_browser_choices_fit_inside_the_authentication_row_test :: proc(t: ^testing.T) {
+	row := UI_Rect{100, 100, 932, 120}
+	count := 3
+	previous: UI_Rect
+	save_choice := source_probe_save_browser_rect(row)
+	testing.expect(t, save_choice.x >= row.x)
+	testing.expect(t, save_choice.x+save_choice.w <= row.x+row.w)
+	for index in 0 ..< count {
+		button := source_probe_browser_rect(row, index, count)
+		testing.expect(t, button.x >= row.x)
+		testing.expect(t, button.x+button.w <= row.x+row.w)
+		testing.expect(t, button.y+button.h < row.y+34)
+		if index > 0 {testing.expect(t, button.x > previous.x+previous.w)}
+		previous = button
+	}
+}
+
+@(test)
+source_browser_choices_use_the_shared_control_registry_test :: proc(t: ^testing.T) {
+	previous_ui := ui
+	previous_ui_build := ui_build
+	previous_results := source_probe_results
+	defer {
+		for &result in source_probe_results {source_probe_result_destroy(&result)}
+		delete(source_probe_results)
+		source_probe_results = previous_results
+		ui = previous_ui
+		ui_build = previous_ui_build
+	}
+	ui = UI_State{
+		width = 1100,
+		height = 720,
+		mode = .Create,
+		source_modal_open = true,
+		source_modal_refetch_index = -1,
+		player_volume = 1,
+		playback_rate = 1,
+		transcript_active_match = -1,
+	}
+	source_probe_results = make([dynamic]Source_Probe_Result)
+	append(&source_probe_results, Source_Probe_Result{
+		video_id = strings.clone("video"),
+		error = strings.clone("YOUTUBE SIGN-IN REQUIRED"),
+		auth_required = true,
+	})
+	frame_arena: mem_virtual.Arena
+	frame_error := mem_virtual.arena_init_static(&frame_arena, 1024*1024, 4096)
+	testing.expect(t, frame_error == nil)
+	if frame_error != nil {return}
+	defer mem_virtual.arena_destroy(&frame_arena)
+	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	save_choice := find_ui_control_by_action(.Toggle_Save_Source_Browser)
+	testing.expect(t, save_choice != nil)
+	if save_choice != nil {
+		testing.expect_value(t, save_choice.accessibility_role, "AXCheckBox")
+		testing.expect(t, strings.contains(
+			save_choice.accessibility_label,
+			"for later, off",
+		))
+		testing.expect(t, activate_ui_action(save_choice.action))
+		testing.expect(t, ui.save_source_browser_choice)
+	}
+	browser_control_count := 0
+	for control in ui_build.controls {
+		if control.action.kind != .Retry_Source_With_Browser {continue}
+		browser_control_count += 1
+		testing.expect(t, strings.contains(
+			control.accessibility_label,
+			"cookies are not stored or exported",
+		))
+	}
+	testing.expect_value(
+		t,
+		browser_control_count,
+		source_auth_browser_installed_count(),
+	)
+}
+
+@(test)
 source_modal_input_expands_for_three_lines_test :: proc(t: ^testing.T) {
 	modal := UI_Rect{100, 100, 980, 680}
 	input := source_modal_input_rect_for_text(modal, "one\ntwo\nthree")

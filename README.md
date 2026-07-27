@@ -52,6 +52,15 @@ caption track and otherwise accepts YouTube's original-language automatic
 captions. Right-click a source to open the Source Details dialog. It shows the
 duration, resolution, frame rate, codecs, container, format ID, and local file
 size. The app loads missing file metadata in the background after startup.
+If YouTube requires sign-in, select an installed browser in the ingest dialog.
+The app uses that browser's existing YouTube session for the metadata check and
+download. It does not store or export browser cookies.
+Enable **Save choice for later** before selecting a browser to reuse that
+browser when a future request requires sign-in. Every metadata check starts
+anonymously. The app reads the saved browser session only after YouTube rejects
+the anonymous request. It stores only the browser name in its local database.
+If the saved session fails, the app removes the preference and shows the
+browser selector again.
 Select **Refetch / Select Quality** to replace its media, metadata, and
 captions. Refetch checks the source again and opens the same per-video quality
 selector before it downloads replacement media.

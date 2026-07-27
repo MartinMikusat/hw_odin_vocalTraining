@@ -178,6 +178,7 @@ Import_Quality :: struct {
 	video_id: string,
 	height: int,
 	exact: bool,
+	auth_browser: Source_Auth_Browser,
 }
 
 Export_Operation :: enum {
@@ -1011,6 +1012,7 @@ import_job_create :: proc(input: string, replace_video_id := "") -> ^Import_Job 
 					Import_Quality {
 						video_id = strings.clone(result.video_id, allocator),
 						height = result.selected_height,
+						auth_browser = result.auth_browser,
 					},
 				)
 			}
@@ -1083,11 +1085,27 @@ download_format_selector :: proc(maximum_height: int, exact := false) -> string 
 	return fmt.tprintf("bv*[height<=%d][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=%d][ext=mp4][vcodec^=avc1]", maximum_height, maximum_height)
 }
 
-import_job_selected_quality :: proc(job: ^Import_Job, video_id: string) -> (int, bool) {
+import_job_selected_quality :: proc(
+	job: ^Import_Job,
+	video_id: string,
+) -> (
+	height: int,
+	exact: bool,
+	auth_browser: Source_Auth_Browser,
+) {
 	for quality in job.qualities {
-		if quality.video_id == video_id {return quality.height, quality.exact}
+		if quality.video_id == video_id {
+			return quality.height, quality.exact, quality.auth_browser
+		}
 	}
-	return 0, false
+	return 0, false, .None
+}
+
+import_job_auth_browser :: proc(job: ^Import_Job) -> Source_Auth_Browser {
+	for quality in job.qualities {
+		if quality.auth_browser != .None {return quality.auth_browser}
+	}
+	return .None
 }
 
 staged_source_cleanup :: proc(directory, video_id: string) {
@@ -1144,6 +1162,7 @@ import_job_run_download :: proc(
 	url, output: string,
 	maximum_height := 0,
 	exact_height := false,
+	auth_browser := Source_Auth_Browser.None,
 ) -> bool {
 	progress_file, progress_error := os2.open(import_progress_path(), {.Write, .Create, .Trunc, .Inheritable})
 	if progress_error != nil {return false}
@@ -1152,15 +1171,14 @@ import_job_run_download :: proc(
 	if log_error != nil {return false}
 	defer os2.close(log_file)
 	import_job_set_phase(job, .Downloading)
-	format_selector := download_format_selector(maximum_height, exact_height)
-	command := [24]string{
-		helper_command("yt-dlp"), "--no-playlist", "--force-overwrites", "--write-info-json",
-		"--write-subs", "--write-auto-subs", "--sub-langs", "en,.*-orig", "--sub-format", "json3",
-		"--ffmpeg-location", helper_command("ffmpeg"), "-f", format_selector,
-		"-S", "res,vcodec:h264", "--merge-output-format", "mp4", "--newline",
-		"--progress-template", "download:VT_PROGRESS|%(progress._percent_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
-		"-o", output, url,
-	}
+	command := import_download_command(
+		url,
+		output,
+		maximum_height,
+		exact_height,
+		auth_browser,
+		context.temp_allocator,
+	)
 	process, start_error := os2.process_start({command=command[:], stdout=progress_file, stderr=log_file})
 	if start_error != nil {return false}
 	sync.mutex_lock(&job.process_mutex)
@@ -1175,6 +1193,52 @@ import_job_run_download :: proc(
 	cancelled = job.cancelled
 	sync.mutex_unlock(&job.process_mutex)
 	return !cancelled && wait_error == nil && process_state.success
+}
+
+import_download_command :: proc(
+	url, output: string,
+	maximum_height := 0,
+	exact_height := false,
+	auth_browser := Source_Auth_Browser.None,
+	allocator := context.allocator,
+) -> [dynamic]string {
+	format_selector := download_format_selector(maximum_height, exact_height)
+	command := make([dynamic]string, allocator)
+	append(&command, helper_command("yt-dlp"))
+	if auth_browser != .None {
+		append(
+			&command,
+			"--cookies-from-browser",
+			source_auth_browser_argument(auth_browser),
+		)
+	}
+	append(
+		&command,
+		"--no-playlist",
+		"--force-overwrites",
+		"--write-info-json",
+		"--write-subs",
+		"--write-auto-subs",
+		"--sub-langs",
+		"en,.*-orig",
+		"--sub-format",
+		"json3",
+		"--ffmpeg-location",
+		helper_command("ffmpeg"),
+		"-f",
+		format_selector,
+		"-S",
+		"res,vcodec:h264",
+		"--merge-output-format",
+		"mp4",
+		"--newline",
+		"--progress-template",
+		"download:VT_PROGRESS|%(progress._percent_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+		"-o",
+		output,
+		url,
+	)
+	return command
 }
 
 import_job_rebuild_exercises :: proc(job: ^Import_Job, source: ^Source_Video) {
@@ -1234,8 +1298,16 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	source_directory := fmt.tprintf("%s/sources", dir)
 	staged_source_cleanup(source_directory, video_id)
 	output := fmt.tprintf("%s/%s.download.%%(ext)s", source_directory, video_id)
-	selected_height, exact_height := import_job_selected_quality(job, video_id)
-	if !import_job_run_download(job, url, output, selected_height, exact_height) {
+	selected_height, exact_height, auth_browser :=
+		import_job_selected_quality(job, video_id)
+	if !import_job_run_download(
+		job,
+		url,
+		output,
+		selected_height,
+		exact_height,
+		auth_browser,
+	) {
 		staged_source_cleanup(source_directory, video_id)
 		return false
 	}
@@ -1750,7 +1822,11 @@ library_recovery_start :: proc() -> bool {
 	return true
 }
 
-refetch_source :: proc(source_index: int, maximum_height := 0) {
+refetch_source :: proc(
+	source_index: int,
+	maximum_height := 0,
+	auth_browser := Source_Auth_Browser.None,
+) {
 	if import_job != nil { set_text(state.status, "An import is already running"); return }
 	if source_index < 0 || source_index >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
 	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
@@ -1764,6 +1840,7 @@ refetch_source :: proc(source_index: int, maximum_height := 0) {
 			Import_Quality {
 				video_id = strings.clone(source.video_id, allocator),
 				height = maximum_height,
+				auth_browser = auth_browser,
 			},
 		)
 	}
@@ -1782,9 +1859,23 @@ refetch_source :: proc(source_index: int, maximum_height := 0) {
 			maximum_height,
 		)
 	}
+	if auth_browser != .None {
+		browser_name := source_auth_browser_name(auth_browser)
+		summary = fmt.tprintf(
+			"Refetching source with %s session...",
+			browser_name,
+		)
+	}
+	detail := "The source will be downloaded into staging files, validated, and then committed."
+	if auth_browser != .None {
+		detail = fmt.tprintf(
+			"You selected %s. yt-dlp reads its YouTube session for this download. The application does not store or export browser cookies.",
+			source_auth_browser_name(auth_browser),
+		)
+	}
 	job.notification_id = notification_begin(
 		summary,
-		"The source will be downloaded into staging files, validated, and then committed.",
+		detail,
 		fields[:],
 	)
 	import_job = job
@@ -1819,8 +1910,11 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 		source_index := ui.source_modal_refetch_index
 		if source_index >= 0 && source_index < len(state.sources) {
 			height := source_probe_selected_height(state.sources[source_index].video_id)
+			auth_browser := source_probe_selected_browser(
+				state.sources[source_index].video_id,
+			)
 			close_source_modal()
-			refetch_source(source_index, height)
+			refetch_source(source_index, height, auth_browser)
 		}
 		return
 	}
@@ -1830,10 +1924,20 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if worker == nil { import_job_destroy(job); set_text(state.status, "Unable to start import worker"); return }
 	job.thread = worker
 	worker.data = job
-	job.notification_id = notification_begin(
-		"Downloading video and YouTube captions...",
-		"The application downloads each selected source sequentially and validates the merged media before updating the library.",
-	)
+	summary := "Downloading video and YouTube captions..."
+	detail := "The application downloads each selected source sequentially and validates the merged media before updating the library."
+	if auth_browser := import_job_auth_browser(job); auth_browser != .None {
+		browser_name := source_auth_browser_name(auth_browser)
+		summary = fmt.tprintf(
+			"Downloading with %s session...",
+			browser_name,
+		)
+		detail = fmt.tprintf(
+			"You selected %s. yt-dlp reads its YouTube session for this download. The application does not store or export browser cookies.",
+			browser_name,
+		)
+	}
+	job.notification_id = notification_begin(summary, detail)
 	import_job = job
 	os.make_directory(app_support_dir())
 	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
