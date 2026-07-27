@@ -197,8 +197,9 @@ every visible control, while Metal renders the interface through one
 routes typing through `interpretKeyEvents`, so Command shortcuts and input
 methods stay on the AppKit path. AVPlayer decodes muted video, and Core Video
 maps its frames into Metal textures. AVAudioEngine routes audio through a
-time-pitch unit, so speed changes preserve vocal pitch without restarting the
-audio stream.
+time-pitch unit, so speed changes preserve vocal pitch. Audio configuration
+notifications restart and reschedule this graph when the default output device
+changes.
 
 The interface uses the bundled Iosevka Regular font and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface, including the compact

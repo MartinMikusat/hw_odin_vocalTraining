@@ -18,6 +18,11 @@ foreign metal {
 	MTLCreateSystemDefaultDevice :: proc "c" () -> Id ---
 }
 
+foreign import avfaudio "system:AVFAudio.framework"
+foreign avfaudio {
+	AVAudioEngineConfigurationChangeNotification: Id
+}
+
 foreign import core_graphics "system:CoreGraphics.framework"
 foreign core_graphics {
 	CGColorSpaceCreateDeviceRGB :: proc "c" () -> rawptr ---
@@ -457,6 +462,11 @@ msg_i64 :: proc(receiver: Id, selector: Sel) -> i64 {
 msg_void_id_id_id :: proc(receiver: Id, selector: Sel, a, b, c: Id) {
 	p := transmute(proc "c" (_: Id, _: Sel, _: Id, _: Id, _: Id))send_address
 	p(receiver, selector, a, b, c)
+}
+
+msg_void_id_sel_id_id :: proc(receiver: Id, selector: Sel, observer: Id, action: Sel, name, object: Id) {
+	p := transmute(proc "c" (_: Id, _: Sel, _: Id, _: Sel, _: Id, _: Id))send_address
+	p(receiver, selector, observer, action, name, object)
 }
 
 msg_void_id_i64_u32_id_id :: proc(receiver: Id, selector: Sel, file: Id, frame: i64, count: u32, time, completion: Id) {
@@ -6221,7 +6231,33 @@ metal_audio_seek :: proc(seconds: f64, resume: bool) {
 	if resume {metal_audio_play()}
 }
 
+metal_audio_observe_configuration :: proc(engine: Id) {
+	if engine == nil || state.delegate_target == nil {return}
+	center := msg_id(objc_getClass("NSNotificationCenter"), sel_registerName("defaultCenter"))
+	msg_void_id_sel_id_id(
+		center,
+		sel_registerName("addObserver:selector:name:object:"),
+		state.delegate_target,
+		sel_registerName("audioEngineConfigurationChanged:"),
+		AVAudioEngineConfigurationChangeNotification,
+		engine,
+	)
+}
+
+metal_audio_stop_observing_configuration :: proc(engine: Id) {
+	if engine == nil || state.delegate_target == nil {return}
+	center := msg_id(objc_getClass("NSNotificationCenter"), sel_registerName("defaultCenter"))
+	msg_void_id_id_id(
+		center,
+		sel_registerName("removeObserver:name:object:"),
+		state.delegate_target,
+		AVAudioEngineConfigurationChangeNotification,
+		engine,
+	)
+}
+
 metal_audio_release :: proc(engine, player, pitch, file: Id) {
+	metal_audio_stop_observing_configuration(engine)
 	if player != nil {msg_void(player, sel_registerName("stop"))}
 	if engine != nil {msg_void(engine, sel_registerName("stop"))}
 	if file != nil {msg_void(file, sel_registerName("release"))}
@@ -6259,7 +6295,54 @@ metal_audio_load :: proc(url: Id) -> (engine, player, pitch, file: Id, ok: bool)
 		metal_audio_release(engine, player, pitch, file)
 		return nil, nil, nil, nil, false
 	}
+	metal_audio_observe_configuration(engine)
 	return engine, player, pitch, file, true
+}
+
+metal_audio_recover_configuration :: proc(engine: Id) -> bool {
+	if engine == nil || engine != ui.audio_engine || state.player == nil {return false}
+	resume := msg_f32(state.player, sel_registerName("rate")) > 0
+	msg_void(state.player, sel_registerName("pause"))
+	seconds, has_seconds := current_seconds()
+	if !has_seconds {return false}
+	if !msg_bool(engine, sel_registerName("isRunning")) {
+		error: Id
+		msg_void(engine, sel_registerName("prepare"))
+		if !msg_bool_error(engine, sel_registerName("startAndReturnError:"), &error) {
+			return false
+		}
+	}
+	seek_video_seconds(seconds)
+	metal_audio_seek(seconds, false)
+	if resume {
+		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
+		metal_audio_play()
+	}
+	ui.needs_redraw = true
+	return true
+}
+
+on_audio_engine_configuration_changed :: proc "c" (self: Id, command: Sel, notification: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	engine := msg_id(notification, sel_registerName("object"))
+	if engine == nil {return}
+	msg_void_sel_id_b(
+		self,
+		sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"),
+		sel_registerName("recoverAudioEngineConfiguration:"),
+		engine,
+		false,
+	)
+}
+
+on_audio_engine_recover_configuration :: proc "c" (self: Id, command: Sel, engine: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if engine != ui.audio_engine {return}
+	if metal_audio_recover_configuration(engine) {return}
+	if state.player != nil {msg_void(state.player, sel_registerName("pause"))}
+	set_error_status("Audio output changed, but playback could not reconnect")
 }
 
 metal_player_clear :: proc() {
@@ -7281,6 +7364,18 @@ register_delegate :: proc(app: Id) {
 		delegate_class,
 		sel_registerName("cliRequest:"),
 		rawptr(on_cli_ipc_request),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
+		sel_registerName("audioEngineConfigurationChanged:"),
+		rawptr(on_audio_engine_configuration_changed),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
+		sel_registerName("recoverAudioEngineConfiguration:"),
+		rawptr(on_audio_engine_recover_configuration),
 		"v@:@",
 	)
 	class_addMethod(
