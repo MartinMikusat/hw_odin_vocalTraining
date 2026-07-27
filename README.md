@@ -39,6 +39,10 @@ shows source ingest, the timed transcript, range markers, exercise naming, and
 export controls. **Play** shows the saved-exercise library, a larger practice
 monitor, and only playback controls.
 
+In Play mode, select **Randomize** to choose from the complete exercise library
+and start playback. An active search does not limit the random pool. When two
+or more exercises exist, Randomize does not select the active exercise.
+
 Press **Add** in the Source Register to open the ingest dialog, then paste one
 or more YouTube URLs with one URL per line. URLs are normalized by video ID,
 while timestamps supplied through `t`, `start`, or `youtu.be` URL forms become
@@ -102,6 +106,8 @@ The speed controls adjust playback from `0.1x` to `2.0x` in `0.1x` steps.
 
 When no text field has focus, press **Space** to toggle playback or **1–8** to
 activate the matching numbered transport control.
+The Play actions are **1 Randomize**, **2 Run**, **3 Hold**, **4 Rename**,
+**5 Data**, and **6 Metadata**.
 Press **Left Arrow** or **Right Arrow** to scrub by one second. Hold **Shift**
 to scrub by 0.1 seconds, or hold **Command** to scrub by 10 seconds.
 

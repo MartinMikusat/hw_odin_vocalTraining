@@ -417,6 +417,29 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	build_ui_controls(false, frame_allocator)
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
 	testing.expect(t, len(ui_build.controls) > 4)
+	randomize := find_ui_control_by_action(.Randomize)
+	testing.expect(t, randomize != nil)
+	if randomize != nil {
+		testing.expect(t, .Enabled in randomize.flags)
+		testing.expect_value(
+			t,
+			randomize.accessibility_label,
+			"Play a random exercise",
+		)
+		testing.expect_value(t, randomize.flash_label, "randomize exercise")
+	}
+	randomize_registry_index, run_registry_index := -1, -1
+	for control, index in ui_build.controls {
+		if control.action.kind == .Randomize {
+			randomize_registry_index = index
+		}
+		if control.action.kind == .Play {
+			run_registry_index = index
+		}
+	}
+	testing.expect(t, randomize_registry_index >= 0)
+	testing.expect(t, run_registry_index >= 0)
+	testing.expect(t, randomize_registry_index < run_registry_index)
 }
 
 @(test)
@@ -1853,18 +1876,42 @@ mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
 		testing.expect_value(t, control_action_for_slot(.Create, slot), slot)
 		testing.expect_value(t, control_slot_for_action(.Create, slot), slot)
 	}
-	testing.expect_value(t, control_action_for_slot(.Play, 0), 3)
-	testing.expect_value(t, control_action_for_slot(.Play, 1), 4)
-	testing.expect_value(t, control_action_for_slot(.Play, 2), 8)
-	testing.expect_value(t, control_action_for_slot(.Play, 3), 7)
-	testing.expect_value(t, control_action_for_slot(.Play, 4), 9)
-	testing.expect_value(t, control_action_for_slot(.Play, 5), -1)
-	testing.expect_value(t, control_slot_for_action(.Play, 3), 0)
-	testing.expect_value(t, control_slot_for_action(.Play, 4), 1)
-	testing.expect_value(t, control_slot_for_action(.Play, 7), 3)
-	testing.expect_value(t, control_slot_for_action(.Play, 8), 2)
-	testing.expect_value(t, control_slot_for_action(.Play, 9), 4)
+	testing.expect_value(t, control_action_for_slot(.Play, 0), 10)
+	testing.expect_value(t, control_action_for_slot(.Play, 1), 3)
+	testing.expect_value(t, control_action_for_slot(.Play, 2), 4)
+	testing.expect_value(t, control_action_for_slot(.Play, 3), 8)
+	testing.expect_value(t, control_action_for_slot(.Play, 4), 7)
+	testing.expect_value(t, control_action_for_slot(.Play, 5), 9)
+	testing.expect_value(t, control_action_for_slot(.Play, 6), -1)
+	testing.expect_value(t, control_slot_for_action(.Play, 10), 0)
+	testing.expect_value(t, control_slot_for_action(.Play, 3), 1)
+	testing.expect_value(t, control_slot_for_action(.Play, 4), 2)
+	testing.expect_value(t, control_slot_for_action(.Play, 7), 4)
+	testing.expect_value(t, control_slot_for_action(.Play, 8), 3)
+	testing.expect_value(t, control_slot_for_action(.Play, 9), 5)
 	testing.expect_value(t, control_slot_for_action(.Play, 0), -1)
+}
+
+@(test)
+random_exercise_selection_avoids_the_active_exercise_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, random_exercise_index_for_roll(0, -1, 0), -1)
+	testing.expect_value(t, random_exercise_index_for_roll(1, 0, 0), 0)
+	testing.expect_value(t, random_exercise_index_for_roll(3, -1, 0), 0)
+	testing.expect_value(t, random_exercise_index_for_roll(3, -1, 1), 1)
+	testing.expect_value(t, random_exercise_index_for_roll(3, -1, 2), 2)
+	testing.expect_value(t, random_exercise_index_for_roll(3, 1, 0), 0)
+	testing.expect_value(t, random_exercise_index_for_roll(3, 1, 1), 2)
+	for active_exercise in 0 ..< 4 {
+		for roll in 0 ..< 3 {
+			selected := random_exercise_index_for_roll(
+				4,
+				active_exercise,
+				roll,
+			)
+			testing.expect(t, selected >= 0 && selected < 4)
+			testing.expect(t, selected != active_exercise)
+		}
+	}
 }
 
 @(test)

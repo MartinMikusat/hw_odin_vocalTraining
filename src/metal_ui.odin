@@ -289,6 +289,7 @@ UI_Action_Kind :: enum {
 	Transcript,
 	Exercise_Search,
 	Exercise,
+	Randomize,
 	Exercise_Name,
 	Cancel_Exercise_Rename,
 	Confirm_Exercise_Rename,
@@ -1712,14 +1713,16 @@ control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
 	if mode == .Create {return slot if slot >= 0 && slot < 8 else -1}
 	switch slot {
 	case 0:
-		return 3
+		return 10
 	case 1:
-		return 4
+		return 3
 	case 2:
-		return 8
+		return 4
 	case 3:
-		return 7
+		return 8
 	case 4:
+		return 7
+	case 5:
 		return 9
 	}
 	return -1
@@ -1728,16 +1731,18 @@ control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
 control_slot_for_action :: proc(mode: UI_Mode, action: int) -> int {
 	if mode == .Create {return action if action >= 0 && action < 8 else -1}
 	switch action {
-	case 3:
+	case 10:
 		return 0
-	case 4:
+	case 3:
 		return 1
-	case 7:
-		return 3
-	case 8:
+	case 4:
 		return 2
-	case 9:
+	case 7:
 		return 4
+	case 8:
+		return 3
+	case 9:
+		return 5
 	}
 	return -1
 }
@@ -1941,7 +1946,7 @@ control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
 	slot := control_slot_for_action(ui.mode, action)
 	if slot < 0 {return {}}
 	count := 8
-	if ui.mode == .Play {count = 5}
+	if ui.mode == .Play {count = 6}
 	gap := 6.0
 	cell_w := (controls.w - gap * f64(count - 1)) / f64(count)
 	return UI_Rect{controls.x + f64(slot) * (cell_w + gap), controls.y, cell_w, controls.h}
@@ -3660,7 +3665,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 	}
 
-	control_kinds := [10]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata}
+	control_kinds := [11]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize}
 	for kind, index in control_kinds {
 		rect := ui_control_rect(kind)
 		if rect.w <= 0 {continue}
@@ -4285,7 +4290,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		CGContextRestoreGState(ctx)
 	}
 
-	labels := [10]string {
+	labels := [11]string {
 		"MARK IN",
 		"MARK OUT",
 		"COMMIT",
@@ -4296,8 +4301,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		"DATA",
 		"RENAME",
 		"METADATA",
+		"RANDOMIZE",
 	}
-	control_kinds := [10]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata}
+	control_kinds := [11]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize}
 	valid_range := active_exercise_range_is_valid()
 	for label, i in labels {
 		rect := ui_control_rect(control_kinds[i])
@@ -4943,6 +4949,9 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		return import_job == nil &&
 		       export_job == nil &&
 		       active_exercise_range_is_valid()
+	}
+	if kind == .Randomize {
+		return ui.mode == .Play && len(state.exercises) > 0
 	}
 	if kind == .Rename || kind == .Metadata {
 		return import_job == nil &&
@@ -5706,8 +5715,8 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			flash_label = "louder",
 		)
 	}
-	kinds := [10]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata}
-	labels := [10]string {
+	kinds := [11]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize}
+	labels := [11]string {
 		"Set start",
 		"Set end",
 		"Save exercise",
@@ -5718,11 +5727,27 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		"Open library data",
 		"Rename exercise",
 		"Show exercise metadata",
+		"Play a random exercise",
 	}
-	flash_labels := [10]string{"mark in", "mark out", "commit", "run", "hold", "captions", "audition", "data", "rename exercise", "exercise metadata"}
-	for kind, index in kinds {
-		rect := control_rect(controls, index)
-		if rect.w > 0 {add_ax_element(array, element_class, labels[index], "AXButton", rect, kind, flash_label = flash_labels[index])}
+	flash_labels := [11]string{"mark in", "mark out", "commit", "run", "hold", "captions", "audition", "data", "rename exercise", "exercise metadata", "randomize exercise"}
+	slot_count := 8
+	if ui.mode == .Play {slot_count = 6}
+	for slot in 0 ..< slot_count {
+		action_index := control_action_for_slot(ui.mode, slot)
+		if action_index < 0 {continue}
+		kind := kinds[action_index]
+		rect := control_rect(controls, action_index)
+		if rect.w > 0 {
+			add_ax_element(
+				array,
+				element_class,
+				labels[action_index],
+				"AXButton",
+				rect,
+				kind,
+				flash_label = flash_labels[action_index],
+			)
+		}
 	}
 	if ui.mode == .Create {
 		add_ax_element(
@@ -5861,6 +5886,8 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 	case .Exercise:
 		ui_event_tag = action.index
 		on_play_exercise(nil, nil, nil)
+	case .Randomize:
+		return randomize_exercise()
 	case .Exercise_Name:
 		focus_text_input(.Exercise_Name)
 	case .Cancel_Exercise_Rename:
@@ -6905,7 +6932,7 @@ metal_player_load :: proc(path: string) -> bool {
 }
 
 activate_control :: proc(index: int) {
-	kinds := [10]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata}
+	kinds := [11]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize}
 	if index < 0 || index >= len(kinds) {return}
 	control := find_ui_control_by_action(kinds[index])
 	if control != nil && .Enabled in control.flags {_ = activate_ui_action(control.action)}

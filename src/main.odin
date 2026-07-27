@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:encoding/json"
+import "core:math/rand"
 import "core:mem"
 import "core:os"
 import os2 "core:os/os2"
@@ -2314,6 +2315,45 @@ on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
 	start_loaded_playback_at(0)
 	ui.active_exercise = index
 	set_text(state.status, fmt.tprintf("Playing %s", exercise.name))
+}
+
+random_exercise_index_for_roll :: proc(
+	exercise_count, active_exercise, roll: int,
+) -> int {
+	if exercise_count <= 0 {return -1}
+	exclude_active :=
+		exercise_count > 1 &&
+		active_exercise >= 0 &&
+		active_exercise < exercise_count
+	candidate_count := exercise_count
+	if exclude_active {candidate_count -= 1}
+	candidate := roll % candidate_count
+	if exclude_active && candidate >= active_exercise {
+		candidate += 1
+	}
+	return candidate
+}
+
+randomize_exercise :: proc() -> bool {
+	exercise_count := len(state.exercises)
+	if exercise_count == 0 {
+		set_text(state.status, "No exercises are available")
+		return false
+	}
+	candidate_count := exercise_count
+	if exercise_count > 1 &&
+	   ui.active_exercise >= 0 &&
+	   ui.active_exercise < exercise_count {
+		candidate_count -= 1
+	}
+	index := random_exercise_index_for_roll(
+		exercise_count,
+		ui.active_exercise,
+		rand.int_max(candidate_count),
+	)
+	ui_event_tag = index
+	on_play_exercise(nil, nil, nil)
+	return true
 }
 
 on_filter_lists :: proc "c" (self: Id, command: Sel, sender: Id) {
