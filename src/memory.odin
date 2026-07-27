@@ -215,7 +215,11 @@ clone_import_hint :: proc(hint: Import_Hint, allocator := context.allocator) -> 
 }
 
 clone_exercise :: proc(exercise: Exercise, allocator := context.allocator) -> (Exercise, bool) {
-	result := Exercise{start_seconds=exercise.start_seconds, end_seconds=exercise.end_seconds}
+	result := Exercise{
+		start_seconds = exercise.start_seconds,
+		end_seconds = exercise.end_seconds,
+		last_randomized_sequence = exercise.last_randomized_sequence,
+	}
 	copied := false
 	defer if !copied { delete_exercise(&result, allocator) }
 	value, err := strings.clone(exercise.id, allocator); if err != nil { return {}, false }; result.id = value

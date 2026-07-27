@@ -86,6 +86,7 @@ Exercise :: struct {
 	start_seconds: f64,
 	end_seconds: f64,
 	clip_path: string,
+	last_randomized_sequence: i64 `json:"-"`,
 }
 
 App_State :: struct {
@@ -2260,37 +2261,33 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	}
 }
 
-on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
-	context = runtime.default_context()
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	index := ui_event_tag
-	if sender != nil { index = int(msg_uint(sender, sel_registerName("tag"))) }
-	if index < 0 || index >= len(state.exercises) { return }
+play_exercise :: proc(index: int) -> bool {
+	if index < 0 || index >= len(state.exercises) {return false}
 	exercise := &state.exercises[index]
 	if !os.exists(exercise.clip_path) {
 		if export_job != nil {
 			set_text(state.status, "Wait for the active clip export to finish")
-			return
+			return false
 		}
 		source_index := source_index_for_id(state.sources[:], exercise.source_id)
 		if source_index < 0 {
 			set_text(state.status, "The original source is no longer in the library")
-			return
+			return false
 		}
 		source := &state.sources[source_index]
 		if !source.media_available || !os.exists(source.media_path) {
 			set_text(state.status, "The original source file is missing. Refetch the source before rebuilding this exercise.")
-			return
+			return false
 		}
 		if !valid_exercise_range(exercise.start_seconds, exercise.end_seconds, source.duration) {
 			set_text(state.status, "The saved exercise range is not valid for its source")
-			return
+			return false
 		}
-		if !require_helper("ffmpeg") {return}
+		if !require_helper("ffmpeg") {return false}
 		job := export_job_create(exercise^, source.media_path, .Repair)
 		if job == nil {
 			set_text(state.status, "Unable to allocate the exercise rebuild job")
-			return
+			return false
 		}
 		fields := [2]Notification_Field{
 			{label="Operation", value="Rebuild exercise"},
@@ -2304,55 +2301,130 @@ on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
 		export_job = job
 		os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
 		thread.start(job.thread)
-		return
+		return true
 	}
 	if !metal_player_load(exercise.clip_path) {
 		set_text(state.status, "Unable to load the selected exercise")
-		return
+		return false
 	}
 	ui.player_duration = exercise.end_seconds - exercise.start_seconds
 	set_source_playback_active(false)
 	start_loaded_playback_at(0)
 	ui.active_exercise = index
 	set_text(state.status, fmt.tprintf("Playing %s", exercise.name))
+	return true
 }
 
-random_exercise_index_for_roll :: proc(
-	exercise_count, active_exercise, roll: int,
-) -> int {
-	if exercise_count <= 0 {return -1}
-	exclude_active :=
-		exercise_count > 1 &&
-		active_exercise >= 0 &&
-		active_exercise < exercise_count
-	candidate_count := exercise_count
-	if exclude_active {candidate_count -= 1}
-	candidate := roll % candidate_count
-	if exclude_active && candidate >= active_exercise {
-		candidate += 1
+on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	index := ui_event_tag
+	if sender != nil {index = int(msg_uint(sender, sel_registerName("tag")))}
+	_ = play_exercise(index)
+}
+
+RANDOM_EXERCISE_BASE_WEIGHT :: 2
+RANDOM_EXERCISE_SKIPPED_CAP :: i64(4)
+
+random_exercise_latest_sequence :: proc(exercises: []Exercise) -> i64 {
+	latest: i64
+	for exercise in exercises {
+		latest = max(latest, exercise.last_randomized_sequence)
 	}
-	return candidate
+	return latest
+}
+
+random_exercise_weight :: proc(last_sequence, latest_sequence: i64) -> int {
+	if last_sequence <= 0 {return 6}
+	skipped := min(
+		max(i64(0), latest_sequence - last_sequence),
+		RANDOM_EXERCISE_SKIPPED_CAP,
+	)
+	return RANDOM_EXERCISE_BASE_WEIGHT + int(skipped)
+}
+
+random_exercise_total_weight :: proc(
+	exercises: []Exercise,
+	active_exercise: int,
+) -> int {
+	latest := random_exercise_latest_sequence(exercises)
+	exclude_active :=
+		len(exercises) > 1 &&
+		active_exercise >= 0 &&
+		active_exercise < len(exercises)
+	total := 0
+	for exercise, index in exercises {
+		if exclude_active && index == active_exercise {continue}
+		total += random_exercise_weight(
+			exercise.last_randomized_sequence,
+			latest,
+		)
+	}
+	return total
+}
+
+random_exercise_index_for_weighted_roll :: proc(
+	exercises: []Exercise,
+	active_exercise, roll: int,
+) -> int {
+	total := random_exercise_total_weight(exercises, active_exercise)
+	if total <= 0 {return -1}
+	remaining := roll % total
+	latest := random_exercise_latest_sequence(exercises)
+	exclude_active :=
+		len(exercises) > 1 &&
+		active_exercise >= 0 &&
+		active_exercise < len(exercises)
+	for exercise, index in exercises {
+		if exclude_active && index == active_exercise {continue}
+		weight := random_exercise_weight(
+			exercise.last_randomized_sequence,
+			latest,
+		)
+		if remaining < weight {return index}
+		remaining -= weight
+	}
+	return -1
+}
+
+record_randomized_exercise :: proc(index: int) -> bool {
+	if index < 0 || index >= len(state.exercises) {return false}
+	next_sequence := random_exercise_latest_sequence(state.exercises[:]) + 1
+	if library_legacy_fallback {
+		state.exercises[index].last_randomized_sequence = next_sequence
+		return true
+	}
+	if !database_exercise_randomization_save(
+		library_database,
+		state.exercises[index].id,
+		next_sequence,
+	) {
+		return false
+	}
+	state.exercises[index].last_randomized_sequence = next_sequence
+	return true
 }
 
 randomize_exercise :: proc() -> bool {
-	exercise_count := len(state.exercises)
-	if exercise_count == 0 {
+	total_weight := random_exercise_total_weight(
+		state.exercises[:],
+		ui.active_exercise,
+	)
+	if total_weight <= 0 {
 		set_text(state.status, "No exercises are available")
 		return false
 	}
-	candidate_count := exercise_count
-	if exercise_count > 1 &&
-	   ui.active_exercise >= 0 &&
-	   ui.active_exercise < exercise_count {
-		candidate_count -= 1
-	}
-	index := random_exercise_index_for_roll(
-		exercise_count,
+	index := random_exercise_index_for_weighted_roll(
+		state.exercises[:],
 		ui.active_exercise,
-		rand.int_max(candidate_count),
+		rand.int_max(total_weight),
 	)
-	ui_event_tag = index
-	on_play_exercise(nil, nil, nil)
+	if !play_exercise(index) {return false}
+	if !record_randomized_exercise(index) {
+		set_error_status(
+			"Exercise playback started, but Randomize history could not be saved",
+		)
+	}
 	return true
 }
 

@@ -500,7 +500,11 @@ database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);
-		PRAGMA user_version = 3;
+		CREATE TABLE IF NOT EXISTS exercise_randomization (
+			exercise_id TEXT PRIMARY KEY,
+			last_sequence INTEGER NOT NULL
+		);
+		PRAGMA user_version = 4;
 	`)
 }
 
@@ -546,6 +550,53 @@ database_source_auth_browser_clear :: proc(database: ^SQLite_DB) -> bool {
 		database,
 		"DELETE FROM app_preferences WHERE key = 'youtube_auth_browser'",
 	)
+}
+
+database_exercise_randomization_save :: proc(
+	database: ^SQLite_DB,
+	exercise_id: string,
+	last_sequence: i64,
+) -> bool {
+	if database == nil || len(exercise_id) == 0 || last_sequence <= 0 {
+		return false
+	}
+	statement, ok := sqlite_prepare(
+		database,
+		`INSERT INTO exercise_randomization (exercise_id, last_sequence)
+		 VALUES (?, ?)
+		 ON CONFLICT(exercise_id) DO UPDATE
+		 SET last_sequence = excluded.last_sequence`,
+	)
+	if !ok {return false}
+	defer sqlite3_finalize(statement)
+	return sqlite_bind_text_value(statement, 1, exercise_id) &&
+	       sqlite3_bind_int64(statement, 2, last_sequence) == SQLITE_OK &&
+	       sqlite3_step(statement) == SQLITE_DONE
+}
+
+database_exercise_randomization_apply :: proc(
+	database: ^SQLite_DB,
+	exercises: []Exercise,
+) -> bool {
+	if database == nil {return false}
+	statement, ok := sqlite_prepare(
+		database,
+		`SELECT last_sequence
+		 FROM exercise_randomization
+		 WHERE exercise_id = ?`,
+	)
+	if !ok {return false}
+	defer sqlite3_finalize(statement)
+	for &exercise in exercises {
+		exercise.last_randomized_sequence = 0
+		if sqlite3_reset(statement) != SQLITE_OK {return false}
+		if !sqlite_bind_text_value(statement, 1, exercise.id) {return false}
+		if sqlite3_step(statement) == SQLITE_ROW {
+			exercise.last_randomized_sequence =
+				sqlite3_column_int64(statement, 0)
+		}
+	}
+	return true
 }
 
 database_insert_source :: proc(database: ^SQLite_DB, source: Source_Video, position: int) -> bool {
@@ -613,6 +664,16 @@ database_save_collections :: proc(
 		stepped := bound && sqlite3_step(statement) == SQLITE_DONE
 		sqlite3_finalize(statement)
 		if !stepped {return false}
+	}
+	if !sqlite_execute(
+		database,
+		`DELETE FROM exercise_randomization
+		 WHERE exercise_id NOT IN (SELECT id FROM exercises)`,
+	) {
+		return false
+	}
+	if !database_exercise_randomization_apply(database, exercises) {
+		return false
 	}
 	if !sqlite_execute(database, "COMMIT") {return false}
 	committed = true
@@ -915,10 +976,22 @@ database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bo
 	}
 	sqlite3_finalize(statement)
 
-	statement, ok = sqlite_prepare(database, "SELECT id, source_id, name, start_seconds, end_seconds, clip_path FROM exercises ORDER BY position")
+	statement, ok = sqlite_prepare(
+		database,
+		`SELECT e.id, e.source_id, e.name, e.start_seconds,
+		        e.end_seconds, e.clip_path,
+		        COALESCE(r.last_sequence, 0)
+		 FROM exercises e
+		 LEFT JOIN exercise_randomization r ON r.exercise_id = e.id
+		 ORDER BY e.position`,
+	)
 	if !ok {return false}
 	for sqlite3_step(statement) == SQLITE_ROW {
-		exercise := Exercise{start_seconds=sqlite3_column_double(statement, 3), end_seconds=sqlite3_column_double(statement, 4)}
+		exercise := Exercise{
+			start_seconds = sqlite3_column_double(statement, 3),
+			end_seconds = sqlite3_column_double(statement, 4),
+			last_randomized_sequence = sqlite3_column_int64(statement, 6),
+		}
 		copied: bool
 		exercise.id, copied = sqlite_column_string(statement, 0); if !copied {sqlite3_finalize(statement); return false}
 		exercise.source_id, copied = sqlite_column_string(statement, 1); if !copied {delete_exercise(&exercise); sqlite3_finalize(statement); return false}

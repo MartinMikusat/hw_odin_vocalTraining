@@ -42,6 +42,9 @@ monitor, and only playback controls.
 In Play mode, select **Randomize** to choose from the complete exercise library
 and start playback. An active search does not limit the random pool. When two
 or more exercises exist, Randomize does not select the active exercise.
+Exercises skipped by recent Randomize selections receive up to three times the
+selection weight. Manual playback does not change this history. The application
+stores the history locally and does not include it in library exports.
 
 Press **Add** in the Source Register to open the ingest dialog, then paste one
 or more YouTube URLs with one URL per line. URLs are normalized by video ID,

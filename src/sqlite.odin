@@ -15,6 +15,7 @@ foreign sqlite {
 	sqlite3_free :: proc "c" (value: rawptr) ---
 	sqlite3_prepare_v2 :: proc "c" (database: ^SQLite_DB, sql: cstring, bytes: c.int, statement: ^^SQLite_Statement, tail: ^cstring) -> c.int ---
 	sqlite3_finalize :: proc "c" (statement: ^SQLite_Statement) -> c.int ---
+	sqlite3_reset :: proc "c" (statement: ^SQLite_Statement) -> c.int ---
 	sqlite3_step :: proc "c" (statement: ^SQLite_Statement) -> c.int ---
 	sqlite3_bind_text :: proc "c" (statement: ^SQLite_Statement, index: c.int, value: cstring, bytes: c.int, destroy: rawptr) -> c.int ---
 	sqlite3_bind_int :: proc "c" (statement: ^SQLite_Statement, index, value: c.int) -> c.int ---

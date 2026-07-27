@@ -1691,6 +1691,7 @@ portable_library_round_trip_omits_machine_paths_test :: proc(t: ^testing.T) {
 		start_seconds = 40,
 		end_seconds = 55,
 		clip_path = fmt.tprintf("%s/clips/exercise-1.mp4", support),
+		last_randomized_sequence = 12,
 	})
 	testing.expect(t, exercise_ok)
 	if !exercise_ok {return}
@@ -1712,6 +1713,10 @@ portable_library_round_trip_omits_machine_paths_test :: proc(t: ^testing.T) {
 		testing.expect(t, !strings.contains(string(bytes), support))
 		testing.expect(t, !strings.contains(string(bytes), `"media_path"`))
 		testing.expect(t, !strings.contains(string(bytes), `"clip_path"`))
+		testing.expect(t, !strings.contains(
+			string(bytes),
+			`"last_randomized_sequence"`,
+		))
 	}
 	imported, import_error := portable_library_read(path)
 	testing.expect_value(t, import_error, Portable_Library_Error.None)
@@ -1893,25 +1898,179 @@ mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-random_exercise_selection_avoids_the_active_exercise_test :: proc(t: ^testing.T) {
-	testing.expect_value(t, random_exercise_index_for_roll(0, -1, 0), -1)
-	testing.expect_value(t, random_exercise_index_for_roll(1, 0, 0), 0)
-	testing.expect_value(t, random_exercise_index_for_roll(3, -1, 0), 0)
-	testing.expect_value(t, random_exercise_index_for_roll(3, -1, 1), 1)
-	testing.expect_value(t, random_exercise_index_for_roll(3, -1, 2), 2)
-	testing.expect_value(t, random_exercise_index_for_roll(3, 1, 0), 0)
-	testing.expect_value(t, random_exercise_index_for_roll(3, 1, 1), 2)
-	for active_exercise in 0 ..< 4 {
-		for roll in 0 ..< 3 {
-			selected := random_exercise_index_for_roll(
-				4,
-				active_exercise,
-				roll,
-			)
-			testing.expect(t, selected >= 0 && selected < 4)
-			testing.expect(t, selected != active_exercise)
-		}
+random_exercise_weight_increases_with_skipped_draws_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, random_exercise_weight(10, 10), 2)
+	testing.expect_value(t, random_exercise_weight(9, 10), 3)
+	testing.expect_value(t, random_exercise_weight(8, 10), 4)
+	testing.expect_value(t, random_exercise_weight(7, 10), 5)
+	testing.expect_value(t, random_exercise_weight(6, 10), 6)
+	testing.expect_value(t, random_exercise_weight(1, 10), 6)
+	testing.expect_value(t, random_exercise_weight(0, 10), 6)
+}
+
+@(test)
+random_exercise_weighted_roll_uses_exact_weight_ranges_test :: proc(
+	t: ^testing.T,
+) {
+	exercises := [3]Exercise{
+		{last_randomized_sequence = 10},
+		{last_randomized_sequence = 9},
+		{last_randomized_sequence = 0},
 	}
+	testing.expect_value(t, random_exercise_total_weight(exercises[:], -1), 11)
+	for roll in 0..<11 {
+		expected := 2
+		if roll < 2 {
+			expected = 0
+		} else if roll < 5 {
+			expected = 1
+		}
+		testing.expect_value(
+			t,
+			random_exercise_index_for_weighted_roll(exercises[:], -1, roll),
+			expected,
+		)
+	}
+	testing.expect_value(t, random_exercise_total_weight(exercises[:], 1), 8)
+	for roll in 0..<8 {
+		expected := 2
+		if roll < 2 {expected = 0}
+		selected := random_exercise_index_for_weighted_roll(
+			exercises[:],
+			1,
+			roll,
+		)
+		testing.expect_value(t, selected, expected)
+		testing.expect(t, selected != 1)
+	}
+}
+
+@(test)
+random_exercise_weighted_roll_handles_empty_and_single_libraries_test :: proc(
+	t: ^testing.T,
+) {
+	empty: [0]Exercise
+	testing.expect_value(t, random_exercise_total_weight(empty[:], -1), 0)
+	testing.expect_value(
+		t,
+		random_exercise_index_for_weighted_roll(empty[:], -1, 0),
+		-1,
+	)
+	single := [1]Exercise{{last_randomized_sequence = 4}}
+	testing.expect_value(t, random_exercise_total_weight(single[:], 0), 2)
+	testing.expect_value(
+		t,
+		random_exercise_index_for_weighted_roll(single[:], 0, 0),
+		0,
+	)
+}
+
+@(test)
+random_exercise_history_survives_collection_replacement_and_prunes_removed_ids_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+
+	sources := [1]Source_Video{{
+		id = "source-1",
+		video_id = "video-1",
+		title = "Source",
+		url = "https://youtu.be/video-1",
+		media_path = "/tmp/source.mp4",
+		duration = 60,
+	}}
+	exercises := [2]Exercise{
+		{
+			id = "exercise-1",
+			source_id = "source-1",
+			name = "One",
+			start_seconds = 1,
+			end_seconds = 2,
+			clip_path = "/tmp/one.mp4",
+		},
+		{
+			id = "exercise-2",
+			source_id = "source-1",
+			name = "Two",
+			start_seconds = 3,
+			end_seconds = 4,
+			clip_path = "/tmp/two.mp4",
+		},
+	}
+	testing.expect(t, database_save_collections(
+		database,
+		sources[:],
+		nil,
+		nil,
+		exercises[:],
+	))
+	testing.expect(t, database_exercise_randomization_save(
+		database,
+		"exercise-1",
+		7,
+	))
+	testing.expect(t, database_exercise_randomization_save(
+		database,
+		"exercise-2",
+		4,
+	))
+	loaded: App_State
+	testing.expect(t, database_load_state(database, &loaded))
+	defer app_state_collections_destroy(&loaded)
+	testing.expect_value(t, loaded.exercises[0].last_randomized_sequence, i64(7))
+	testing.expect_value(t, loaded.exercises[1].last_randomized_sequence, i64(4))
+
+	imported := [2]Exercise{
+		{
+			id = "exercise-1",
+			source_id = "source-1",
+			name = "One imported",
+			start_seconds = 1,
+			end_seconds = 2,
+			clip_path = "/tmp/one.mp4",
+		},
+		{
+			id = "exercise-2",
+			source_id = "source-1",
+			name = "Two imported",
+			start_seconds = 3,
+			end_seconds = 4,
+			clip_path = "/tmp/two.mp4",
+		},
+	}
+	testing.expect(t, database_save_collections(
+		database,
+		sources[:],
+		nil,
+		nil,
+		imported[:],
+	))
+	testing.expect_value(t, imported[0].last_randomized_sequence, i64(7))
+	testing.expect_value(t, imported[1].last_randomized_sequence, i64(4))
+
+	remaining := [1]Exercise{imported[0]}
+	testing.expect(t, database_save_collections(
+		database,
+		sources[:],
+		nil,
+		nil,
+		remaining[:],
+	))
+	count, counted := database_count(database, "exercise_randomization")
+	testing.expect(t, counted)
+	testing.expect_value(t, count, 1)
 }
 
 @(test)
