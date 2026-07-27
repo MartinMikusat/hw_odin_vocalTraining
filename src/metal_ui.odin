@@ -9104,8 +9104,12 @@ register_window_class :: proc() -> Id {
 	return class
 }
 
-launch_should_activate :: proc(value: cstring) -> bool {
-	return value == nil || string(value) != "0"
+launch_should_activate :: proc(
+	value: cstring,
+	launch_in_background := false,
+) -> bool {
+	if value != nil {return string(value) != "0"}
+	return !launch_in_background
 }
 
 vocal_gui_initialize :: proc(
@@ -9224,11 +9228,15 @@ vocal_gui_initialize :: proc(
 		true,
 	)
 	msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
-	if launch_should_activate(getenv("VT_ACTIVATE_ON_LAUNCH")) {
+	launch_in_background := services != nil && services.launch_in_background
+	if launch_should_activate(
+		getenv("VT_ACTIVATE_ON_LAUNCH"),
+		launch_in_background,
+	) {
 		msg_void_id(state.window, sel_registerName("makeKeyAndOrderFront:"), nil)
 		msg_void_i(app, sel_registerName("activateIgnoringOtherApps:"), 1)
 	} else {
-		msg_void_id(state.window, sel_registerName("orderFront:"), nil)
+		msg_void_id(state.window, sel_registerName("orderBack:"), nil)
 	}
 	if !cli_ipc_server_start() {set_text(state.status, "CLI control socket is unavailable")}
 	validate_startup_helpers()

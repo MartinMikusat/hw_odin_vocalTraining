@@ -529,6 +529,7 @@ run_gui :: proc() -> int {
 		return 1
 	}
 	services.app = msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
+	services.launch_in_background = true
 	initialize := transmute(proc "c" (^hot_reload.Host_Services) -> bool)current_module.api.initialize
 	if initialize == nil || !initialize(&services) {
 		fmt.eprintln("[vocal-training] could not initialize the application module")

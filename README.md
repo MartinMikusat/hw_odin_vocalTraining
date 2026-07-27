@@ -454,7 +454,9 @@ Changes to the host contract, application metadata, or bundled resources
 rebuild and restart the host. An incompatible state layout also requests a
 controlled restart with exit status 75. A failed module build leaves the
 current generation active. Trace and release modes keep the full rebuild path.
-Metal validation is enabled. Press `Ctrl-C` to stop the watcher and app.
+Every `./dev.sh` launch orders the window behind active applications. Launch
+the app directly when it must activate and move to the front. Metal validation
+is enabled. Press `Ctrl-C` to stop the watcher and app.
 
 The watcher initializes `build/dev-support/library.sqlite3` from the canonical
 development library. It preserves this working copy between launches.

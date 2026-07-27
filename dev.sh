@@ -73,7 +73,7 @@ check_app() {
   if [ "$STOPPING_APP" -eq 0 ] && [ "$status" -ne 0 ]; then
     printf '[vocal-training] app pid %s exited with status %s\n' "$crashed_pid" "$status"
     if [ "$status" -eq 75 ] && { [ "$MODE" = "debug" ] || [ "$MODE" = "asan" ]; }; then
-      launch_app 0
+      launch_app
     else
       archive_crash "$status"
     fi
@@ -81,7 +81,7 @@ check_app() {
 }
 
 launch_app() {
-  VT_ACTIVATE_ON_LAUNCH=$1
+  VT_ACTIVATE_ON_LAUNCH=0
   export VT_ACTIVATE_ON_LAUNCH
   if [ "$MODE" = "debug" ] || [ "$MODE" = "asan" ]; then
     export VT_HOT_RELOAD_MODULE="$MODULE"
@@ -120,7 +120,7 @@ legacy_rebuild_and_launch() {
   fi
 
   stop_app
-  if launch_app "$1"; then
+  if launch_app; then
     printf '[vocal-training] relaunched pid %s (%s, memory profile: %s)\n' "$APP_PID" "$MODE" "$MEMORY_PROFILE"
   fi
 }
@@ -133,7 +133,7 @@ hot_rebuild_and_launch() {
   fi
 
   stop_app
-  if launch_app "$1"; then
+  if launch_app; then
     printf '[vocal-training] relaunched pid %s (%s, memory profile: %s)\n' "$APP_PID" "$MODE" "$MEMORY_PROFILE"
   fi
 }
@@ -148,11 +148,11 @@ hot_rebuild_module() {
 trap 'stop_app; exit 0' INT TERM EXIT
 
 if [ "$MODE" = "debug" ] || [ "$MODE" = "asan" ]; then
-  hot_rebuild_and_launch 1
+  hot_rebuild_and_launch
   LAST_MODULE_FINGERPRINT=$(module_fingerprint)
   LAST_HOST_FINGERPRINT=$(hot_reload_fingerprint)
 else
-  legacy_rebuild_and_launch 1
+  legacy_rebuild_and_launch
   LAST_FINGERPRINT=$(legacy_fingerprint)
 fi
 
@@ -163,7 +163,7 @@ while :; do
     CURRENT_FINGERPRINT=$(legacy_fingerprint)
     if [ "$CURRENT_FINGERPRINT" != "$LAST_FINGERPRINT" ]; then
       LAST_FINGERPRINT=$CURRENT_FINGERPRINT
-      legacy_rebuild_and_launch 0
+      legacy_rebuild_and_launch
     fi
     continue
   fi
@@ -173,7 +173,7 @@ while :; do
   if [ "$CURRENT_HOST_FINGERPRINT" != "$LAST_HOST_FINGERPRINT" ]; then
     LAST_HOST_FINGERPRINT=$CURRENT_HOST_FINGERPRINT
     LAST_MODULE_FINGERPRINT=$CURRENT_MODULE_FINGERPRINT
-    hot_rebuild_and_launch 0
+    hot_rebuild_and_launch
   elif [ "$CURRENT_MODULE_FINGERPRINT" != "$LAST_MODULE_FINGERPRINT" ]; then
     LAST_MODULE_FINGERPRINT=$CURRENT_MODULE_FINGERPRINT
     hot_rebuild_module

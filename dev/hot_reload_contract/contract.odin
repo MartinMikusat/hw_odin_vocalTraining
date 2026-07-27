@@ -1,6 +1,6 @@
 package hot_reload_contract
 
-API_VERSION :: u32(1)
+API_VERSION :: u32(2)
 // Increment this value when a preserved state type changes without changing
 // the snapshot size or alignment.
 STATE_VERSION :: u32(1)
@@ -17,6 +17,7 @@ Host_Services :: struct {
 	view_class:          rawptr,
 	accessibility_class: rawptr,
 	window_class:        rawptr,
+	launch_in_background: bool,
 }
 
 Module_API :: struct {

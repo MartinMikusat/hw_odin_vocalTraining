@@ -16,10 +16,13 @@ import flash "flash:."
 import match_sorter "match_sorter:."
 
 @(test)
-launch_activation_defaults_to_foreground_test :: proc(t: ^testing.T) {
+launch_activation_respects_background_policy_test :: proc(t: ^testing.T) {
 	testing.expect(t, launch_should_activate(nil))
+	testing.expect(t, !launch_should_activate(nil, true))
 	testing.expect(t, launch_should_activate(cstring("1")))
+	testing.expect(t, launch_should_activate(cstring("1"), true))
 	testing.expect(t, !launch_should_activate(cstring("0")))
+	testing.expect(t, !launch_should_activate(cstring("0"), true))
 }
 
 window_icon_points_use_iconoir_viewbox_test :: proc(
