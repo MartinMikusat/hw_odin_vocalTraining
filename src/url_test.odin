@@ -565,6 +565,185 @@ notification_lifecycle_updates_one_persistent_record_test :: proc(t: ^testing.T)
 }
 
 @(test)
+concurrent_notifications_remove_completed_tasks_without_hiding_siblings_test :: proc(
+	t: ^testing.T,
+) {
+	notification_history_destroy()
+	previous_database := library_database
+	previous_fallback := library_legacy_fallback
+	library_database = nil
+	library_legacy_fallback = true
+	defer {
+		notification_history_destroy()
+		ui_set_string(&ui.status, "")
+		ui_set_string(&ui.status_source_video_id, "")
+		library_database = previous_database
+		library_legacy_fallback = previous_fallback
+	}
+	notification_history_initialize()
+	export_id := notification_begin("Exporting exercise clip")
+	import_id := notification_begin("Downloading source")
+	testing.expect_value(t, len(notification_history.footer_task_ids), 2)
+
+	testing.expect(t, notification_finish(
+		import_id,
+		.Success,
+		"Imported 1 source",
+	))
+	testing.expect_value(t, len(notification_history.footer_task_ids), 1)
+	testing.expect_value(t, notification_history.footer_task_ids[0], export_id)
+	testing.expect_value(t, notification_find(export_id).kind, Notification_Kind.Activity)
+	testing.expect_value(t, notification_find(import_id).kind, Notification_Kind.Success)
+
+	testing.expect(t, notification_update(export_id, "Exporting exercise clip 80%"))
+	testing.expect_value(t, len(notification_history.footer_task_ids), 1)
+	testing.expect_value(t, notification_find(import_id).summary, "Imported 1 source")
+
+	testing.expect(t, notification_finish(
+		export_id,
+		.Success,
+		"Saved exercise clip",
+	))
+	testing.expect_value(t, len(notification_history.footer_task_ids), 0)
+	testing.expect_value(t, ui.status, "Saved exercise clip")
+}
+
+@(test)
+notification_history_scroll_follows_macos_scroll_direction_test :: proc(
+	t: ^testing.T,
+) {
+	testing.expect_value(
+		t,
+		notification_scroll_after_delta(5, NOTIFICATION_ROW_HEIGHT, 10),
+		4,
+	)
+	testing.expect_value(
+		t,
+		notification_scroll_after_delta(5, -NOTIFICATION_ROW_HEIGHT, 10),
+		6,
+	)
+	testing.expect_value(
+		t,
+		notification_scroll_after_delta(0, NOTIFICATION_ROW_HEIGHT, 10),
+		0,
+	)
+	testing.expect_value(
+		t,
+		notification_scroll_after_delta(10, -NOTIFICATION_ROW_HEIGHT, 10),
+		10,
+	)
+}
+
+@(test)
+footer_task_layout_caps_cards_and_reports_overflow_test :: proc(t: ^testing.T) {
+	full := footer_task_layout(2048, 7)
+	testing.expect_value(t, full.visible_count, 4)
+	testing.expect_value(t, full.hidden_count, 3)
+	testing.expect(t, full.overflow_rect.w > 0)
+	for index in 0 ..< full.visible_count {
+		testing.expect(t, full.task_rects[index].w >= FOOTER_TASK_MIN_WIDTH)
+	}
+
+	narrow := footer_task_layout(900, 7)
+	testing.expect_value(t, narrow.visible_count, 2)
+	testing.expect_value(t, narrow.hidden_count, 5)
+	testing.expect(t, narrow.overflow_rect.x > narrow.task_rects[1].x)
+}
+
+@(test)
+simulated_tasks_use_the_real_footer_registry_without_database_writes_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+
+	notification_history_destroy()
+	previous_database := library_database
+	previous_fallback := library_legacy_fallback
+	previous_state := state
+	previous_ui := ui
+	previous_ui_build := ui_build
+	library_database = database
+	library_legacy_fallback = false
+	state = App_State{active_source=-1}
+	ui = UI_State{
+		width=2048,
+		height=1120,
+		player_volume=1,
+		playback_rate=1,
+		source_details_index=-1,
+		source_modal_refetch_index=-1,
+		exercise_rename_index=-1,
+		exercise_metadata_index=-1,
+		transcript_active_match=-1,
+	}
+	defer {
+		notification_history_destroy()
+		delete(ui.status)
+		delete(ui.status_source_video_id)
+		state = previous_state
+		ui = previous_ui
+		ui_build = previous_ui_build
+		library_database = previous_database
+		library_legacy_fallback = previous_fallback
+	}
+	notification_history_initialize()
+	tasks, active, applied := notification_simulation_apply("overflow")
+	testing.expect(t, applied)
+	testing.expect_value(t, tasks, 7)
+	testing.expect_value(t, active, 7)
+	testing.expect_value(t, len(notification_history.footer_task_ids), 7)
+	if !applied {return}
+	count, counted := database_count(database, "notifications")
+	testing.expect(t, counted)
+	testing.expect_value(t, count, 0)
+
+	frame_arena: mem_virtual.Arena
+	frame_error := mem_virtual.arena_init_static(&frame_arena, 1024*1024, 4096)
+	testing.expect(t, frame_error == nil)
+	if frame_error != nil {return}
+	defer mem_virtual.arena_destroy(&frame_arena)
+	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	for index in 0 ..< 4 {
+		id := notification_history.footer_task_ids[index]
+		testing.expect(t, find_ui_control_by_action_and_index(
+			.Open_Notification_History,
+			int(id),
+		) != nil)
+	}
+	overflow_id := notification_history.footer_task_ids[6]
+	overflow := find_ui_control_by_action_and_index(
+		.Open_Notification_History,
+		int(overflow_id),
+	)
+	testing.expect(t, overflow != nil)
+	if overflow != nil {
+		testing.expect_value(
+			t,
+			overflow.functional_name,
+			"footer notification task overflow",
+		)
+	}
+
+	_, _, cleared := notification_simulation_apply("clear")
+	testing.expect(t, cleared)
+	testing.expect_value(t, len(notification_history.footer_task_ids), 0)
+	testing.expect_value(t, len(notification_history.entries), 0)
+}
+
+@(test)
 notification_retention_keeps_the_newest_ten_thousand_records_test :: proc(
 	t: ^testing.T,
 ) {
@@ -721,6 +900,16 @@ cli_ui_commands_parse_and_require_the_running_gui_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, check.command, CLI_Command.UI_Check)
 	testing.expect_value(t, check.baseline_path, "/tmp/ui-baseline.json")
 	testing.expect(t, cli_command_requires_gui(check.command))
+
+	simulation, simulation_result, simulation_ok := cli_parse_request(
+		[]string{"ui", "simulate-tasks", "--scenario", "overflow"},
+	)
+	defer delete(simulation_result.output)
+	testing.expect(t, simulation_ok)
+	testing.expect_value(t, simulation.command, CLI_Command.UI_Simulate_Tasks)
+	testing.expect_value(t, simulation.scenario, "overflow")
+	testing.expect(t, cli_command_requires_gui(simulation.command))
+	testing.expect(t, !cli_command_mutates_library(simulation.command))
 
 	_, missing_result, missing_ok := cli_parse_request([]string{"ui", "check"})
 	defer delete(missing_result.output)

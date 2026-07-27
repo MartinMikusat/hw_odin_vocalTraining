@@ -120,6 +120,7 @@ cli_ipc_request_destroy :: proc(request: ^CLI_Request) {
 	delete(request.to_segment)
 	delete(request.name)
 	delete(request.baseline_path)
+	delete(request.scenario)
 	request^ = {}
 }
 

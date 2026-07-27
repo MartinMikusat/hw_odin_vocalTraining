@@ -37,10 +37,12 @@ Notification :: struct {
 	fields:               [dynamic]Notification_Field,
 	action_kind:          Notification_Action_Kind,
 	action_target:        string,
+	simulated:            bool,
 }
 
 Notification_History :: struct {
 	entries:               [dynamic]Notification,
+	footer_task_ids:        [dynamic]i64,
 	current_id:            i64,
 	selected_id:           i64,
 	next_memory_id:        i64,
@@ -122,6 +124,45 @@ notification_find :: proc(id: i64) -> ^Notification {
 notification_latest :: proc() -> ^Notification {
 	if len(notification_history.entries) == 0 {return nil}
 	return &notification_history.entries[len(notification_history.entries) - 1]
+}
+
+notification_footer_has_task :: proc(id: i64) -> bool {
+	for task_id in notification_history.footer_task_ids {
+		if task_id == id {return true}
+	}
+	return false
+}
+
+notification_footer_add_task :: proc(id: i64) {
+	if id == 0 || notification_footer_has_task(id) {return}
+	append(&notification_history.footer_task_ids, id)
+}
+
+notification_footer_remove_task :: proc(id: i64) {
+	for index := len(notification_history.footer_task_ids) - 1; index >= 0; index -= 1 {
+		if notification_history.footer_task_ids[index] != id {continue}
+		copy(
+			notification_history.footer_task_ids[index:],
+			notification_history.footer_task_ids[index+1:],
+		)
+		resize(
+			&notification_history.footer_task_ids,
+			len(notification_history.footer_task_ids)-1,
+		)
+		return
+	}
+}
+
+notification_footer_group_active :: proc() -> bool {
+	for id in notification_history.footer_task_ids {
+		notification := notification_find(id)
+		if notification != nil && notification.kind == .Activity {return true}
+	}
+	return false
+}
+
+notification_footer_finish_task :: proc(id: i64) {
+	notification_footer_remove_task(id)
 }
 
 notification_present :: proc(notification: ^Notification) {
@@ -309,25 +350,34 @@ notification_database_load :: proc() -> bool {
 	return true
 }
 
-notification_history_remove_oldest :: proc() {
-	if len(notification_history.entries) == 0 {return}
-	removed_id := notification_history.entries[0].id
-	replacement_id: i64
-	if len(notification_history.entries) > 1 {
-		replacement_id = notification_history.entries[1].id
-	}
+notification_history_remove_at :: proc(index: int) {
+	if index < 0 || index >= len(notification_history.entries) {return}
+	removed_id := notification_history.entries[index].id
 	if notification_history.selected_id == removed_id {
-		notification_history.selected_id = replacement_id
+		notification_history.selected_id = 0
 	}
 	if notification_history.current_id == removed_id {
 		notification_history.current_id = 0
 	}
-	notification_destroy(&notification_history.entries[0])
+	notification_footer_remove_task(removed_id)
+	notification_destroy(&notification_history.entries[index])
 	copy(
-		notification_history.entries[0:],
-		notification_history.entries[1:],
+		notification_history.entries[index:],
+		notification_history.entries[index+1:],
 	)
-	resize(&notification_history.entries, len(notification_history.entries) - 1)
+	resize(&notification_history.entries, len(notification_history.entries)-1)
+}
+
+notification_history_remove_oldest :: proc() {
+	if len(notification_history.entries) == 0 {return}
+	was_selected := notification_history.selected_id ==
+	                notification_history.entries[0].id
+	replacement_id: i64
+	if len(notification_history.entries) > 1 {
+		replacement_id = notification_history.entries[1].id
+	}
+	notification_history_remove_at(0)
+	if was_selected {notification_history.selected_id = replacement_id}
 }
 
 notification_history_initialize :: proc() {
@@ -337,6 +387,7 @@ notification_history_initialize :: proc() {
 		0,
 		NOTIFICATION_HISTORY_LIMIT,
 	)
+	notification_history.footer_task_ids = make([dynamic]i64)
 	notification_history.next_memory_id = -1
 	notification_history.initialized = true
 	if library_database == nil || library_legacy_fallback {return}
@@ -350,7 +401,98 @@ notification_history_destroy :: proc() {
 		notification_destroy(&notification)
 	}
 	delete(notification_history.entries)
+	delete(notification_history.footer_task_ids)
 	notification_history = {}
+}
+
+notification_simulation_clear :: proc() {
+	if !notification_history.initialized {return}
+	for index := len(notification_history.entries) - 1; index >= 0; index -= 1 {
+		if notification_history.entries[index].simulated {
+			notification_history_remove_at(index)
+		}
+	}
+	latest := notification_latest()
+	if latest != nil {
+		notification_present(latest)
+	} else {
+		ui_set_string(&ui.status, "")
+		ui_set_string(&ui.status_source_video_id, "")
+		ui.status_success = false
+		ui.status_error = false
+		ui.needs_redraw = true
+	}
+}
+
+notification_simulation_active :: proc() -> bool {
+	for notification in notification_history.entries {
+		if notification.simulated {return true}
+	}
+	return false
+}
+
+notification_real_activity_active :: proc() -> bool {
+	for notification in notification_history.entries {
+		if !notification.simulated && notification.kind == .Activity {return true}
+	}
+	return false
+}
+
+notification_simulation_apply :: proc(scenario: string) -> (
+	tasks: int,
+	active: int,
+	applied: bool,
+) {
+	when !DEV_TASK_SIMULATION {return 0, 0, false}
+	if scenario == "clear" {
+		notification_simulation_clear()
+		return 0, 0, true
+	}
+	if notification_real_activity_active() {return 0, 0, false}
+	notification_simulation_clear()
+	switch scenario {
+	case "parallel":
+		_ = notification_begin_simulated(
+			"Exporting exercise clip...",
+			"Simulated FFmpeg exercise export.",
+		)
+		_ = notification_begin_simulated(
+			"Downloading source 42%...",
+			"Simulated source download.",
+		)
+		return 2, 2, true
+	case "completed":
+		_ = notification_begin_simulated(
+			"Exporting exercise clip...",
+			"Simulated FFmpeg exercise export.",
+		)
+		import_id := notification_begin_simulated(
+			"Downloading source 100%...",
+			"Simulated source download.",
+		)
+		_ = notification_finish(
+			import_id,
+			.Success,
+			"Imported 1 source",
+			"Simulated completed source import.",
+		)
+		return 1, 1, true
+	case "overflow":
+		summaries := [7]string{
+			"Exporting exercise clip...",
+			"Downloading source 42%...",
+			"Checking YouTube metadata...",
+			"Rebuilding missing exercise...",
+			"Validating downloaded media...",
+			"Recovering imported source...",
+			"Preparing range preview...",
+		}
+		for summary in summaries {
+			_ = notification_begin_simulated(summary, "Simulated background task.")
+		}
+		return 7, 7, true
+	}
+	return 0, 0, false
 }
 
 notification_post :: proc(
@@ -360,6 +502,8 @@ notification_post :: proc(
 	fields: []Notification_Field = nil,
 	action_kind := Notification_Action_Kind.None,
 	action_target := "",
+	persist := true,
+	simulated := false,
 ) -> i64 {
 	if !notification_history.initialized {notification_history_initialize()}
 	now_ms := notification_now_ms()
@@ -373,18 +517,19 @@ notification_post :: proc(
 		detail = strings.clone(stored_detail),
 		action_kind = action_kind,
 		action_target = strings.clone(action_target),
+		simulated = simulated,
 	}
 	notification.fields, _ = notification_fields_clone(fields)
-	if !notification_database_insert(&notification) {
+	if !persist || !notification_database_insert(&notification) {
 		notification.id = notification_history.next_memory_id
 		notification_history.next_memory_id -= 1
-		notification_history.persistence_available = false
+		if persist {notification_history.persistence_available = false}
 	}
 	append(&notification_history.entries, notification)
 	for len(notification_history.entries) > NOTIFICATION_HISTORY_LIMIT {
 		notification_history_remove_oldest()
 	}
-	if notification.id > 0 {_ = notification_database_prune()}
+	if persist && notification.id > 0 {_ = notification_database_prune()}
 	stored := &notification_history.entries[len(notification_history.entries) - 1]
 	notification_present(stored)
 	return stored.id
@@ -395,7 +540,27 @@ notification_begin :: proc(
 	detail := "",
 	fields: []Notification_Field = nil,
 ) -> i64 {
-	return notification_post(.Activity, summary, detail, fields)
+	if notification_simulation_active() {notification_simulation_clear()}
+	id := notification_post(.Activity, summary, detail, fields)
+	notification_footer_add_task(id)
+	return id
+}
+
+notification_begin_simulated :: proc(
+	summary: string,
+	detail := "",
+	fields: []Notification_Field = nil,
+) -> i64 {
+	id := notification_post(
+		.Activity,
+		summary,
+		detail,
+		fields,
+		persist=false,
+		simulated=true,
+	)
+	notification_footer_add_task(id)
+	return id
 }
 
 notification_update :: proc(
@@ -460,13 +625,15 @@ notification_finish :: proc(
 	if target_error != nil {return false}
 	delete(notification.action_target)
 	notification.action_target = next_target
-	return notification_update(
+	updated := notification_update(
 		id,
 		summary,
 		detail,
 		fields,
 		persist_now = true,
 	)
+	if updated {notification_footer_finish_task(id)}
+	return updated
 }
 
 notification_set_action :: proc(

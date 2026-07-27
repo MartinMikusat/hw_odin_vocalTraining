@@ -63,7 +63,10 @@ cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/Fonts"
 cp "$FONT_ROOT/Iosevka-Regular.ttf" "$APP/Contents/Resources/Fonts/Iosevka-Regular.ttf"
 cp "$FONT_ROOT/IOSEVKA-LICENSE.md" "$APP/Contents/Resources/Fonts/IOSEVKA-LICENSE.md"
-cp "$EXECUTABLE" "$ROOT/build/vocal-training"
+CLI_EXECUTABLE="$ROOT/build/vocal-training"
+CLI_STAGING="$ROOT/build/.vocal-training-$MODE.tmp"
+cp "$EXECUTABLE" "$CLI_STAGING"
+mv -f "$CLI_STAGING" "$CLI_EXECUTABLE"
 
 if [ "$MODE" != "release" ]; then
   xcrun dsymutil "$EXECUTABLE" -o "$APP.dSYM"

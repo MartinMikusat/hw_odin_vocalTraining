@@ -7,6 +7,8 @@ import "core:strconv"
 import "core:strings"
 import mem_virtual "core:mem/virtual"
 
+DEV_TASK_SIMULATION :: #config(VT_DEV_TASK_SIMULATION, ODIN_DEBUG)
+
 CLI_Exit :: enum i32 {
 	Success = 0,
 	Usage = 2,
@@ -26,6 +28,7 @@ CLI_Command :: enum {
 	Clip_List,
 	UI_Snapshot,
 	UI_Check,
+	UI_Simulate_Tasks,
 }
 
 CLI_Request :: struct {
@@ -37,6 +40,7 @@ CLI_Request :: struct {
 	name: string,
 	max_height: int,
 	baseline_path: string,
+	scenario: string,
 }
 
 CLI_Result :: struct {
@@ -182,6 +186,18 @@ CLI_UI_Check_Failure_Response :: struct {
 	error: CLI_Error_Data,
 }
 
+CLI_UI_Simulate_Tasks_Data :: struct {
+	scenario: string,
+	tasks: int,
+	active: int,
+}
+
+CLI_UI_Simulate_Tasks_Response :: struct {
+	ok: bool,
+	command: string,
+	data: CLI_UI_Simulate_Tasks_Data,
+}
+
 cli_command_name :: proc(command: CLI_Command) -> string {
 	switch command {
 	case .Source_Add: return "source.add"
@@ -191,13 +207,16 @@ cli_command_name :: proc(command: CLI_Command) -> string {
 	case .Clip_List: return "clip.list"
 	case .UI_Snapshot: return "ui.snapshot"
 	case .UI_Check: return "ui.check"
+	case .UI_Simulate_Tasks: return "ui.simulate-tasks"
 	case .None: return "unknown"
 	}
 	return "unknown"
 }
 
 cli_command_requires_gui :: proc(command: CLI_Command) -> bool {
-	return command == .UI_Snapshot || command == .UI_Check
+	return command == .UI_Snapshot ||
+	       command == .UI_Check ||
+	       command == .UI_Simulate_Tasks
 }
 
 cli_command_mutates_library :: proc(command: CLI_Command) -> bool {
@@ -240,6 +259,7 @@ cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string
 		case "--to-segment": request.to_segment = value
 		case "--name": request.name = value
 		case "--baseline": request.baseline_path = value
+		case "--scenario": request.scenario = value
 		case "--max-height":
 			height, ok := cli_parse_positive_int(value)
 			if !ok {return "--max-height must be a positive integer", false}
@@ -286,6 +306,13 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 	case group == "ui" && action == "check":
 		request.command = .UI_Check
 		allowed = []string{"--baseline"}
+	case group == "ui" && action == "simulate-tasks":
+		when DEV_TASK_SIMULATION {
+			request.command = .UI_Simulate_Tasks
+			allowed = []string{"--scenario"}
+		} else {
+			return {}, cli_error(.None, .Usage, "usage", "Unknown command"), false
+		}
 	case:
 		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, or ui snapshot|check"), false
 	}
@@ -303,6 +330,19 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 		}
 	case .UI_Check:
 		if len(strings.trim_space(request.baseline_path)) == 0 {return {}, cli_error(request.command, .Usage, "usage", "ui check requires --baseline"), false}
+	case .UI_Simulate_Tasks:
+		valid := request.scenario == "parallel" ||
+		         request.scenario == "completed" ||
+		         request.scenario == "overflow" ||
+		         request.scenario == "clear"
+		if !valid {
+			return {}, cli_error(
+				request.command,
+				.Usage,
+				"usage",
+				"ui simulate-tasks requires --scenario parallel|completed|overflow|clear",
+			), false
+		}
 	case .None, .Source_List, .Clip_List, .UI_Snapshot:
 	}
 	return request, {}, true
@@ -593,6 +633,37 @@ cli_ui_check :: proc(request: CLI_Request) -> CLI_Result {
 	return CLI_Result{output=cli_encode(response), exit_code=exit_code}
 }
 
+cli_ui_simulate_tasks :: proc(request: CLI_Request) -> CLI_Result {
+	when !DEV_TASK_SIMULATION {
+		return cli_error(
+			request.command,
+			.Invalid,
+			"debug_only",
+			"Task simulation is available only in debug builds",
+		)
+	}
+	tasks, active, applied := notification_simulation_apply(request.scenario)
+	if !applied {
+		return cli_error(
+			request.command,
+			.Busy,
+			"real_tasks_active",
+			"Clear or finish real background tasks before starting a simulation",
+		)
+	}
+	ui.needs_redraw = true
+	response := CLI_UI_Simulate_Tasks_Response{
+		ok=true,
+		command=cli_command_name(request.command),
+		data=CLI_UI_Simulate_Tasks_Data{
+			scenario=request.scenario,
+			tasks=tasks,
+			active=active,
+		},
+	}
+	return CLI_Result{output=cli_encode(response), exit_code=.Success}
+}
+
 cli_execute :: proc(request: CLI_Request) -> CLI_Result {
 	switch request.command {
 	case .Source_Add: return cli_source_add(request)
@@ -602,6 +673,7 @@ cli_execute :: proc(request: CLI_Request) -> CLI_Result {
 	case .Clip_List: return cli_clip_list(request)
 	case .UI_Snapshot: return cli_ui_snapshot(request)
 	case .UI_Check: return cli_ui_check(request)
+	case .UI_Simulate_Tasks: return cli_ui_simulate_tasks(request)
 	case .None: return cli_error(request.command, .Usage, "usage", "Unknown command")
 	}
 	return cli_error(request.command, .Usage, "usage", "Unknown command")

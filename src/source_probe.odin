@@ -209,14 +209,15 @@ on_source_probe_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	source_probe_results_clear()
 	source_probe_results = job.results
 	job.results = nil
+	notification_id := job.notification_id
 	probed_input := job.input
 	job.input = ""
-	free(job)
+	source_probe_job_destroy(job)
 	source_probe_job = nil
 	current := strings.trim_space(ui.url_input)
 	if current != probed_input {
 		_ = notification_finish(
-			job.notification_id,
+			notification_id,
 			.Interrupted,
 			"Metadata check superseded by edited URLs",
 		"The previous result was discarded because the source input changed.",
@@ -227,7 +228,7 @@ on_source_probe_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	}
 	delete(probed_input)
 	_ = notification_finish(
-		job.notification_id,
+		notification_id,
 		.Success,
 		fmt.tprintf("Found metadata for %d video(s)", len(source_probe_results)),
 	)

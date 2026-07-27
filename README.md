@@ -133,7 +133,9 @@ Select the footer notification to open the notification history. The modal
 shows the newest entries first and keeps the selected entry visible while new
 events arrive. Its detail pane shows timestamps, operation context, diagnostic
 paths, and an available source action. Long operations update one history
-entry until they finish. The application keeps the newest 10,000 entries in
+entry until they finish. The footer shows up to four concurrent active tasks
+and removes each task when it finishes. An overflow control opens the history
+when more tasks are active. The application keeps the newest 10,000 entries in
 its local SQLite database. Library export and import do not transfer or replace
 this local activity history.
 
@@ -186,6 +188,22 @@ removed, changed, and unexpected controls. Complete artifacts stay in
 `build/dev-support/ui-checks/`. The app keeps the newest 20 artifacts and
 removes older files after each successful write. UI commands return
 `gui_not_running` when the development application is closed.
+
+The debug build can simulate concurrent task notifications without running
+FFmpeg or `yt-dlp`:
+
+```sh
+./scripts/dev-cli.sh ui simulate-tasks --scenario parallel
+./scripts/dev-cli.sh ui simulate-tasks --scenario completed
+./scripts/dev-cli.sh ui simulate-tasks --scenario overflow
+./scripts/dev-cli.sh ui simulate-tasks --scenario clear
+```
+
+`parallel` shows an active import and export. `completed` finishes the import
+while the export stays active. `overflow` shows seven active tasks. `clear`
+removes all simulated entries. Simulated entries stay in memory and do not
+write to the notification database. The simulator rejects a scenario while a
+real task is active.
 
 ## Development guide
 

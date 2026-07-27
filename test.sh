@@ -13,6 +13,7 @@ VT_TEST_LIBRARY="$TEST_SUPPORT/library.sqlite3" \
 VT_HEADLESS_TEST=1 \
 odin test "$ROOT/src" \
   -define:ODIN_TEST_THREADS=1 \
+  -define:VT_DEV_TASK_SIMULATION=true \
   -collection:match_sorter="$ROOT/../hw_odin_matchSorter" \
   -collection:flash="$ROOT/../hw_odin_ui_flash" \
   -collection:command_palette="$ROOT/../hw_odin_ui_commandPalette" \

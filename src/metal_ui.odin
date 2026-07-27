@@ -1278,6 +1278,15 @@ notification_max_scroll :: proc(modal: UI_Rect) -> f64 {
 	))
 }
 
+notification_scroll_after_delta :: proc(
+	current, delta, maximum: f64,
+) -> f64 {
+	return min(
+		max(0, current - delta / NOTIFICATION_ROW_HEIGHT),
+		maximum,
+	)
+}
+
 notification_first_visible :: proc(modal: UI_Rect) -> int {
 	return min(
 		max(0, int(ui.notification_scroll)),
@@ -1325,7 +1334,7 @@ notification_action_available :: proc(notification: ^Notification) -> bool {
 	return false
 }
 
-open_notification_history :: proc() {
+open_notification_history :: proc(notification_id: i64 = 0) {
 	cancel_ui_flash()
 	if ui.data_modal_open {close_data_modal()}
 	if ui.exercise_rename_open {close_exercise_rename()}
@@ -1336,7 +1345,8 @@ open_notification_history :: proc() {
 	ui.focus = .None
 	ui.text_drag_active = false
 	ui.notification_scroll = 0
-	selected := notification_find(notification_history.current_id)
+	selected := notification_find(notification_id)
+	if selected == nil {selected = notification_find(notification_history.current_id)}
 	if selected == nil {selected = notification_latest()}
 	notification_history.selected_id = selected != nil ? selected.id : 0
 	ui.needs_redraw = true
@@ -1806,20 +1816,83 @@ import_cancel_rect :: proc() -> UI_Rect {
 	return UI_Rect{max(18, ui.width - 304), 3, 88, 24}
 }
 
+FOOTER_TASK_LIMIT :: 4
+FOOTER_TASK_GAP :: 6.0
+FOOTER_TASK_MIN_WIDTH :: 160.0
+FOOTER_TASK_MAX_WIDTH :: 500.0
+FOOTER_TASK_OVERFLOW_WIDTH :: 124.0
+
+Footer_Task_Layout :: struct {
+	task_rects: [FOOTER_TASK_LIMIT]UI_Rect,
+	visible_count: int,
+	hidden_count: int,
+	overflow_rect: UI_Rect,
+}
+
 status_source_rect :: proc() -> UI_Rect {
 	return UI_Rect{332, 3, 112, 24}
+}
+
+footer_task_layout :: proc(width: f64, task_count: int) -> Footer_Task_Layout {
+	result: Footer_Task_Layout
+	if task_count <= 0 {return result}
+	footer_right := max(18, width - 18)
+	x := 332.0
+	available := max(0, footer_right - x)
+	visible := min(task_count, FOOTER_TASK_LIMIT)
+	for visible > 0 {
+		hidden := task_count - visible
+		overflow_width := hidden > 0 ? FOOTER_TASK_OVERFLOW_WIDTH : 0
+		gap_count := visible - 1
+		if hidden > 0 {gap_count += 1}
+		card_width := (
+			available - overflow_width - f64(gap_count)*FOOTER_TASK_GAP
+		) / f64(visible)
+		if card_width >= FOOTER_TASK_MIN_WIDTH || visible == 1 {
+			card_width = min(FOOTER_TASK_MAX_WIDTH, max(0, card_width))
+			for index in 0 ..< visible {
+				result.task_rects[index] = UI_Rect{
+					x + f64(index)*(card_width+FOOTER_TASK_GAP),
+					0,
+					card_width,
+					30,
+				}
+			}
+			result.visible_count = visible
+			result.hidden_count = hidden
+			if hidden > 0 {
+				result.overflow_rect = UI_Rect{
+					x + f64(visible)*(card_width+FOOTER_TASK_GAP),
+					0,
+					overflow_width,
+					30,
+				}
+			}
+			return result
+		}
+		visible -= 1
+	}
+	return result
 }
 
 footer_status_rect :: proc() -> UI_Rect {
 	footer := UI_Rect{18, 0, ui.width - 36, 30}
 	x := footer.x + 314
-	if len(ui.status_source_video_id) > 0 {
+	if len(notification_history.footer_task_ids) == 0 &&
+	   len(ui.status_source_video_id) > 0 {
 		action := status_source_rect()
 		x = action.x + action.w + 6
 	}
-	rect := UI_Rect{x, footer.y, min(500, max(0, footer.x + footer.w - x)), footer.h}
-	if import_job != nil {rect.w = max(0, import_cancel_rect().x - rect.x - 6)}
-	return rect
+	return UI_Rect{x, footer.y, min(500, max(0, footer.x + footer.w - x)), footer.h}
+}
+
+footer_task_action_rect :: proc(card: UI_Rect) -> UI_Rect {
+	return UI_Rect{card.x + card.w - 94, card.y + 3, 88, card.h - 6}
+}
+
+footer_task_summary_rect :: proc(card: UI_Rect, has_action: bool) -> UI_Rect {
+	right_inset := has_action ? 100.0 : 10.0
+	return UI_Rect{card.x + 10, card.y, max(0, card.w - right_inset - 10), card.h}
 }
 
 control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
@@ -4247,41 +4320,141 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		.Center,
 		state.has_start && state.has_end ? cyan : muted,
 	)
-	status_rect := footer_status_rect()
-	status_control := find_ui_control_by_action(.Open_Notification_History)
-	if status_control != nil && contains(status_rect, ui.mouse) {
-		fill_overlay_rect(ctx, status_rect, [4]f64{0.045, 0.052, 0.048, 1})
-	}
-	status_text := fmt.tprintf("SYS / %s", ui.status)
-	status_color := ui.status_error ? danger : (ui.status_success ? success : muted)
-	if import_job != nil || export_job != nil {
-		fill_overlay_rect(ctx, status_rect, [4]f64{0.12, 0.045, 0.018, 0.88})
-		fill_overlay_rect(ctx, UI_Rect{status_rect.x, status_rect.y, 3, status_rect.h}, orange)
-		status_text = fmt.tprintf("SYS / [%s] %s", activity_spinner(ui.activity_tick), ui.status)
-		status_color = bright
-	}
-	draw_timestamp_text_in_rect(
-		ctx,
-		small_font,
-		status_text,
-		status_rect,
-		.Start,
-		.Center,
-		status_color,
-		10,
-	)
-	if import_job != nil {
-		cancel := ui_control_rect(.Stop_Download)
-		fill_overlay_rect(ctx, cancel, [4]f64{0.15, 0.035, 0.025, 1})
-		fill_overlay_border(ctx, cancel, orange)
-		draw_text_in_rect(ctx, small_font, "STOP", cancel, .Center, .Center, bright)
-	}
-	if len(ui.status_source_video_id) > 0 {
-		view_source := ui_control_rect(.View_Status_Source)
-		button_color := [4]f64{0.035, 0.12, 0.12, 1}
-		if contains(view_source, ui.mouse) {button_color = [4]f64{0.045, 0.18, 0.18, 1}}
-		fill_overlay_rect(ctx, view_source, button_color)
-		draw_text_in_rect(ctx, small_font, "VIEW SOURCE", view_source, .Center, .Center, cyan)
+	if len(notification_history.footer_task_ids) > 0 {
+		task_layout := footer_task_layout(
+			ui.width,
+			len(notification_history.footer_task_ids),
+		)
+		for task_index in 0 ..< task_layout.visible_count {
+			notification_id := notification_history.footer_task_ids[task_index]
+			notification := notification_find(notification_id)
+			if notification == nil {continue}
+			card := task_layout.task_rects[task_index]
+			card_control := find_ui_control_by_action_and_index(
+				.Open_Notification_History,
+				int(notification_id),
+			)
+			fill := [4]f64{0.035, 0.038, 0.036, 1}
+			accent := muted
+			text_color := muted
+			switch notification.kind {
+			case .Activity:
+				fill = [4]f64{0.12, 0.045, 0.018, 0.88}
+				accent = orange
+				text_color = bright
+			case .Success:
+				fill = [4]f64{0.025, 0.095, 0.065, 0.88}
+				accent = success
+				text_color = success
+			case .Error, .Interrupted:
+				fill = [4]f64{0.14, 0.025, 0.025, 0.88}
+				accent = danger
+				text_color = danger
+			case .Info:
+			text_color = muted
+			}
+			if card_control != nil && contains(card_control.rect, ui.mouse) {
+				fill[0] += 0.025
+				fill[1] += 0.025
+				fill[2] += 0.025
+			}
+			fill_overlay_rect(ctx, card, fill)
+			fill_overlay_rect(ctx, UI_Rect{card.x, card.y, 3, card.h}, accent)
+			has_stop := import_job != nil &&
+			            import_job.notification_id == notification_id
+			has_source_action := notification.action_kind == .View_Source &&
+			                     notification_action_available(notification)
+			has_action := has_stop || has_source_action
+			prefix := "SYS / "
+			if notification.kind == .Activity {
+				prefix = fmt.tprintf(
+					"SYS / [%s] ",
+					activity_spinner(ui.activity_tick),
+				)
+			}
+			draw_timestamp_text_in_rect(
+				ctx,
+				small_font,
+				fmt.tprintf("%s%s", prefix, notification.summary),
+				footer_task_summary_rect(card, has_action),
+				.Start,
+				.Center,
+				text_color,
+				10,
+			)
+			if has_action {
+				action := footer_task_action_rect(card)
+				action_color := [4]f64{0.035, 0.12, 0.12, 1}
+				action_text := "VIEW SOURCE"
+				if has_stop {
+					action_color = [4]f64{0.15, 0.035, 0.025, 1}
+					action_text = "STOP"
+				}
+				if contains(action, ui.mouse) {
+					action_color[0] += 0.035
+					action_color[1] += 0.035
+					action_color[2] += 0.035
+				}
+				fill_overlay_rect(ctx, action, action_color)
+				draw_text_in_rect(
+					ctx,
+					small_font,
+					action_text,
+					action,
+					.Center,
+					.Center,
+					has_stop ? bright : cyan,
+				)
+			}
+		}
+		if task_layout.hidden_count > 0 {
+			overflow := task_layout.overflow_rect
+			fill_overlay_rect(ctx, overflow, [4]f64{0.10, 0.065, 0.018, 0.95})
+			fill_overlay_rect(ctx, UI_Rect{overflow.x, overflow.y, 3, overflow.h}, orange)
+			draw_text_in_rect(
+				ctx,
+				small_font,
+				fmt.tprintf("%d MORE TASKS", task_layout.hidden_count),
+				overflow,
+				.Center,
+				.Center,
+				bright,
+			)
+		}
+	} else {
+		status_rect := footer_status_rect()
+		status_control := find_ui_control_by_action(.Open_Notification_History)
+		if status_control != nil && contains(status_rect, ui.mouse) {
+			fill_overlay_rect(ctx, status_rect, [4]f64{0.045, 0.052, 0.048, 1})
+		}
+		status_color := ui.status_error ? danger : (ui.status_success ? success : muted)
+		draw_timestamp_text_in_rect(
+			ctx,
+			small_font,
+			fmt.tprintf("SYS / %s", ui.status),
+			status_rect,
+			.Start,
+			.Center,
+			status_color,
+			10,
+		)
+		if len(ui.status_source_video_id) > 0 {
+			view_source := ui_control_rect(.View_Status_Source)
+			button_color := [4]f64{0.035, 0.12, 0.12, 1}
+			if contains(view_source, ui.mouse) {
+				button_color = [4]f64{0.045, 0.18, 0.18, 1}
+			}
+			fill_overlay_rect(ctx, view_source, button_color)
+			draw_text_in_rect(
+				ctx,
+				small_font,
+				"VIEW SOURCE",
+				view_source,
+				.Center,
+				.Center,
+				cyan,
+			)
+		}
 	}
 	draw_source_details(ctx, small_font, bright, muted, cyan)
 	draw_exercise_rename(ctx, small_font, bright, muted, dim, orange)
@@ -4821,24 +4994,125 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if import_job != nil {
-		add_ax_element(array, element_class, "Stop download", "AXButton", import_cancel_rect(), .Stop_Download, flash_label = "stop download")
-	}
-	if len(ui.status_source_video_id) > 0 {
-		for source, index in state.sources {
-			if source.video_id != ui.status_source_video_id {continue}
+	if len(notification_history.footer_task_ids) > 0 {
+		task_layout := footer_task_layout(
+			ui.width,
+			len(notification_history.footer_task_ids),
+		)
+		for task_index in 0 ..< task_layout.visible_count {
+			notification_id := notification_history.footer_task_ids[task_index]
+			notification := notification_find(notification_id)
+			if notification == nil {continue}
+			card := task_layout.task_rects[task_index]
+			has_stop := import_job != nil &&
+			            import_job.notification_id == notification_id
+			source_index := -1
+			if notification.action_kind == .View_Source {
+				source_index = source_index_for_video_id(
+					state.sources[:],
+					notification.action_target,
+				)
+			}
+			has_action := has_stop || source_index >= 0
+			card_control_rect := card
+			if has_action {card_control_rect.w -= 100}
 			add_ax_element(
 				array,
 				element_class,
-				fmt.tprintf("View refetched source, %s", source.title),
+				fmt.tprintf("%s, %s", notification_kind_text(notification.kind), notification.summary),
 				"AXButton",
-				status_source_rect(),
-				.View_Status_Source,
-				index,
-				flash_label = "view source",
-				functional_name = fmt.tprintf("view refetched source %s", source.id),
+				card_control_rect,
+				.Open_Notification_History,
+				int(notification_id),
+				flash_label = "notification",
+				functional_name = fmt.tprintf("footer notification task %d", notification_id),
 			)
-			break
+			if has_stop {
+				add_ax_element(
+					array,
+					element_class,
+					"Stop download",
+					"AXButton",
+					footer_task_action_rect(card),
+					.Stop_Download,
+					flash_label = "stop download",
+					functional_name = fmt.tprintf(
+						"stop notification task %d",
+						notification_id,
+					),
+				)
+			} else if source_index >= 0 {
+				source := &state.sources[source_index]
+				add_ax_element(
+					array,
+					element_class,
+					fmt.tprintf("View refetched source, %s", source.title),
+					"AXButton",
+					footer_task_action_rect(card),
+					.View_Status_Source,
+					source_index,
+					flash_label = "view source",
+					functional_name = fmt.tprintf(
+						"view source from notification %d",
+						notification_id,
+					),
+				)
+			}
+		}
+		if task_layout.hidden_count > 0 {
+			hidden_notification_id :=
+				notification_history.footer_task_ids[
+					len(notification_history.footer_task_ids)-1
+				]
+			add_ax_element(
+				array,
+				element_class,
+				fmt.tprintf("%d more tasks", task_layout.hidden_count),
+				"AXButton",
+				task_layout.overflow_rect,
+				.Open_Notification_History,
+				int(hidden_notification_id),
+				flash_label = "more tasks",
+				functional_name = "footer notification task overflow",
+			)
+		}
+	} else {
+		add_ax_element(
+			array,
+			element_class,
+			"Open notification history",
+			"AXButton",
+			footer_status_rect(),
+			.Open_Notification_History,
+			flash_label = "notifications",
+		)
+		if import_job != nil {
+			add_ax_element(
+				array,
+				element_class,
+				"Stop download",
+				"AXButton",
+				import_cancel_rect(),
+				.Stop_Download,
+				flash_label = "stop download",
+			)
+		}
+		if len(ui.status_source_video_id) > 0 {
+			for source, index in state.sources {
+				if source.video_id != ui.status_source_video_id {continue}
+				add_ax_element(
+					array,
+					element_class,
+					fmt.tprintf("View refetched source, %s", source.title),
+					"AXButton",
+					status_source_rect(),
+					.View_Status_Source,
+					index,
+					flash_label = "view source",
+					functional_name = fmt.tprintf("view refetched source %s", source.id),
+				)
+				break
+			}
 		}
 	}
 	if command_palette.is_open(&command_palette_state) {
@@ -5038,15 +5312,6 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	add_ax_element(
-		array,
-		element_class,
-		"Open notification history",
-		"AXButton",
-		footer_status_rect(),
-		.Open_Notification_History,
-		flash_label = "notifications",
-	)
 	toggle_label := "Switch to Play mode"
 	if ui.mode == .Play {toggle_label = "Switch to Create mode"}
 	add_ax_element(
@@ -5375,7 +5640,7 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		ui_event_tag = action.index
 		on_select_source(nil, nil, nil)
 	case .Open_Notification_History:
-		open_notification_history()
+		open_notification_history(i64(action.index))
 	case .Close_Notification_History:
 		close_notification_history()
 	case .Select_Notification:
@@ -6772,8 +7037,9 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	if ui.notification_modal_open {
 		delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
-		ui.notification_scroll = min(
-			max(0, ui.notification_scroll + delta / NOTIFICATION_ROW_HEIGHT),
+		ui.notification_scroll = notification_scroll_after_delta(
+			ui.notification_scroll,
+			delta,
 			notification_max_scroll(notification_modal_rect()),
 		)
 		ui.needs_redraw = true
@@ -7292,7 +7558,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 		ui.url_probe_pending = false
 		source_probe_request()
 	}
-	if import_job != nil || export_job != nil || source_probe_job != nil {
+	if notification_footer_group_active() {
 		ui.activity_tick += 1
 		if ui.activity_tick % 8 == 0 {
 			if import_job != nil {refresh_import_progress()}
