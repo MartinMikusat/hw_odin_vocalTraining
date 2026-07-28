@@ -11,13 +11,16 @@ import "core:time"
 import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
 
-UI_DIAGNOSTIC_SCHEMA_VERSION :: 1
+UI_DIAGNOSTIC_SCHEMA_VERSION :: 2
 UI_DIAGNOSTIC_ARTIFACT_RETENTION :: 20
 
 UI_Diagnostic_Surface :: struct {
-	mode:       string,
-	overlay:    string,
-	background: string,
+	mode:                 string,
+	overlay:              string,
+	background:           string,
+	playback_active:      bool,
+	audio_engine_running: bool,
+	rendered_frame_count: uint,
 }
 
 UI_Diagnostic_Rect :: struct {
@@ -106,6 +109,10 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 		mode = strings.clone(mode, allocator),
 		overlay = strings.clone(overlay, allocator),
 		background = strings.clone(background, allocator),
+		playback_active = state.player != nil &&
+		                  msg_f32(state.player, sel_registerName("rate")) > 0,
+		audio_engine_running = metal_audio_engine_running(),
+		rendered_frame_count = ui.render_count,
 	}
 }
 
@@ -144,6 +151,9 @@ ui_diagnostic_snapshot :: proc(
 			mode = strings.clone(surface.mode, allocator),
 			overlay = strings.clone(surface.overlay, allocator),
 			background = strings.clone(surface.background, allocator),
+			playback_active = surface.playback_active,
+			audio_engine_running = surface.audio_engine_running,
+			rendered_frame_count = surface.rendered_frame_count,
 		},
 		controls = outputs,
 	}

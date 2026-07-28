@@ -212,6 +212,7 @@ UI_State :: struct {
 	source_hint_menu_open: bool,
 	activity_tick:      uint,
 	frame_tick:         uint,
+	render_count:         uint,
 	url_probe_due_tick: uint,
 	url_probe_pending:  bool,
 	save_source_browser_choice: bool,
@@ -7720,6 +7721,7 @@ render_frame :: proc() {
 	msg_void(encoder, sel_registerName("endEncoding"))
 	msg_void_id(command_buffer, sel_registerName("presentDrawable:"), drawable)
 	msg_void(command_buffer, sel_registerName("commit"))
+	ui.render_count += 1
 	memory.frame_stats.high_water = max(memory.frame_stats.high_water, memory.frame.total_used)
 	memory.redraw_stats.high_water = max(memory.redraw_stats.high_water, memory.redraw.total_used)
 	ui.needs_redraw = !overlay_uploaded
@@ -7860,11 +7862,30 @@ metal_player_clear_texture :: proc() {
 }
 
 metal_audio_pause :: proc() {
-	if ui.audio_player != nil {msg_void(ui.audio_player, sel_registerName("pause"))}
+	if ui.audio_player != nil {msg_void(ui.audio_player, sel_registerName("stop"))}
+	if ui.audio_engine != nil {msg_void(ui.audio_engine, sel_registerName("stop"))}
 }
 
-metal_audio_play :: proc() {
-	if ui.audio_player != nil {msg_void(ui.audio_player, sel_registerName("play"))}
+metal_audio_engine_running :: proc() -> bool {
+	return ui.audio_engine != nil &&
+	       msg_bool(ui.audio_engine, sel_registerName("isRunning"))
+}
+
+metal_audio_play :: proc() -> bool {
+	if ui.audio_engine == nil || ui.audio_player == nil {return false}
+	if !metal_audio_engine_running() {
+		error: Id
+		msg_void(ui.audio_engine, sel_registerName("prepare"))
+		if !msg_bool_error(
+			   ui.audio_engine,
+			   sel_registerName("startAndReturnError:"),
+			   &error,
+		   ) {
+			return false
+		}
+	}
+	msg_void(ui.audio_player, sel_registerName("play"))
+	return true
 }
 
 audio_source_seconds :: proc(start_frame, rendered_frames: i64, sample_rate: f64) -> (f64, bool) {
@@ -7912,7 +7933,7 @@ metal_audio_seek :: proc(seconds: f64, resume: bool) {
 		nil,
 		nil,
 	)
-	if resume {metal_audio_play()}
+	if resume {_ = metal_audio_play()}
 }
 
 metal_audio_observe_configuration :: proc(engine: Id) {
@@ -7974,11 +7995,6 @@ metal_audio_load :: proc(url: Id) -> (engine, player, pitch, file: Id, ok: bool)
 	msg_void_id_id_id(engine, sel_registerName("connect:to:format:"), pitch, mixer, format)
 	msg_void_f32(player, sel_registerName("setVolume:"), ui.player_volume)
 	msg_void_f32(pitch, sel_registerName("setRate:"), ui.playback_rate)
-	msg_void(engine, sel_registerName("prepare"))
-	if !msg_bool_error(engine, sel_registerName("startAndReturnError:"), &error) {
-		metal_audio_release(engine, player, pitch, file)
-		return nil, nil, nil, nil, false
-	}
 	metal_audio_observe_configuration(engine)
 	return engine, player, pitch, file, true
 }
@@ -7989,18 +8005,11 @@ metal_audio_recover_configuration :: proc(engine: Id) -> bool {
 	msg_void(state.player, sel_registerName("pause"))
 	seconds, has_seconds := current_seconds()
 	if !has_seconds {return false}
-	if !msg_bool(engine, sel_registerName("isRunning")) {
-		error: Id
-		msg_void(engine, sel_registerName("prepare"))
-		if !msg_bool_error(engine, sel_registerName("startAndReturnError:"), &error) {
-			return false
-		}
-	}
 	seek_video_seconds(seconds)
 	metal_audio_seek(seconds, false)
 	if resume {
+		if !metal_audio_play() {return false}
 		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
-		metal_audio_play()
 	}
 	ui.needs_redraw = true
 	return true
@@ -9050,6 +9059,10 @@ on_metal_first_rect :: proc "c" (
 
 on_metal_accepts_first :: proc "c" (self: Id, command: Sel) -> bool {return true}
 
+metal_frame_should_render :: proc(needs_redraw, playback_active: bool) -> bool {
+	return needs_redraw || playback_active
+}
+
 on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -9067,8 +9080,8 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	} else {
 		ui.activity_tick = 0
 	}
-	if state.player != nil &&
-	   msg_f32(state.player, sel_registerName("rate")) > 0 {ui.needs_redraw = true}
+	playback_active := state.player != nil &&
+	                   msg_f32(state.player, sel_registerName("rate")) > 0
 	frame := msg_rect(ui.view, sel_registerName("bounds"))
 	if ui.width != frame.size.width || ui.height != frame.size.height {
 		cancel_ui_flash()
@@ -9086,12 +9099,14 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	if ui.scale <= 0 {ui.scale = 1}
 	sync_transcript_playback()
 	normalize_scroll_offsets()
-	msg_void_size(
-		ui.layer,
-		sel_registerName("setDrawableSize:"),
-		Size{ui.width * ui.scale, ui.height * ui.scale},
-	)
-	render_frame()
+	if metal_frame_should_render(ui.needs_redraw, playback_active) {
+		msg_void_size(
+			ui.layer,
+			sel_registerName("setDrawableSize:"),
+			Size{ui.width * ui.scale, ui.height * ui.scale},
+		)
+		render_frame()
+	}
 }
 
 register_delegate :: proc(app: Id) {

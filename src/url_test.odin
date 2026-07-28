@@ -4386,3 +4386,13 @@ ui_flash_dynamic_identifiers_do_not_expose_synthetic_suffixes_test :: proc(t: ^t
 	testing.expect_value(t, flash.consume(&jump, 't').kind, flash.Input_Result_Kind.Pending)
 	testing.expect_value(t, flash.consume(&jump, 'r').kind, flash.Input_Result_Kind.Group_Selected)
 }
+
+@(test)
+metal_frame_only_renders_for_invalidated_ui_or_active_playback_test :: proc(
+	t: ^testing.T,
+) {
+	testing.expect(t, !metal_frame_should_render(false, false))
+	testing.expect(t, metal_frame_should_render(true, false))
+	testing.expect(t, metal_frame_should_render(false, true))
+	testing.expect(t, metal_frame_should_render(true, true))
+}

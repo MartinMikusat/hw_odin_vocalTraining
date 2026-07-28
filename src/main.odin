@@ -856,9 +856,14 @@ scrub_player_by :: proc(delta: f64) {
 
 start_loaded_playback_at :: proc(seconds: f64) {
 	if state.player == nil {return}
-	seek_seconds(seconds)
-	msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
-	metal_audio_play()
+	request_transcript_follow_to(seconds)
+	seek_video_seconds(seconds)
+	metal_audio_seek(seconds, false)
+	if metal_audio_play() {
+		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
+	} else {
+		set_error_status("Unable to start audio playback")
+	}
 }
 
 source_initial_seconds :: proc(source_index: int) -> f64 {
@@ -924,6 +929,24 @@ stop_player_playback :: proc() {
 	metal_audio_pause()
 	seek_seconds(0)
 	ui.needs_redraw = true
+}
+
+pause_player_playback :: proc() {
+	if state.player == nil {return}
+	msg_void(state.player, sel_registerName("pause"))
+	metal_audio_pause()
+	ui.needs_redraw = true
+}
+
+resume_player_playback :: proc() -> bool {
+	if state.player == nil {return false}
+	seconds, ok := current_seconds()
+	if !ok {return false}
+	metal_audio_seek(seconds, false)
+	if !metal_audio_play() {return false}
+	msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
+	ui.needs_redraw = true
+	return true
 }
 
 reset_player_playback :: proc() {
@@ -2126,18 +2149,16 @@ on_play :: proc "c" (self: Id, command: Sel, sender: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if state.player != nil {
 		request_transcript_follow()
-		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
-		metal_audio_play()
+		if !resume_player_playback() {
+			set_error_status("Unable to start audio playback")
+		}
 	}
 }
 
 on_pause :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if state.player != nil {
-		msg_void(state.player, sel_registerName("pause"))
-		metal_audio_pause()
-	}
+	pause_player_playback()
 }
 
 on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
@@ -2145,12 +2166,12 @@ on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if state.player == nil { return }
 	if msg_f32(state.player, sel_registerName("rate")) > 0 {
-		msg_void(state.player, sel_registerName("pause"))
-		metal_audio_pause()
+		pause_player_playback()
 	} else {
 		request_transcript_follow()
-		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
-		metal_audio_play()
+		if !resume_player_playback() {
+			set_error_status("Unable to start audio playback")
+		}
 	}
 }
 

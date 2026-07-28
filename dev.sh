@@ -18,8 +18,19 @@ MODULE="$ROOT/build/hot-reload/$MODE/vocal-training.dylib"
 APP_PID=""
 STOPPING_APP=0
 MEMORY_PROFILE=${VT_MEMORY_PROFILE:-none}
+MEMORY_WARN_KB=${VT_MEMORY_WARN_KB:-1048576}
+MEMORY_CHECK_TICK=0
+MEMORY_OVER_LIMIT_COUNT=0
+MEMORY_CAPTURED_PID=""
 VT_APP_SUPPORT_DIR=${VT_APP_SUPPORT_DIR:-"$ROOT/build/dev-support"}
 export VT_APP_SUPPORT_DIR
+
+case "$MEMORY_WARN_KB" in
+  ''|*[!0-9]*|0)
+    echo "VT_MEMORY_WARN_KB must be a positive integer" >&2
+    exit 2
+    ;;
+esac
 
 "$ROOT/scripts/library-fixture.sh" init
 
@@ -80,6 +91,34 @@ check_app() {
   fi
 }
 
+check_memory() {
+  if [ -z "$APP_PID" ] || ! kill -0 "$APP_PID" 2>/dev/null; then
+    return
+  fi
+  MEMORY_CHECK_TICK=$((MEMORY_CHECK_TICK + 1))
+  if [ "$MEMORY_CHECK_TICK" -lt 20 ]; then
+    return
+  fi
+  MEMORY_CHECK_TICK=0
+  rss_kb=$(ps -o rss= -p "$APP_PID" 2>/dev/null | tr -d ' ') || return
+  case "$rss_kb" in
+    ''|*[!0-9]*) return ;;
+  esac
+  if [ "$rss_kb" -lt "$MEMORY_WARN_KB" ]; then
+    MEMORY_OVER_LIMIT_COUNT=0
+    return
+  fi
+  MEMORY_OVER_LIMIT_COUNT=$((MEMORY_OVER_LIMIT_COUNT + 1))
+  if [ "$MEMORY_OVER_LIMIT_COUNT" -lt 2 ] ||
+     [ "$MEMORY_CAPTURED_PID" = "$APP_PID" ]; then
+    return
+  fi
+  MEMORY_CAPTURED_PID=$APP_PID
+  printf '[vocal-training] pid %s exceeded %s KB RSS twice; capturing memory diagnostics\n' \
+    "$APP_PID" "$MEMORY_WARN_KB"
+  "$ROOT/scripts/capture-memory.sh" "$MODE" "$APP_PID" "$APP" "$rss_kb" &
+}
+
 launch_app() {
   VT_ACTIVATE_ON_LAUNCH=0
   export VT_ACTIVATE_ON_LAUNCH
@@ -110,6 +149,9 @@ launch_app() {
       ;;
   esac
   APP_PID=$!
+  MEMORY_CHECK_TICK=0
+  MEMORY_OVER_LIMIT_COUNT=0
+  MEMORY_CAPTURED_PID=""
 }
 
 legacy_rebuild_and_launch() {
@@ -159,6 +201,7 @@ fi
 while :; do
   sleep 0.5
   check_app
+  check_memory
   if [ "$MODE" != "debug" ] && [ "$MODE" != "asan" ]; then
     CURRENT_FINGERPRINT=$(legacy_fingerprint)
     if [ "$CURRENT_FINGERPRINT" != "$LAST_FINGERPRINT" ]; then

@@ -233,7 +233,8 @@ artifact path. The check result contains counts for retained, added, disabled,
 removed, changed, and unexpected controls. Complete artifacts stay in
 `build/dev-support/ui-checks/`. The app keeps the newest 20 artifacts and
 removes older files after each successful write. UI commands return
-`gui_not_running` when the development application is closed.
+`gui_not_running` when the development application is closed. Each snapshot
+also records playback state, audio engine state, and the submitted frame count.
 
 The debug build can simulate concurrent task notifications without running
 FFmpeg or `yt-dlp`:
@@ -461,6 +462,11 @@ Every `./dev.sh` launch orders the window behind active applications. Launch
 the app directly when it must activate and move to the front. Metal validation
 is enabled. Press `Ctrl-C` to stop the watcher and app.
 
+The frame timer continues to poll jobs and hot reload state while the app is
+idle. It does not submit Metal work until playback or a UI change requires it.
+Pausing playback stops the audio node and engine. Resuming playback schedules
+audio from the position stored by `AVPlayer`.
+
 The watcher initializes `build/dev-support/library.sqlite3` from the canonical
 development library. It preserves this working copy between launches.
 
@@ -492,6 +498,13 @@ Run the complete test suite against an isolated copy:
 If the app exits abnormally, the watcher copies the exact executable, its
 dSYM, the newest macOS crash report, the binary UUID, and the Git revision into
 `build/crashes/<timestamp>-<mode>/` before another build can replace them.
+
+The watcher samples resident memory every ten seconds. Two consecutive samples
+above 1 GB create a live diagnostic bundle in `build/memory-diagnostics/`.
+The bundle contains process, VM, footprint, heap, and stack data. It also
+contains the binary UUID and Git revision. The watcher keeps the app running
+and retains the newest 20 bundles. Set `VT_MEMORY_WARN_KB` to a lower positive
+value when testing this guard.
 
 ### Crash diagnosis
 
