@@ -1697,6 +1697,65 @@ metal_ui_titlebar_uses_compact_height_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+metal_ui_theme_switch_precedes_mode_control_test :: proc(t: ^testing.T) {
+	theme := theme_button_rect_for_size(1100, 720)
+	mode := mode_button_rect_for_size(1100, 720)
+	testing.expect_value(t, theme, UI_Rect{816, 689, 62, 24})
+	testing.expect_value(t, mode, UI_Rect{886, 689, 196, 24})
+	testing.expect_value(t, mode.x-(theme.x+theme.w), 8.0)
+	testing.expect_value(t, ui_theme_toggle_label(false), "DARK")
+	testing.expect_value(t, ui_theme_toggle_label(true), "LIGHT")
+}
+
+@(test)
+metal_ui_selection_and_progress_accents_use_thick_edges_test :: proc(
+	t: ^testing.T,
+) {
+	row := UI_Rect{20, 40, 200, 25}
+	testing.expect_value(
+		t,
+		left_accent_edge_rect(row),
+		UI_Rect{20, 40, ACCENT_EDGE_WIDTH, 25},
+	)
+	testing.expect_value(
+		t,
+		bottom_progress_edge_rect(row, 0.25),
+		UI_Rect{20, 40, 50, ACCENT_EDGE_WIDTH},
+	)
+	testing.expect_value(
+		t,
+		bottom_progress_edge_rect(row, 2),
+		UI_Rect{20, 40, 200, ACCENT_EDGE_WIDTH},
+	)
+}
+
+@(test)
+metal_ui_header_controls_take_precedence_over_window_gestures_test :: proc(
+	t: ^testing.T,
+) {
+	header := app_header_rect_for_size(1100, 720)
+	theme := theme_button_rect_for_size(1100, 720)
+	theme_center := Point{theme.x+theme.w/2, theme.y+theme.h/2}
+	controls := []UI_Control{{
+		id = ui_control_id("toggle theme"),
+		functional_name = "toggle theme",
+		rect = theme,
+		flags = {.Primary_Press, .Enabled},
+		action = {kind = .Theme_Toggle},
+	}}
+	testing.expect(t, !header_window_gesture_allowed(header, controls, theme_center))
+	testing.expect(t, header_window_gesture_allowed(header, controls, Point{500, 710}))
+}
+
+@(test)
+metal_ui_themes_use_canonical_canvas_colors_test :: proc(t: ^testing.T) {
+	light := ui_theme_colors(false)
+	dark := ui_theme_colors(true)
+	testing.expect_value(t, light.chassis, [4]f64{0.80, 0.78, 0.72, 1})
+	testing.expect_value(t, dark.chassis, [4]f64{0.040, 0.043, 0.041, 1})
+}
+
+@(test)
 source_monitor_volume_controls_sit_left_of_timestamp_test :: proc(t: ^testing.T) {
 	player := UI_Rect{308, 306, 760, 310}
 	reset := source_reset_rect(player)
@@ -3247,6 +3306,30 @@ source_browser_choice_round_trips_through_application_preferences_test :: proc(
 		database_source_auth_browser_load(database),
 		Source_Auth_Browser.None,
 	)
+}
+
+@(test)
+interface_theme_round_trips_through_application_preferences_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+	testing.expect(t, database_interface_theme_load(database))
+	testing.expect(t, database_interface_theme_save(database, false))
+	testing.expect(t, !database_interface_theme_load(database))
+	testing.expect(t, database_interface_theme_save(database, true))
+	testing.expect(t, database_interface_theme_load(database))
 }
 
 @(test)

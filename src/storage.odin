@@ -581,6 +581,37 @@ database_source_auth_browser_clear :: proc(database: ^SQLite_DB) -> bool {
 	)
 }
 
+database_interface_theme_load :: proc(database: ^SQLite_DB) -> bool {
+	if database == nil {return true}
+	statement, ok := sqlite_prepare(
+		database,
+		"SELECT value FROM app_preferences WHERE key = 'interface_theme'",
+	)
+	if !ok {return true}
+	defer sqlite3_finalize(statement)
+	if sqlite3_step(statement) != SQLITE_ROW {return true}
+	value := sqlite3_column_text(statement, 0)
+	return value == nil || string(value) == "dark"
+}
+
+database_interface_theme_save :: proc(
+	database: ^SQLite_DB,
+	dark_theme: bool,
+) -> bool {
+	if database == nil {return false}
+	statement, ok := sqlite_prepare(
+		database,
+		`INSERT INTO app_preferences (key, value)
+		 VALUES ('interface_theme', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	)
+	if !ok {return false}
+	defer sqlite3_finalize(statement)
+	value := dark_theme ? "dark" : "light"
+	return sqlite_bind_text_value(statement, 1, value) &&
+	       sqlite3_step(statement) == SQLITE_DONE
+}
+
 database_exercise_randomization_save :: proc(
 	database: ^SQLite_DB,
 	exercise_id: string,

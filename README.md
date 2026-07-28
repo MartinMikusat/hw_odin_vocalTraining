@@ -32,6 +32,9 @@ Use the three controls at the upper left to close, minimize, or zoom the window.
 Drag the title strip to move the window. Drag a window edge or corner to resize
 it. The minimum window size is 1100 by 720 points.
 
+Use the `DARK` or `LIGHT` control in the title strip to switch the interface
+theme. The application stores the selected theme in its local database.
+
 The application stores its SQLite library and downloaded media in
 `~/Library/Application Support/VocalTraining`. It migrates and removes the old
 `library.json` file after it verifies the new database. Only download media you

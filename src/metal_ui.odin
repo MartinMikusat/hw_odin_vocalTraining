@@ -162,6 +162,7 @@ UI_State :: struct {
 	text_scroll_x:      f64,
 	palette_previous_text_scroll: f64,
 	mode:               UI_Mode,
+	dark_theme:         bool,
 	source_modal_open:  bool,
 	source_modal_refetch_index: int,
 	source_details_open: bool,
@@ -256,11 +257,83 @@ CF_Range :: struct {
 UI_FONT_NAME :: "Iosevka"
 SMALL_FONT_SIZE :: 10.5
 APP_HEADER_HEIGHT :: 38.0
+UI_COLOR_SAND_32 :: [4]f32{0.882353, 0.850980, 0.788235, 1}
+UI_COLOR_STONE_32 :: [4]f32{0.682353, 0.576471, 0.447059, 1}
+UI_COLOR_COFFEE_32 :: [4]f32{0.698039, 0.490196, 0.341176, 1}
+UI_COLOR_OCHRE_32 :: [4]f32{0.498039, 0.294118, 0.188235, 1}
+UI_COLOR_GUM_32 :: [4]f32{0.490196, 0.529412, 0.411765, 1}
+UI_COLOR_MOSS_32 :: [4]f32{0.258824, 0.298039, 0.129412, 1}
+UI_COLOR_FOREST_32 :: [4]f32{0.090196, 0.192157, 0.145098, 1}
+UI_COLOR_BASALT_32 :: [4]f32{0.129412, 0.180392, 0.250980, 1}
+UI_COLOR_SAND_64 :: [4]f64{0.882353, 0.850980, 0.788235, 1}
+UI_COLOR_STONE_64 :: [4]f64{0.682353, 0.576471, 0.447059, 1}
+UI_COLOR_COFFEE_64 :: [4]f64{0.698039, 0.490196, 0.341176, 1}
+UI_COLOR_OCHRE_64 :: [4]f64{0.498039, 0.294118, 0.188235, 1}
+UI_COLOR_GUM_64 :: [4]f64{0.490196, 0.529412, 0.411765, 1}
+UI_COLOR_MOSS_64 :: [4]f64{0.258824, 0.298039, 0.129412, 1}
+UI_COLOR_FOREST_64 :: [4]f64{0.090196, 0.192157, 0.145098, 1}
+UI_COLOR_BASALT_64 :: [4]f64{0.129412, 0.180392, 0.250980, 1}
+
+UI_Theme_Colors :: struct {
+	chassis, header, panel, panel_alt, field: [4]f64,
+	border, rule, row, row_hover: [4]f64,
+	backdrop, modal: [4]f64,
+	ink, bright, muted, dim: [4]f64,
+}
+
+ui_theme_colors :: proc(dark_theme := ui.dark_theme) -> UI_Theme_Colors {
+	if dark_theme {
+		return {
+			chassis = {0.040, 0.043, 0.041, 1},
+			header = {0.032, 0.034, 0.033, 1},
+			panel = {0.055, 0.059, 0.056, 1},
+			panel_alt = {0.067, 0.071, 0.067, 1},
+			field = {0.067, 0.072, 0.068, 1},
+			border = {0.218, 0.225, 0.210, 1},
+			rule = {0.125, 0.132, 0.123, 1},
+			row = {0.060, 0.064, 0.061, 0.96},
+			row_hover = {0.085, 0.091, 0.086, 1},
+			backdrop = {0.008, 0.009, 0.009, 0.88},
+			modal = {0.055, 0.059, 0.056, 1},
+			ink = {0.89, 0.88, 0.82, 1},
+			bright = {0.97, 0.95, 0.88, 1},
+			muted = {0.47, 0.49, 0.46, 1},
+			dim = {0.31, 0.33, 0.31, 1},
+		}
+	}
+	return {
+		chassis = {0.80, 0.78, 0.72, 1},
+		header = {0.91, 0.89, 0.82, 1},
+		panel = {0.88, 0.86, 0.79, 1},
+		panel_alt = {0.85, 0.83, 0.76, 1},
+		field = {0.83, 0.81, 0.74, 1},
+		border = {0.27, 0.26, 0.28, 1},
+		rule = {0.76, 0.73, 0.66, 1},
+		row = {0.88, 0.86, 0.79, 0.96},
+		row_hover = {0.80, 0.78, 0.72, 1},
+		backdrop = {0.15, 0.145, 0.16, 0.78},
+		modal = {0.91, 0.89, 0.82, 1},
+		ink = {0.15, 0.145, 0.16, 1},
+		bright = {0.15, 0.145, 0.16, 1},
+		muted = {0.48, 0.46, 0.42, 1},
+		dim = {0.62, 0.60, 0.55, 1},
+	}
+}
+
+ui_color_32 :: proc(color: [4]f64) -> [4]f32 {
+	return {f32(color[0]), f32(color[1]), f32(color[2]), f32(color[3])}
+}
+
+ui_theme_toggle_label :: proc(dark_theme: bool) -> string {
+	return dark_theme ? "LIGHT" : "DARK"
+}
+
 WINDOW_STYLE :: uint(14)
 WINDOW_MINIMIZE_STYLE :: uint(15)
 WINDOW_RESIZE_INSET :: 6.0
 WINDOW_MIN_WIDTH :: 1100.0
 WINDOW_MIN_HEIGHT :: 720.0
+ACCENT_EDGE_WIDTH :: 4.0
 TRACE_FOREIGN_LIFETIMES :: #config(VT_TRACE_FOREIGN_LIFETIMES, false)
 
 Text_Align :: enum {
@@ -289,6 +362,7 @@ UI_Action_Kind :: enum {
 	Window_Close,
 	Window_Minimize,
 	Window_Zoom,
+	Theme_Toggle,
 	Mode_Toggle,
 	Open_Source_Modal,
 	Cancel_Source_Modal,
@@ -1066,8 +1140,30 @@ contains :: proc(rect: UI_Rect, point: Point) -> bool {
 	)
 }
 
+left_accent_edge_rect :: proc(rect: UI_Rect) -> UI_Rect {
+	return UI_Rect{rect.x, rect.y, ACCENT_EDGE_WIDTH, rect.h}
+}
+
+bottom_progress_edge_rect :: proc(rect: UI_Rect, progress: f64) -> UI_Rect {
+	return UI_Rect{
+		rect.x,
+		rect.y,
+		rect.w*clamp(progress, 0, 1),
+		ACCENT_EDGE_WIDTH,
+	}
+}
+
 mode_button_rect_for_size :: proc(width, height: f64) -> UI_Rect {
 	return UI_Rect{max(18, width - 214), height - 31, 196, 24}
+}
+
+theme_button_rect_for_size :: proc(width, height: f64) -> UI_Rect {
+	mode := mode_button_rect_for_size(width, height)
+	return UI_Rect{mode.x-70, height-31, 62, 24}
+}
+
+theme_button_rect :: proc() -> UI_Rect {
+	return theme_button_rect_for_size(ui.width, ui.height)
 }
 
 app_header_rect_for_size :: proc(width, height: f64) -> UI_Rect {
@@ -1097,12 +1193,12 @@ window_icon_rect :: proc(index: int) -> UI_Rect {
 }
 
 app_title_rect_for_size :: proc(width, height: f64) -> UI_Rect {
-	mode := mode_button_rect_for_size(width, height)
+	theme := theme_button_rect_for_size(width, height)
 	x := 122.0
 	return UI_Rect{
 		x,
 		height-APP_HEADER_HEIGHT+2,
-		max(0, mode.x-x-12),
+		max(0, theme.x-x-12),
 		APP_HEADER_HEIGHT-2,
 	}
 }
@@ -3137,16 +3233,24 @@ draw_window_icon_path :: proc(
 }
 
 draw_window_controls :: proc(ctx: rawptr) {
+	theme := ui_theme_colors()
 	colors := [3][4]f64{
-		{0.98, 0.35, 0.09, 1},
-		{0.47, 0.49, 0.46, 1},
-		{0.27, 0.72, 0.73, 1},
+		UI_COLOR_COFFEE_64,
+		UI_COLOR_STONE_64,
+		UI_COLOR_GUM_64,
+	}
+	if !ui.dark_theme {
+		colors = {
+			UI_COLOR_OCHRE_64,
+			UI_COLOR_GUM_64,
+			UI_COLOR_FOREST_64,
+		}
 	}
 	for index in 0..<3 {
 		control := window_control_rect(index)
-		background := [4]f64{0.052, 0.055, 0.052, 1}
+		background := theme.panel_alt
 		if contains(control, ui.mouse) {
-			background = [4]f64{0.09, 0.095, 0.09, 1}
+			background = theme.row_hover
 		}
 		fill_overlay_rect(ctx, control, background)
 	}
@@ -3220,12 +3324,13 @@ draw_flash_hints :: proc(ctx, font: rawptr) {
 
 draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan: [4]f64) {
 	if !command_palette.is_open(&command_palette_state) {return}
+	theme := ui_theme_colors()
 	modal := command_palette_rect()
 	search := ui_control_rect(.Command_Palette_Search)
 	content := command_palette_results_rect(modal)
-	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, [4]f64{0.008, 0.009, 0.009, 0.88})
-	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
-	fill_overlay_rect(ctx, search, [4]f64{0.020, 0.022, 0.021, 1})
+	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, theme.backdrop)
+	fill_overlay_rect(ctx, modal, theme.modal)
+	fill_overlay_rect(ctx, search, theme.field)
 	fill_overlay_border(ctx, search, orange)
 	draw_editable_text_field(
 		ctx,
@@ -3256,10 +3361,10 @@ draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan
 		)
 		if row.y + row.h < content.y || row.y > content.y + content.h {continue}
 		if result.available && index == selected {
-			fill_overlay_rect(ctx, row, [4]f64{0.095, 0.125, 0.115, 1})
+			fill_overlay_rect(ctx, row, theme.row_hover)
 			fill_overlay_rect(ctx, UI_Rect{row.x, row.y, 3, row.h}, orange)
 		} else if index % 2 == 0 {
-			fill_overlay_rect(ctx, row, [4]f64{0.038, 0.041, 0.039, 1})
+			fill_overlay_rect(ctx, row, theme.row)
 		}
 		title_color := bright
 		detail_color := muted
@@ -3323,27 +3428,28 @@ draw_exercise_rename :: proc(ctx, font: rawptr, bright, muted, dim, orange: [4]f
 	cancel := ui_control_rect(.Cancel_Exercise_Rename)
 	confirm := ui_control_rect(.Confirm_Exercise_Rename)
 	exercise := &state.exercises[ui.exercise_rename_index]
-	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, [4]f64{0.008, 0.009, 0.009, 0.88})
-	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	theme := ui_theme_colors()
+	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, theme.backdrop)
+	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
-	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	fill_overlay_rect(ctx, header, theme.panel_alt)
 	draw_text_in_rect(ctx, font, "RENAME EXERCISE", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
 	draw_text_in_rect(ctx, font, "ORIGINAL NAME", UI_Rect{modal.x + 24, modal.y + modal.h - 96, modal.w - 48, 22}, .Start, .Center, muted)
 	draw_text_in_rect(ctx, font, exercise.name, UI_Rect{modal.x + 24, modal.y + modal.h - 130, modal.w - 48, 28}, .Start, .Center, bright)
 	draw_text_in_rect(ctx, font, "NEW NAME", UI_Rect{input.x, input.y + input.h + 8, input.w, 22}, .Start, .Center, muted)
-	fill_overlay_rect(ctx, input, [4]f64{0.020, 0.022, 0.021, 1})
+	fill_overlay_rect(ctx, input, theme.field)
 	if ui.focus == .Exercise_Rename {fill_overlay_border(ctx, input, orange)}
 	draw_editable_text_field(ctx, font, ui.exercise_rename, "Enter a new exercise name", input, .Exercise_Rename, bright, dim, orange, 10)
-	cancel_color := [4]f64{0.052, 0.055, 0.052, 1}
-	if contains(cancel, ui.mouse) {cancel_color = [4]f64{0.09, 0.095, 0.09, 1}}
+	cancel_color := theme.panel_alt
+	if contains(cancel, ui.mouse) {cancel_color = theme.row_hover}
 	fill_overlay_rect(ctx, cancel, cancel_color)
 	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
 	confirm_control := find_ui_control_by_action(.Confirm_Exercise_Rename)
 	confirm_enabled := confirm_control != nil && .Enabled in confirm_control.flags
-	confirm_color := confirm_enabled ? [4]f64{0.91, 0.31, 0.075, 1} : [4]f64{0.052, 0.055, 0.052, 1}
+	confirm_color := confirm_enabled ? UI_COLOR_OCHRE_64 : theme.panel_alt
 	if confirm_enabled && contains(confirm, ui.mouse) {confirm_color = [4]f64{1.0, 0.42, 0.10, 1}}
 	fill_overlay_rect(ctx, confirm, confirm_color)
-	draw_text_in_rect(ctx, font, "RENAME", confirm, .Center, .Center, confirm_enabled ? bright : dim)
+	draw_text_in_rect(ctx, font, "RENAME", confirm, .Center, .Center, confirm_enabled ? UI_COLOR_SAND_64 : dim)
 }
 
 draw_exercise_metadata :: proc(
@@ -3375,10 +3481,11 @@ draw_exercise_metadata :: proc(
 		video_id = source.video_id
 		source_url = source.url
 	}
-	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, [4]f64{0.008, 0.009, 0.009, 0.88})
-	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	theme := ui_theme_colors()
+	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, theme.backdrop)
+	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
-	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	fill_overlay_rect(ctx, header, theme.panel_alt)
 	draw_text_in_rect(ctx, font, "EXERCISE METADATA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
 	draw_text_in_rect(ctx, font, exercise.name, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - 48, 28}, .Start, .Center, cyan)
 	clip_available := os.exists(exercise.clip_path)
@@ -3408,7 +3515,7 @@ draw_exercise_metadata :: proc(
 	}
 	for label, row_index in labels {
 		row := exercise_metadata_row_rect(modal, row_index)
-		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, [4]f64{0.043, 0.046, 0.043, 1})}
+		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, theme.row)}
 		draw_text_in_rect(ctx, font, label, UI_Rect{row.x + 10, row.y, 128, row.h}, .Start, .Center, muted)
 		value_color := bright
 		if (row_index == 1 && source_index < 0) ||
@@ -3422,16 +3529,16 @@ draw_exercise_metadata :: proc(
 			draw_text_in_rect(ctx, font, values[row_index], value_rect, .Start, .Center, value_color)
 		}
 	}
-	close_color := [4]f64{0.052, 0.055, 0.052, 1}
-	if contains(close_button, ui.mouse) {close_color = [4]f64{0.09, 0.095, 0.09, 1}}
+	close_color := theme.panel_alt
+	if contains(close_button, ui.mouse) {close_color = theme.row_hover}
 	fill_overlay_rect(ctx, close_button, close_color)
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
 	source_control := find_ui_control_by_action(.View_Exercise_Source)
 	source_enabled := source_control != nil && .Enabled in source_control.flags
-	source_color := source_enabled ? [4]f64{0.045, 0.18, 0.18, 1} : [4]f64{0.052, 0.055, 0.052, 1}
+	source_color := source_enabled ? UI_COLOR_FOREST_64 : theme.panel_alt
 	if source_enabled && contains(source_button, ui.mouse) {source_color = [4]f64{0.06, 0.24, 0.24, 1}}
 	fill_overlay_rect(ctx, source_button, source_color)
-	draw_text_in_rect(ctx, font, "VIEW SOURCE", source_button, .Center, .Center, source_enabled ? cyan : dim)
+	draw_text_in_rect(ctx, font, "VIEW SOURCE", source_button, .Center, .Center, source_enabled ? UI_COLOR_SAND_64 : dim)
 }
 
 draw_randomize_help :: proc(
@@ -3439,16 +3546,17 @@ draw_randomize_help :: proc(
 	bright, muted, dim, cyan: [4]f64,
 ) {
 	if !ui.randomize_help_open {return}
+	theme := ui_theme_colors()
 	modal := randomize_help_modal_rect()
 	close_button := ui_control_rect(.Close_Randomize_Help)
 	fill_overlay_rect(
 		ctx,
 		UI_Rect{0, 0, ui.width, ui.height},
-		[4]f64{0.008, 0.009, 0.009, 0.88},
+		theme.backdrop,
 	)
-	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
-	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	fill_overlay_rect(ctx, header, theme.panel_alt)
 	draw_text_in_rect(
 		ctx,
 		font,
@@ -3557,7 +3665,7 @@ draw_randomize_help :: proc(
 	for candidate, row_index in candidates[:candidate_count] {
 		row := randomize_help_row_rect(modal, row_index)
 		if row_index % 2 == 0 {
-			fill_overlay_rect(ctx, row, [4]f64{0.043, 0.046, 0.043, 1})
+			fill_overlay_rect(ctx, row, theme.row)
 		}
 		exercise := &state.exercises[candidate.exercise_index]
 		draw_text_in_rect(
@@ -3592,9 +3700,9 @@ draw_randomize_help :: proc(
 			cyan,
 		)
 	}
-	close_color := [4]f64{0.052, 0.055, 0.052, 1}
+	close_color := theme.panel_alt
 	if contains(close_button, ui.mouse) {
-		close_color = [4]f64{0.09, 0.095, 0.09, 1}
+		close_color = theme.row_hover
 	}
 	fill_overlay_rect(ctx, close_button, close_color)
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
@@ -3605,15 +3713,16 @@ draw_data_modal :: proc(
 	bright, muted, dim, orange, cyan: [4]f64,
 ) {
 	if !ui.data_modal_open {return}
+	theme := ui_theme_colors()
 	modal := data_modal_rect()
 	fill_overlay_rect(
 		ctx,
 		UI_Rect{0, 0, ui.width, ui.height},
-		[4]f64{0.008, 0.009, 0.009, 0.88},
+		theme.backdrop,
 	)
-	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
-	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	fill_overlay_rect(ctx, header, theme.panel_alt)
 	title := ui.library_import_confirm_open ? "REPLACE LIBRARY" : "LIBRARY DATA"
 	draw_text_in_rect(
 		ctx,
@@ -3659,13 +3768,13 @@ draw_data_modal :: proc(
 		)
 		cancel := ui_control_rect(.Cancel_Library_Import)
 		confirm := ui_control_rect(.Confirm_Library_Import)
-		cancel_color := [4]f64{0.052, 0.055, 0.052, 1}
-		if contains(cancel, ui.mouse) {cancel_color = [4]f64{0.09, 0.095, 0.09, 1}}
+		cancel_color := theme.panel_alt
+		if contains(cancel, ui.mouse) {cancel_color = theme.row_hover}
 		fill_overlay_rect(ctx, cancel, cancel_color)
 		draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
 		confirm_control := find_ui_control_by_action(.Confirm_Library_Import)
 		confirm_enabled := confirm_control != nil && .Enabled in confirm_control.flags
-		confirm_color := confirm_enabled ? [4]f64{0.15, 0.061, 0.032, 1} : [4]f64{0.052, 0.055, 0.052, 1}
+		confirm_color := confirm_enabled ? UI_COLOR_OCHRE_64 : theme.panel_alt
 		if confirm_enabled && contains(confirm, ui.mouse) {
 			confirm_color = [4]f64{0.23, 0.083, 0.035, 1}
 		}
@@ -3678,7 +3787,7 @@ draw_data_modal :: proc(
 			confirm,
 			.Center,
 			.Center,
-			confirm_enabled ? bright : dim,
+			confirm_enabled ? UI_COLOR_SAND_64 : dim,
 		)
 		return
 	}
@@ -3694,8 +3803,8 @@ draw_data_modal :: proc(
 		rect := ui_control_rect(kind)
 		control := find_ui_control_by_action(kind)
 		enabled := control != nil && .Enabled in control.flags
-		color := [4]f64{0.052, 0.055, 0.052, 1}
-		if enabled && contains(rect, ui.mouse) {color = [4]f64{0.09, 0.095, 0.09, 1}}
+		color := theme.panel_alt
+		if enabled && contains(rect, ui.mouse) {color = theme.row_hover}
 		fill_overlay_rect(ctx, rect, color)
 		draw_text_in_rect(
 			ctx,
@@ -3717,8 +3826,8 @@ draw_data_modal :: proc(
 		)
 	}
 	close_button := ui_control_rect(.Close_Data_Modal)
-	close_color := [4]f64{0.052, 0.055, 0.052, 1}
-	if contains(close_button, ui.mouse) {close_color = [4]f64{0.09, 0.095, 0.09, 1}}
+	close_color := theme.panel_alt
+	if contains(close_button, ui.mouse) {close_color = theme.row_hover}
 	fill_overlay_rect(ctx, close_button, close_color)
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
 }
@@ -3728,13 +3837,14 @@ draw_library_recovery :: proc(
 	bright, muted, dim, orange, cyan, danger: [4]f64,
 ) {
 	if !library_recovery_state.required {return}
+	theme := ui_theme_colors()
 	modal := recovery_modal_rect()
 	fill_overlay_rect(
 		ctx,
 		UI_Rect{0, 0, ui.width, ui.height},
-		[4]f64{0.008, 0.009, 0.009, 0.96},
+		theme.backdrop,
 	)
-	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 58, modal.w, 58}
 	fill_overlay_rect(ctx, header, [4]f64{0.12, 0.035, 0.028, 1})
 	title := "LIBRARY RECOVERY REQUIRED"
@@ -3748,7 +3858,7 @@ draw_library_recovery :: proc(
 		UI_Rect{header.x + 20, header.y, header.w - 40, header.h},
 		.Start,
 		.Center,
-		bright,
+		UI_COLOR_SAND_64,
 	)
 	failure := library_recovery_state.failure
 	draw_text_in_rect(
@@ -3848,11 +3958,11 @@ draw_library_recovery :: proc(
 		)
 		cancel := ui_control_rect(.Recovery_Cancel)
 		confirm := ui_control_rect(.Recovery_Confirm)
-		fill_overlay_rect(ctx, cancel, [4]f64{0.052, 0.055, 0.052, 1})
-		fill_overlay_rect(ctx, confirm, [4]f64{0.15, 0.061, 0.032, 1})
+		fill_overlay_rect(ctx, cancel, theme.panel_alt)
+		fill_overlay_rect(ctx, confirm, UI_COLOR_OCHRE_64)
 		fill_overlay_border(ctx, confirm, orange)
 		draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
-		draw_text_in_rect(ctx, font, "ACTIVATE RECOVERY", confirm, .Center, .Center, bright)
+		draw_text_in_rect(ctx, font, "ACTIVATE RECOVERY", confirm, .Center, .Center, UI_COLOR_SAND_64)
 		return
 	}
 
@@ -3875,8 +3985,8 @@ draw_library_recovery :: proc(
 		control := find_ui_control_by_action(kind)
 		if control == nil {continue}
 		rect := control.rect
-		color := [4]f64{0.052, 0.055, 0.052, 1}
-		if contains(rect, ui.mouse) {color = [4]f64{0.09, 0.095, 0.09, 1}}
+		color := theme.panel_alt
+		if contains(rect, ui.mouse) {color = theme.row_hover}
 		fill_overlay_rect(ctx, rect, color)
 		draw_text_in_rect(
 			ctx,
@@ -3904,13 +4014,14 @@ draw_backup_warning :: proc(
 	bright, muted, orange, danger: [4]f64,
 ) {
 	if !major_change_pending.open {return}
+	theme := ui_theme_colors()
 	modal := backup_warning_modal_rect()
 	fill_overlay_rect(
 		ctx,
 		UI_Rect{0, 0, ui.width, ui.height},
-		[4]f64{0.008, 0.009, 0.009, 0.94},
+		theme.backdrop,
 	)
-	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 56, modal.w, 56}
 	fill_overlay_rect(ctx, header, [4]f64{0.12, 0.035, 0.028, 1})
 	draw_text_in_rect(
@@ -3920,7 +4031,7 @@ draw_backup_warning :: proc(
 		UI_Rect{header.x + 20, header.y, header.w - 40, header.h},
 		.Start,
 		.Center,
-		bright,
+		UI_COLOR_SAND_64,
 	)
 	draw_text_in_rect(
 		ctx,
@@ -3951,11 +4062,11 @@ draw_backup_warning :: proc(
 	)
 	cancel := ui_control_rect(.Backup_Warning_Cancel)
 	confirm := ui_control_rect(.Backup_Warning_Continue)
-	fill_overlay_rect(ctx, cancel, [4]f64{0.052, 0.055, 0.052, 1})
-	fill_overlay_rect(ctx, confirm, [4]f64{0.15, 0.061, 0.032, 1})
+	fill_overlay_rect(ctx, cancel, theme.panel_alt)
+	fill_overlay_rect(ctx, confirm, UI_COLOR_OCHRE_64)
 	fill_overlay_border(ctx, confirm, orange)
 	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
-	draw_text_in_rect(ctx, font, "CONTINUE WITHOUT BACKUP", confirm, .Center, .Center, bright)
+	draw_text_in_rect(ctx, font, "CONTINUE WITHOUT BACKUP", confirm, .Center, .Center, UI_COLOR_SAND_64)
 }
 
 notification_kind_text :: proc(kind: Notification_Kind) -> string {
@@ -3993,17 +4104,18 @@ draw_notification_history :: proc(
 	bright, muted, dim, orange, cyan, danger, success: [4]f64,
 ) {
 	if !ui.notification_modal_open {return}
+	theme := ui_theme_colors()
 	modal := notification_modal_rect()
 	list := notification_list_rect(modal)
 	detail := notification_detail_rect(modal)
 	fill_overlay_rect(
 		ctx,
 		UI_Rect{0, 0, ui.width, ui.height},
-		[4]f64{0.008, 0.009, 0.009, 0.88},
+		theme.backdrop,
 	)
-	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
-	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	fill_overlay_rect(ctx, header, theme.panel_alt)
 	draw_text_in_rect(
 		ctx,
 		font,
@@ -4013,8 +4125,8 @@ draw_notification_history :: proc(
 		.Center,
 		bright,
 	)
-	fill_overlay_rect(ctx, list, [4]f64{0.021, 0.024, 0.022, 1})
-	fill_overlay_rect(ctx, detail, [4]f64{0.025, 0.028, 0.026, 1})
+	fill_overlay_rect(ctx, list, theme.field)
+	fill_overlay_rect(ctx, detail, theme.panel)
 
 	visible_count := notification_visible_row_count(modal)
 	for visible_index in 0 ..< visible_count {
@@ -4025,7 +4137,7 @@ draw_notification_history :: proc(
 		if selected {
 			fill_overlay_rect(ctx, row, [4]f64{0.035, 0.12, 0.12, 1})
 		} else if contains(row, ui.mouse) {
-			fill_overlay_rect(ctx, row, [4]f64{0.045, 0.052, 0.048, 1})
+			fill_overlay_rect(ctx, row, theme.row_hover)
 		}
 		kind_color := muted
 		if notification.kind == .Success {kind_color = success}
@@ -4059,7 +4171,7 @@ draw_notification_history :: proc(
 		fill_overlay_rect(
 			ctx,
 			UI_Rect{row.x + 10, row.y, row.w - 20, 1},
-			[4]f64{0.09, 0.095, 0.09, 1},
+			theme.rule,
 		)
 	}
 
@@ -4153,17 +4265,16 @@ draw_notification_history :: proc(
 	}
 
 	close_button := ui_control_rect(.Close_Notification_History)
-	close_color := [4]f64{0.052, 0.055, 0.052, 1}
+	close_color := theme.panel_alt
 	if contains(close_button, ui.mouse) {
-		close_color = [4]f64{0.09, 0.095, 0.09, 1}
+		close_color = theme.row_hover
 	}
 	fill_overlay_rect(ctx, close_button, close_color)
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
 	action := ui_control_rect(.Activate_Notification_Action)
 	if action.w > 0 {
 		enabled := notification_action_available(selected)
-		action_color := enabled ? [4]f64{0.035, 0.12, 0.12, 1} :
-		                        [4]f64{0.052, 0.055, 0.052, 1}
+		action_color := enabled ? UI_COLOR_FOREST_64 : theme.panel_alt
 		if enabled && contains(action, ui.mouse) {
 			action_color = [4]f64{0.045, 0.18, 0.18, 1}
 		}
@@ -4175,7 +4286,7 @@ draw_notification_history :: proc(
 			action,
 			.Center,
 			.Center,
-			enabled ? cyan : dim,
+			enabled ? UI_COLOR_SAND_64 : dim,
 		)
 	}
 }
@@ -4188,10 +4299,11 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	source := &state.sources[ui.source_details_index]
 	metadata := source.metadata
 	metadata_ready := source.metadata_status != .Missing
-	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, [4]f64{0.008, 0.009, 0.009, 0.88})
-	fill_overlay_rect(ctx, modal, [4]f64{0.031, 0.034, 0.032, 1})
+	theme := ui_theme_colors()
+	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, theme.backdrop)
+	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
-	fill_overlay_rect(ctx, header, [4]f64{0.052, 0.055, 0.052, 1})
+	fill_overlay_rect(ctx, header, theme.panel_alt)
 	draw_text_in_rect(ctx, font, "SOURCE DETAILS / DOWNLOADED MEDIA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
 	title_color := cyan
 	if !source.media_available {title_color = [4]f64{0.95, 0.16, 0.10, 1}}
@@ -4219,7 +4331,7 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	values := [9]string{source.video_id, format_timestamp(source.duration), resolution, frame_rate, video_codec, audio_codec, container, format_id, file_size}
 	for label, row_index in labels {
 		row := source_details_row_rect(modal, row_index)
-		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, [4]f64{0.043, 0.046, 0.043, 1})}
+		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, theme.row)}
 		draw_text_in_rect(ctx, font, label, UI_Rect{row.x + 10, row.y, 142, row.h}, .Start, .Center, muted)
 		value := values[row_index]
 		if len(value) == 0 {value = "UNAVAILABLE"}
@@ -4231,13 +4343,13 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 		}
 	}
 
-	close_color := [4]f64{0.052, 0.055, 0.052, 1}
-	if contains(close_button, ui.mouse) {close_color = [4]f64{0.09, 0.095, 0.09, 1}}
+	close_color := theme.panel_alt
+	if contains(close_button, ui.mouse) {close_color = theme.row_hover}
 	fill_overlay_rect(ctx, close_button, close_color)
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
 	refetch_control := find_ui_control_by_action(.Refetch_Source_Details)
 	refetch_enabled := refetch_control != nil && .Enabled in refetch_control.flags
-	refetch_color := [4]f64{0.052, 0.055, 0.052, 1}
+	refetch_color := theme.panel_alt
 	refetch_text_color := muted
 	if refetch_enabled {
 		refetch_color = [4]f64{0.91, 0.31, 0.075, 1}
@@ -4252,22 +4364,25 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	_, _, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, _ :=
 		layout_rects()
-	chassis := [4]f32{0.026, 0.028, 0.027, 1}
-	panel := [4]f32{0.041, 0.044, 0.042, 1}
-	panel_alt := [4]f32{0.052, 0.055, 0.052, 1}
-	field := [4]f32{0.020, 0.022, 0.021, 1}
-	border := [4]f32{0.218, 0.225, 0.210, 1}
-	rule := [4]f32{0.125, 0.132, 0.123, 1}
-	orange := [4]f32{0.91, 0.31, 0.075, 1}
-	cyan := [4]f32{0.27, 0.72, 0.73, 1}
+	theme := ui_theme_colors()
+	chassis := ui_color_32(theme.chassis)
+	panel := ui_color_32(theme.panel)
+	panel_alt := ui_color_32(theme.panel_alt)
+	field := ui_color_32(theme.field)
+	rule := ui_color_32(theme.rule)
+	row_color := ui_color_32(theme.row)
+	row_hover := ui_color_32(theme.row_hover)
+	orange := UI_COLOR_COFFEE_32
 	push_rect(vertices, UI_Rect{0, 0, ui.width, ui.height}, chassis)
-	push_rect(vertices, app_header_rect(), [4]f32{0.018, 0.020, 0.019, 1})
+	push_rect(vertices, app_header_rect(), ui_color_32(theme.header))
+	theme_rect := ui_control_rect(.Theme_Toggle)
+	push_rect(vertices, theme_rect, panel_alt)
 	mode_rect := ui_control_rect(.Mode_Toggle)
-	mode_color := [4]f32{0.15, 0.061, 0.032, 1}
-	if contains(mode_rect, ui.mouse) {mode_color = [4]f32{0.23, 0.083, 0.035, 1}}
+	mode_color := panel_alt
+	if contains(mode_rect, ui.mouse) {mode_color = row_hover}
 	push_rect(vertices, mode_rect, mode_color)
 	push_border(vertices, mode_rect, orange)
-	push_rect(vertices, UI_Rect{mode_rect.x, mode_rect.y, 4, mode_rect.h}, orange)
+	push_rect(vertices, left_accent_edge_rect(mode_rect), orange)
 	panels := [4]UI_Rect{source_panel, player, transcript, exercise_panel}
 	for rect in panels {
 		if rect.w <= 0 || rect.h <= 0 {continue}
@@ -4305,15 +4420,14 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 		timeline := ui_control_rect(.Source_Timeline)
 		track := UI_Rect{timeline.x, timeline.y + timeline.h / 2 - 2, timeline.w, 4}
-		push_rect(vertices, track, rule)
 		if ui.player_duration > 0 {
 			duration := ui.player_duration
 			seconds, has_seconds := current_seconds()
 			progress := 0.0
 			if has_seconds && duration > 0 {progress = min(max(seconds / duration, 0), 1)}
-			push_rect(vertices, UI_Rect{track.x, track.y, track.w * progress, track.h}, border)
+			push_rect(vertices, UI_Rect{track.x, track.y, track.w * progress, track.h}, UI_COLOR_COFFEE_32)
 			thumb_x := track.x + track.w * progress
-			push_rect(vertices, UI_Rect{thumb_x - 3, timeline.y + 2, 6, timeline.h - 4}, [4]f32{0.72, 0.72, 0.68, 1})
+			push_rect(vertices, UI_Rect{thumb_x - 3, timeline.y + 2, 6, timeline.h - 4}, UI_COLOR_COFFEE_32)
 		}
 	}
 	if ui.mode == .Create {
@@ -4321,10 +4435,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		add_control := find_ui_control_by_action(.Open_Source_Modal)
 		add_enabled := add_control != nil && .Enabled in add_control.flags
 		add_color := panel_alt
-		if add_enabled {
-			add_color = [4]f32{0.15, 0.061, 0.032, 1}
-			if contains(add_rect, ui.mouse) {add_color = [4]f32{0.23, 0.083, 0.035, 1}}
-		}
+		if add_enabled && contains(add_rect, ui.mouse) {add_color = row_hover}
 		push_rect(vertices, add_rect, add_color)
 		if add_enabled {push_border(vertices, add_rect, orange)}
 
@@ -4332,12 +4443,14 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		if commit_control != nil {
 			commit_color := field
 			if .Enabled in commit_control.flags {
-				commit_color = [4]f32{0.15, 0.061, 0.032, 1}
 				if contains(commit_control.rect, ui.mouse) {
-					commit_color = [4]f32{0.23, 0.083, 0.035, 1}
+					commit_color = row_hover
 				}
 			}
 			push_rect(vertices, commit_control.rect, commit_color)
+			if .Enabled in commit_control.flags {
+				push_border(vertices, commit_control.rect, orange)
+			}
 		}
 	}
 
@@ -4354,18 +4467,16 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			control := find_ui_control_by_action_and_index(.Source, index)
 			if control != nil {
 				row = control.rect
-				color := [4]f32{0.046, 0.050, 0.048, 0.96}
-				if contains(row, ui.mouse) {color = [4]f32{0.075, 0.081, 0.076, 1}}
-				if !source.media_available {
-					color = [4]f32{0.16, 0.035, 0.025, 1}
-					push_rect(vertices, UI_Rect{row.x, row.y, 3, row.h}, [4]f32{0.95, 0.12, 0.08, 1})
-				}
-				if index == state.active_source {
-					color = [4]f32{0.17, 0.070, 0.035, 1}
-					push_rect(vertices, UI_Rect{row.x, row.y, 3, row.h}, orange)
-				}
+				color := row_color
+				if contains(row, ui.mouse) {color = row_hover}
 				push_rect(vertices, row, color)
 				push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
+				if !source.media_available {
+					push_rect(vertices, left_accent_edge_rect(row), UI_COLOR_COFFEE_32)
+				}
+				if index == state.active_source {
+					push_rect(vertices, left_accent_edge_rect(row), orange)
+				}
 			}
 			row.y -= 30
 		}
@@ -4383,17 +4494,15 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			control := find_ui_control_by_action_and_index(.Transcript, segment_index)
 			if control != nil {
 				row = control.rect
-				color := [4]f32{0.043, 0.047, 0.045, 0.96}
+				color := row_color
 				active := result_index == ui.transcript_active_match
-				if active {color = [4]f32{0.082, 0.046, 0.031, 1}}
-				if contains(row, ui.mouse) {color = [4]f32{0.071, 0.078, 0.073, 1}}
+				if contains(row, ui.mouse) {color = row_hover}
 				push_rect(vertices, row, color)
+				push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
 				if active {
 					progress := clamp(ui.transcript_active_progress, 0, 1)
-					push_rect(vertices, UI_Rect{row.x, row.y, row.w*progress, row.h}, [4]f32{0.24, 0.082, 0.026, 1})
-					push_rect(vertices, UI_Rect{row.x, row.y, 3, row.h}, orange)
+					push_rect(vertices, bottom_progress_edge_rect(row, progress), UI_COLOR_COFFEE_32)
 				}
-				push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
 			}
 			row.y -= 26
 		}
@@ -4413,40 +4522,45 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			control := find_ui_control_by_action_and_index(.Exercise, index)
 			if control != nil {
 				row = control.rect
-				color := [4]f32{0.046, 0.050, 0.048, 0.96}
-				if contains(row, ui.mouse) {color = [4]f32{0.075, 0.081, 0.076, 1}}
-				if index == ui.active_exercise {
-					color = [4]f32{0.17, 0.070, 0.035, 1}
-					push_rect(vertices, UI_Rect{row.x, row.y, 3, row.h}, orange)
-				}
+				color := row_color
+				if contains(row, ui.mouse) {color = row_hover}
 				push_rect(vertices, row, color)
 				push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
+				if index == ui.active_exercise {
+					push_rect(vertices, left_accent_edge_rect(row), orange)
+				}
 			}
 			row.y -= 30
 		}
 	}
 
 	control_kinds := [11]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize}
-	for kind, index in control_kinds {
+	valid_range := active_exercise_range_is_valid()
+	for kind in control_kinds {
 		rect := ui_control_rect(kind)
 		if rect.w <= 0 {continue}
 		color := panel_alt
 		control := find_ui_control_by_action(kind)
 		enabled := control != nil && .Enabled in control.flags
-		if index == 0 && state.has_start {color = [4]f32{0.035, 0.16, 0.17, 1}}
-		if index == 1 && state.has_end {color = [4]f32{0.035, 0.16, 0.17, 1}}
-		if index == 2 {color = [4]f32{0.15, 0.061, 0.032, 1}}
 		if !enabled {color = field}
-		if enabled && contains(rect, ui.mouse) {color = [4]f32{0.105, 0.112, 0.104, 1}}
-		if enabled && index == 2 && contains(rect, ui.mouse) {color = [4]f32{0.23, 0.083, 0.035, 1}}
+		if enabled && contains(rect, ui.mouse) {color = row_hover}
 		push_rect(vertices, rect, color)
+		if enabled && ui.mode == .Create &&
+		   create_action_is_emphasized(
+				kind,
+				state.has_start,
+				state.has_end,
+				valid_range,
+		   ) {
+			push_border(vertices, rect, orange)
+		}
 	}
 	if ui.mode == .Play {
 		help := ui_control_rect(.Open_Randomize_Help)
 		if help.w > 0 {
 			color := panel_alt
 			if contains(help, ui.mouse) {
-				color = [4]f32{0.105, 0.112, 0.104, 1}
+				color = row_hover
 			}
 			push_rect(vertices, help, color)
 		}
@@ -4496,14 +4610,15 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	CFRelease(font_name)
 	defer foreign_release(small_font, "CTFont", "build_text_overlay")
 	s := ui.scale
-	ink := [4]f64{0.89, 0.88, 0.82, 1}
-	bright := [4]f64{0.97, 0.95, 0.88, 1}
-	muted := [4]f64{0.47, 0.49, 0.46, 1}
-	dim := [4]f64{0.31, 0.33, 0.31, 1}
-	orange := [4]f64{0.98, 0.35, 0.09, 1}
-	success := [4]f64{0.37, 0.78, 0.43, 1}
-	cyan := [4]f64{0.27, 0.72, 0.73, 1}
-	danger := [4]f64{0.95, 0.16, 0.10, 1}
+	theme := ui_theme_colors()
+	ink := theme.ink
+	bright := theme.bright
+	muted := theme.muted
+	dim := theme.dim
+	orange := ui.dark_theme ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
+	success := UI_COLOR_MOSS_64
+	cyan := ui.dark_theme ? UI_COLOR_GUM_64 : UI_COLOR_FOREST_64
+	danger := ui.dark_theme ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
 
 	_, _, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, _ :=
 		layout_rects()
@@ -4518,10 +4633,20 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		bright,
 		86,
 	)
+	theme_rect := ui_control_rect(.Theme_Toggle)
+	draw_text_in_rect(
+		ctx,
+		small_font,
+		ui_theme_toggle_label(ui.dark_theme),
+		theme_rect,
+		.Center,
+		.Center,
+		ui.dark_theme ? UI_COLOR_SAND_64 : UI_COLOR_BASALT_64,
+	)
 	mode_rect := ui_control_rect(.Mode_Toggle)
 	mode_text := "MODE / BUILD EXERCISES"
 	if ui.mode == .Play {mode_text = "MODE / PRACTICE LIBRARY"}
-	draw_text_in_rect(ctx, small_font, mode_text, mode_rect, .Center, .Center, bright)
+	draw_text_in_rect(ctx, small_font, mode_text, mode_rect, .Center, .Center, orange)
 	source_header := UI_Rect {
 		source_panel.x,
 		source_panel.y + source_panel.h - 35,
@@ -4551,7 +4676,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		add_rect := ui_control_rect(.Open_Source_Modal)
 		add_control := find_ui_control_by_action(.Open_Source_Modal)
 		add_enabled := add_control != nil && .Enabled in add_control.flags
-		draw_text_in_rect(ctx, small_font, "ADD", add_rect, .Center, .Center, add_enabled ? bright : dim)
+		draw_text_in_rect(ctx, small_font, "ADD", add_rect, .Center, .Center, add_enabled ? orange : dim)
 		draw_text_in_rect(
 			ctx,
 			small_font,
@@ -4645,8 +4770,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			if control != nil {
 				row = control.rect
 				row_color := ink
-				if index == state.active_source {row_color = orange}
-				if !source.media_available {row_color = danger}
+				if index == state.active_source || !source.media_available {
+					row_color = orange
+				}
 				draw_text_in_rect(
 					ctx,
 					small_font,
@@ -4793,7 +4919,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			selected := source_initial_seconds(state.active_source)
 			for seconds, option_index in values {
 				option := ui_control_rect(.Source_Hint, option_index)
-				fill_overlay_rect(ctx, option, [4]f64{0.028, 0.030, 0.029, 1})
+				fill_overlay_rect(ctx, option, theme.row)
 				if seconds == selected {fill_overlay_border(ctx, option, cyan)}
 				draw_timestamp_text_in_rect(ctx, small_font, format_timestamp(seconds), option, .Center, .Center, seconds == selected ? cyan : bright)
 			}
@@ -4876,6 +5002,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			control := find_ui_control_by_action_and_index(.Transcript, transcript_index)
 			if control != nil {
 					row = control.rect
+					active := result_index == ui.transcript_active_match
 					draw_text_in_rect(
 						ctx,
 						small_font,
@@ -4901,7 +5028,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 						UI_Rect{row.x + 126, row.y, row.w - 134, row.h},
 						.Start,
 						.Center,
-						ink,
+						active ? orange : ink,
 					)
 				}
 			row.y -= 26
@@ -5162,7 +5289,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				.Open_Notification_History,
 				int(notification_id),
 			)
-			fill := [4]f64{0.035, 0.038, 0.036, 1}
+			fill := theme.field
 			accent := muted
 			text_color := muted
 			switch notification.kind {
@@ -5231,7 +5358,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 					action,
 					.Center,
 					.Center,
-					has_stop ? bright : cyan,
+					UI_COLOR_SAND_64,
 				)
 			}
 		}
@@ -5253,7 +5380,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		status_rect := footer_status_rect()
 		status_control := find_ui_control_by_action(.Open_Notification_History)
 		if status_control != nil && contains(status_rect, ui.mouse) {
-			fill_overlay_rect(ctx, status_rect, [4]f64{0.045, 0.052, 0.048, 1})
+			fill_overlay_rect(ctx, status_rect, theme.row_hover)
 		}
 		status_color := ui.status_error ? danger : (ui.status_success ? success : muted)
 		draw_timestamp_text_in_rect(
@@ -5310,13 +5437,13 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		fill_overlay_rect(
 			ctx,
 			UI_Rect{0, 0, ui.width, ui.height},
-			[4]f64{0.008, 0.009, 0.009, 0.88},
+			theme.backdrop,
 		)
-		fill_overlay_rect(ctx, modal, [4]f64{0.041, 0.044, 0.042, 1})
+		fill_overlay_rect(ctx, modal, theme.modal)
 		fill_overlay_rect(
 			ctx,
 			UI_Rect{modal.x, modal.y + modal.h - 50, modal.w, 50},
-			[4]f64{0.052, 0.055, 0.052, 1},
+			theme.panel_alt,
 		)
 		draw_text_in_rect(
 			ctx,
@@ -5354,7 +5481,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			.Center,
 			cyan,
 		)
-		fill_overlay_rect(ctx, input, [4]f64{0.020, 0.022, 0.021, 1})
+		fill_overlay_rect(ctx, input, theme.field)
 		if ui.focus == .URL && ui.source_modal_refetch_index < 0 {
 			fill_overlay_border(ctx, input, orange)
 		}
@@ -5408,7 +5535,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			for result, result_index in source_probe_results {
 				if result_index >= 5 {break}
 				row := source_probe_row_rect(modal, result_index)
-				fill_overlay_rect(ctx, row, [4]f64{0.028, 0.030, 0.029, 1})
+				fill_overlay_rect(ctx, row, theme.row)
 				if len(result.error) > 0 {
 					if source_probe_browser_retry_available(result) {
 						draw_text_in_rect(
@@ -5444,13 +5571,13 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 						save_control := ui_control_rect(
 							.Toggle_Save_Source_Browser,
 						)
-						save_fill := [4]f64{0.035, 0.038, 0.036, 1}
+						save_fill := theme.field
 						save_color := muted
 						if ui.save_source_browser_choice {
 							save_fill = [4]f64{0.035, 0.12, 0.12, 1}
-							save_color = cyan
+							save_color = UI_COLOR_SAND_64
 						} else if contains(save_control, ui.mouse) {
-							save_fill = [4]f64{0.055, 0.060, 0.056, 1}
+							save_fill = theme.row_hover
 						}
 						fill_overlay_rect(ctx, save_control, save_fill)
 						save_label := "[ ] SAVE CHOICE FOR LATER"
@@ -5485,7 +5612,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 								control,
 								.Center,
 								.Center,
-								cyan,
+								UI_COLOR_SAND_64,
 							)
 						}
 					} else {
@@ -5511,14 +5638,14 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 					quality := ui_control_rect_by_value(.Source_Quality, result_index, height)
 					if quality.w == 0 {break}
 					selected := height == result.selected_height
-					fill_overlay_rect(ctx, quality, selected ? [4]f64{0.08, 0.18, 0.18, 1} : [4]f64{0.035, 0.038, 0.036, 1})
+					fill_overlay_rect(ctx, quality, selected ? UI_COLOR_FOREST_64 : theme.field)
 					if selected {fill_overlay_border(ctx, quality, cyan)}
-					draw_text_in_rect(ctx, small_font, fmt.tprintf("%dp", height), quality, .Center, .Center, selected ? cyan : muted)
+					draw_text_in_rect(ctx, small_font, fmt.tprintf("%dp", height), quality, .Center, .Center, selected ? UI_COLOR_SAND_64 : muted)
 				}
 			}
 		}
-		cancel_color := [4]f64{0.052, 0.055, 0.052, 1}
-		if contains(cancel, ui.mouse) {cancel_color = [4]f64{0.09, 0.095, 0.09, 1}}
+		cancel_color := theme.panel_alt
+		if contains(cancel, ui.mouse) {cancel_color = theme.row_hover}
 		fill_overlay_rect(ctx, cancel, cancel_color)
 		draw_text_in_rect(ctx, small_font, "CANCEL", cancel, .Center, .Center, muted)
 		confirm_color := [4]f64{0.91, 0.31, 0.075, 1}
@@ -5707,6 +5834,15 @@ find_ui_control_at_point :: proc(
 		if contains(control.rect, point) {return control}
 	}
 	return nil
+}
+
+header_window_gesture_allowed :: proc(
+	header: UI_Rect,
+	controls: []UI_Control,
+	point: Point,
+) -> bool {
+	return contains(header, point) &&
+	       find_ui_control_at_point(controls, point, .Primary_Press) == nil
 }
 
 ui_controls_valid :: proc(controls: []UI_Control) -> bool {
@@ -6439,6 +6575,18 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
+	theme_label := "Switch to dark theme"
+	if ui.dark_theme {theme_label = "Switch to light theme"}
+	add_ax_element(
+		array,
+		element_class,
+		theme_label,
+		"AXButton",
+		theme_button_rect(),
+		.Theme_Toggle,
+		flash_label = "toggle theme",
+		functional_name = "theme toggle",
+	)
 	toggle_label := "Switch to Play mode"
 	if ui.mode == .Play {toggle_label = "Switch to Create mode"}
 	add_ax_element(
@@ -6780,6 +6928,12 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		)
 	case .Window_Zoom:
 		toggle_window_zoom()
+	case .Theme_Toggle:
+		ui.dark_theme = !ui.dark_theme
+		if !database_interface_theme_save(library_database, ui.dark_theme) {
+			fmt.eprintln("[vocal-training] could not persist the interface theme")
+		}
+		ui.needs_redraw = true
 	case .Mode_Toggle:
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 	case .Open_Source_Modal:
@@ -7504,7 +7658,12 @@ render_frame :: proc() {
 	msg_void_clear_color(
 		attachment,
 		sel_registerName("setClearColor:"),
-		MTL_Clear_Color{0.026, 0.028, 0.027, 1},
+		MTL_Clear_Color{
+			ui_theme_colors().chassis[0],
+			ui_theme_colors().chassis[1],
+			ui_theme_colors().chassis[2],
+			1,
+		},
 	)
 
 	pixel_width := uint(max(1, ui.width * ui.scale))
@@ -8271,8 +8430,11 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	   !ui.exercise_rename_open && !ui.exercise_metadata_open &&
 	   !ui.randomize_help_open &&
 	   !ui.data_modal_open && !ui.notification_modal_open &&
-	   contains(app_header_rect(), ui.mouse) &&
-	   !contains(ui_control_rect(.Mode_Toggle), ui.mouse) {
+	   header_window_gesture_allowed(
+			app_header_rect(),
+			ui_build.controls[:],
+			ui.mouse,
+	   ) {
 		cancel_ui_flash()
 		if click_count >= 2 {
 			toggle_window_zoom()

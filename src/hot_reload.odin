@@ -77,6 +77,7 @@ vocal_hot_initialize :: proc "c" (
 		return false
 	}
 	load_result := load_library()
+	ui.dark_theme = database_interface_theme_load(library_database)
 	notification_history_initialize()
 	if load_result.mode != .Ready {
 		_ = notification_post(

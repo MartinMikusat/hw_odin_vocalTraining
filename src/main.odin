@@ -2822,6 +2822,7 @@ vocal_process_main :: proc(args := os.args) {
 		return
 	}
 	load_result := load_library()
+	ui.dark_theme = database_interface_theme_load(library_database)
 	notification_history_initialize()
 	if load_result.mode != .Ready {
 		_ = notification_post(
