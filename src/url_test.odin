@@ -62,9 +62,10 @@ window_header_geometry_separates_controls_title_and_mode_test :: proc(
 	zoom := window_control_rect_for_size(2, height)
 	title := app_title_rect_for_size(1100, height)
 	mode := mode_button_rect_for_size(1100, height)
-	testing.expect_value(t, close, UI_Rect{0, 689, 30, 30})
-	testing.expect_value(t, minimize, UI_Rect{38, 689, 30, 30})
-	testing.expect_value(t, zoom, UI_Rect{76, 689, 30, 30})
+	testing.expect_value(t, close, UI_Rect{0, 690, 30, 30})
+	testing.expect_value(t, minimize, UI_Rect{38, 690, 30, 30})
+	testing.expect_value(t, zoom, UI_Rect{76, 690, 30, 30})
+	testing.expect_value(t, close.y+close.h, height)
 	testing.expect(t, zoom.x+zoom.w < title.x)
 	testing.expect(t, title.x+title.w < mode.x)
 }
@@ -104,6 +105,31 @@ window_resize_geometry_detects_edges_and_enforces_minimum_test :: proc(
 	testing.expect_value(t, grown, Rect{{100, 200}, {1300, 850}})
 	clamped := window_frame_after_drag(start, u8(1|4), {200, 200})
 	testing.expect_value(t, clamped, Rect{{200, 280}, {1100, 720}})
+}
+
+@(test)
+window_zoom_geometry_fills_and_restores_test :: proc(t: ^testing.T) {
+	current := Rect{Point{200, 140}, Size{1200, 800}}
+	visible := Rect{Point{0, 31}, Size{1920, 1049}}
+	next, restore, has_restore := window_zoom_next_frame(
+		current,
+		visible,
+		{},
+		false,
+	)
+	testing.expect_value(t, next, visible)
+	testing.expect_value(t, restore, current)
+	testing.expect(t, has_restore)
+
+	next, restore, has_restore = window_zoom_next_frame(
+		next,
+		visible,
+		restore,
+		has_restore,
+	)
+	testing.expect_value(t, next, current)
+	testing.expect_value(t, restore, Rect{})
+	testing.expect(t, !has_restore)
 }
 
 @(test)

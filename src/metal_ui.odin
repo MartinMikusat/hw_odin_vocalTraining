@@ -217,6 +217,8 @@ UI_State :: struct {
 	resize_edges:        u8,
 	resize_start_mouse:  Point,
 	resize_start_frame:  Rect,
+	window_zoom_restore_frame: Rect,
+	window_has_zoom_restore: bool,
 	needs_redraw:       bool,
 }
 
@@ -1079,7 +1081,7 @@ app_header_rect :: proc() -> UI_Rect {
 window_control_rect_for_size :: proc(index: int, height: f64) -> UI_Rect {
 	return UI_Rect{
 		38*f64(index),
-		height-31,
+		height-30,
 		30,
 		30,
 	}
@@ -1140,6 +1142,41 @@ window_frame_after_drag :: proc(
 		frame.size.height = max(WINDOW_MIN_HEIGHT, start.size.height+delta.y)
 	}
 	return frame
+}
+
+window_zoom_next_frame :: proc(
+	current, visible, restore: Rect,
+	has_restore: bool,
+) -> (next, next_restore: Rect, next_has_restore: bool) {
+	if has_restore && current == visible {
+		return restore, {}, false
+	}
+	return visible, current, true
+}
+
+toggle_window_zoom :: proc() {
+	screen := msg_id(state.window, sel_registerName("screen"))
+	if screen == nil {
+		screen = msg_id(objc_getClass("NSScreen"), sel_registerName("mainScreen"))
+	}
+	if screen == nil {return}
+	current := msg_rect(state.window, sel_registerName("frame"))
+	visible := msg_rect(screen, sel_registerName("visibleFrame"))
+	next, restore, has_restore := window_zoom_next_frame(
+		current,
+		visible,
+		ui.window_zoom_restore_frame,
+		ui.window_has_zoom_restore,
+	)
+	ui.window_zoom_restore_frame = restore
+	ui.window_has_zoom_restore = has_restore
+	msg_void_rect_b(
+		state.window,
+		sel_registerName("setFrame:display:"),
+		next,
+		true,
+	)
+	ui.needs_redraw = true
 }
 
 mode_button_rect :: proc() -> UI_Rect {
@@ -6742,7 +6779,7 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 			int(WINDOW_STYLE),
 		)
 	case .Window_Zoom:
-		msg_void_id(state.window, sel_registerName("zoom:"), nil)
+		toggle_window_zoom()
 	case .Mode_Toggle:
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 	case .Open_Source_Modal:
@@ -8238,7 +8275,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	   !contains(ui_control_rect(.Mode_Toggle), ui.mouse) {
 		cancel_ui_flash()
 		if click_count >= 2 {
-			msg_void_id(state.window, sel_registerName("performZoom:"), nil)
+			toggle_window_zoom()
 		} else {
 			msg_void_id(state.window, sel_registerName("performWindowDragWithEvent:"), event)
 		}
