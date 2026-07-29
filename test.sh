@@ -17,4 +17,5 @@ odin test "$ROOT/src" \
   -collection:match_sorter="$ROOT/../hw_odin_matchSorter" \
   -collection:flash="$ROOT/../hw_odin_ui_flash" \
   -collection:command_palette="$ROOT/../hw_odin_ui_commandPalette" \
+  -collection:components="$ROOT/../hw_odin_ui_components" \
   -extra-linker-flags:"-framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"

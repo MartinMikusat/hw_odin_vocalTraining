@@ -3978,19 +3978,19 @@ text_click_counts_select_caret_word_and_all_test :: proc(t: ^testing.T) {
 	defer delete(value)
 	previous_caret := ui.caret_byte_offset
 	previous_anchor := ui.selection_anchor_byte
-	previous_focus := ui.text_drag_focus
-	previous_granularity := ui.text_drag_granularity
-	previous_drag := ui.text_drag_active
-	previous_start := ui.text_drag_origin_start
-	previous_end := ui.text_drag_origin_end
+	previous_focus := ui.drag_field
+	previous_granularity := ui.drag_granularity
+	previous_drag := ui.drag_active
+	previous_start := ui.drag_origin_start
+	previous_end := ui.drag_origin_end
 	defer {
 		ui.caret_byte_offset = previous_caret
 		ui.selection_anchor_byte = previous_anchor
-		ui.text_drag_focus = previous_focus
-		ui.text_drag_granularity = previous_granularity
-		ui.text_drag_active = previous_drag
-		ui.text_drag_origin_start = previous_start
-		ui.text_drag_origin_end = previous_end
+		ui.drag_field = previous_focus
+		ui.drag_granularity = previous_granularity
+		ui.drag_active = previous_drag
+		ui.drag_origin_start = previous_start
+		ui.drag_origin_end = previous_end
 	}
 	begin_text_selection_at_offset(&value, .Exercise_Name, 1, 1)
 	testing.expect_value(t, ui.selection_anchor_byte, 1)
@@ -4002,7 +4002,7 @@ text_click_counts_select_caret_word_and_all_test :: proc(t: ^testing.T) {
 	start, end = text_selection_bounds(value)
 	testing.expect_value(t, start, 0)
 	testing.expect_value(t, end, len(value))
-	testing.expect(t, !ui.text_drag_active)
+	testing.expect(t, !ui.drag_active)
 }
 
 @(test)

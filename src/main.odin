@@ -2102,7 +2102,7 @@ reset_exercise_output :: proc() {
 	if ui.focus == .Exercise_Name {
 		clear_marked_text()
 		collapse_text_selection(0)
-		ui.text_scroll_x = 0
+		ui.scroll_x = 0
 	}
 	ui.needs_redraw = true
 }

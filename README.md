@@ -7,7 +7,7 @@ lessons into reusable practice exercises.
 
 Models used:
 
-- **GPT-5.6-Sol**
+- **gpt-5.6-sol**
 
 ## User guide
 
@@ -265,10 +265,13 @@ through one `CAMetalLayer`.
 
 The custom Metal view conforms to `NSTextInputClient` and routes typing through
 `interpretKeyEvents`. Command shortcuts and input methods stay on the AppKit
-path. AVPlayer decodes muted video, and Core Video maps its frames into Metal
-textures. AVAudioEngine routes audio through a time-pitch unit, so speed
-changes preserve vocal pitch. Audio configuration notifications restart and
-reschedule this graph when the default output device changes.
+path. The `text_input` package from `hw_odin_ui_components` owns editing state
+and mutations. The application owns strings, CoreText measurement, Metal
+drawing, AppKit event routing, and application actions. AVPlayer decodes muted
+video, and Core Video maps its frames into Metal textures. AVAudioEngine routes
+audio through a time-pitch unit, so speed changes preserve vocal pitch. Audio
+configuration notifications restart and reschedule this graph when the default
+output device changes.
 
 The interface uses the bundled Iosevka Regular font and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface, including the compact
@@ -438,6 +441,17 @@ external distribution:
   accepts a normal double-click launch, startup helper validation passes,
   import and clip export complete without Homebrew, and the final app size and
   embedded helper versions are recorded.
+
+### Settings migration TODO
+
+Replace the title-strip theme toggle with the common gear control and
+two-column Settings modal after the calendar implementation is stable. Put
+themes in `Styling` and the configurable Flash leader in `Shortcuts`.
+
+Complete the migration when pointer input, Accessibility, Flash, and the
+command palette dispatch the same typed actions. Add direct theme commands,
+show unavailable actions with reasons, and validate shortcut collisions before
+Save.
 
 ### Reload loop
 

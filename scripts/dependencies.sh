@@ -17,6 +17,7 @@ check_dependencies() {
   seen_match_sorter=0
   seen_ui_flash=0
   seen_command_palette=0
+  seen_ui_components=0
   while read -r name expected_url expected_revision extra; do
     case "$name" in
       ""|\#*) continue ;;
@@ -46,6 +47,13 @@ check_dependencies() {
           return 1
         }
         seen_command_palette=1
+        ;;
+      hw_odin_ui_components)
+        [ "$seen_ui_components" -eq 0 ] || {
+          echo "[vocal-training] duplicate dependency lock entry: $name" >&2
+          return 1
+        }
+        seen_ui_components=1
         ;;
       *)
         echo "[vocal-training] unknown dependency lock entry: $name" >&2
@@ -84,7 +92,8 @@ check_dependencies() {
 
   if [ "$seen_match_sorter" -ne 1 ] ||
      [ "$seen_ui_flash" -ne 1 ] ||
-     [ "$seen_command_palette" -ne 1 ]; then
+     [ "$seen_command_palette" -ne 1 ] ||
+     [ "$seen_ui_components" -ne 1 ]; then
     echo "[vocal-training] dependency lock does not contain all required repositories" >&2
     return 1
   fi
@@ -94,7 +103,7 @@ update_dependencies() {
   temporary=$(mktemp "${TMPDIR:-/tmp}/vocal-training-dependencies.XXXXXX")
   trap 'rm -f "$temporary"' EXIT HUP INT TERM
   printf '# Sibling repository, origin URL, and tested commit.\n' > "$temporary"
-  for name in hw_odin_matchSorter hw_odin_ui_flash hw_odin_ui_commandPalette; do
+  for name in hw_odin_matchSorter hw_odin_ui_flash hw_odin_ui_commandPalette hw_odin_ui_components; do
     repository=$(repository_path "$name")
     if ! git -C "$repository" rev-parse --git-dir >/dev/null 2>&1; then
       echo "[vocal-training] missing dependency checkout: $repository" >&2
