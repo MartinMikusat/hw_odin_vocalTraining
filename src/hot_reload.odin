@@ -290,6 +290,7 @@ vocal_hot_api := hot_reload.Module_API{
 		rawptr(on_metal_mouse_up),
 		rawptr(on_metal_scroll),
 		rawptr(on_metal_key_down),
+		rawptr(on_metal_flags_changed),
 		rawptr(on_metal_copy),
 		rawptr(on_metal_cut),
 		rawptr(on_metal_paste),

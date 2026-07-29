@@ -768,7 +768,7 @@ recovery_surface_blocks_normal_application_controls_test :: proc(t: ^testing.T) 
 	defer mem_virtual.arena_destroy(&frame_arena)
 	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
-	testing.expect_value(t, len(ui_build.controls), 5)
+	testing.expect_value(t, len(ui_build.controls), 6)
 	testing.expect_value(
 		t,
 		ui_build.diagnostic_surface.overlay,
@@ -777,6 +777,9 @@ recovery_surface_blocks_normal_application_controls_test :: proc(t: ^testing.T) 
 	testing.expect(t, find_ui_control_by_action(.Window_Close) != nil)
 	testing.expect(t, find_ui_control_by_action(.Window_Minimize) != nil)
 	testing.expect(t, find_ui_control_by_action(.Window_Zoom) != nil)
+	settings := find_ui_control_by_action(.Open_Settings)
+	testing.expect(t, settings != nil)
+	if settings != nil {testing.expect(t, .Enabled not_in settings.flags)}
 	testing.expect(t, find_ui_control_by_action(.Recovery_Backup_Only) != nil)
 	testing.expect(t, find_ui_control_by_action(.Recovery_Backup_With_Salvage) != nil)
 }

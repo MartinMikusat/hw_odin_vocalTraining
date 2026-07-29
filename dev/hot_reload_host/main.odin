@@ -85,6 +85,7 @@ callback_for_void3 :: proc "contextless" (command: Sel) -> rawptr {
 	case sel_registerName("mouseUp:"): kind = .Mouse_Up
 	case sel_registerName("scrollWheel:"): kind = .Scroll
 	case sel_registerName("keyDown:"): kind = .Key_Down
+	case sel_registerName("flagsChanged:"): kind = .Flags_Changed
 	case sel_registerName("copy:"): kind = .Copy
 	case sel_registerName("cut:"): kind = .Cut
 	case sel_registerName("paste:"): kind = .Paste
@@ -296,7 +297,7 @@ register_classes :: proc() -> bool {
 		class_addProtocol(view_class, protocol)
 	}
 	class_addMethod(view_class, sel_registerName("acceptsFirstResponder"), rawptr(host_bool2), "B@:")
-	view_selectors := [13]cstring{
+	view_selectors := [14]cstring{
 		"mouseDown:",
 		"rightMouseDown:",
 		"mouseMoved:",
@@ -304,6 +305,7 @@ register_classes :: proc() -> bool {
 		"mouseUp:",
 		"scrollWheel:",
 		"keyDown:",
+		"flagsChanged:",
 		"copy:",
 		"cut:",
 		"paste:",

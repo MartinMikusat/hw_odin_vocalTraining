@@ -96,6 +96,8 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 	switch {
 	case library_recovery_state.required: overlay = "library-recovery"
 	case major_change_pending.open: overlay = "backup-warning"
+	case ui.shortcut_open: overlay = "shortcut-recorder"
+	case ui.settings_open: overlay = "settings"
 	case command_palette.is_open(&command_palette_state): overlay = "command-palette"
 	case ui.notification_modal_open: overlay = "notification-history"
 	case ui.pitch.help_open: overlay = "pitch-help"

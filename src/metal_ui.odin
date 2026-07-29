@@ -43,6 +43,11 @@ foreign core_graphics {
 	CGContextBeginPath :: proc "c" (ctx: rawptr) ---
 	CGContextMoveToPoint :: proc "c" (ctx: rawptr, x, y: f64) ---
 	CGContextAddLineToPoint :: proc "c" (ctx: rawptr, x, y: f64) ---
+	CGContextAddCurveToPoint :: proc "c" (
+		ctx: rawptr,
+		cp1_x, cp1_y, cp2_x, cp2_y, x, y: f64,
+	) ---
+	CGContextClosePath :: proc "c" (ctx: rawptr) ---
 	CGContextStrokePath :: proc "c" (ctx: rawptr) ---
 	CGContextSaveGState :: proc "c" (ctx: rawptr) ---
 	CGContextRestoreGState :: proc "c" (ctx: rawptr) ---
@@ -94,6 +99,7 @@ foreign core_video {
 UI_Focus :: enum {
 	None,
 	Command_Palette,
+	Settings_Search,
 	URL,
 	Source_Search,
 	Transcript_Search,
@@ -156,6 +162,20 @@ UI_State :: struct {
 	number_prefix:      int,
 	number_prefix_deadline_ms: i64,
 	dark_theme:         bool,
+	flash_leader:       Vocal_Shortcut,
+	settings_search:    command_palette.State,
+	settings_open:      bool,
+	settings_category:  Vocal_Settings_Category,
+	settings_query:     string,
+	settings_query_focused: bool,
+	settings_error:     string,
+	shortcut_open:      bool,
+	shortcut_listening: bool,
+	shortcut_candidate: Vocal_Shortcut,
+	shortcut_candidate_valid: bool,
+	shortcut_collision: string,
+	shortcut_error:     string,
+	shortcut_live_modifiers: Vocal_Shortcut_Modifiers,
 	source_modal_open:  bool,
 	source_modal_refetch_index: int,
 	source_details_open: bool,
@@ -320,10 +340,6 @@ ui_color_32 :: proc(color: [4]f64) -> [4]f32 {
 	return {f32(color[0]), f32(color[1]), f32(color[2]), f32(color[3])}
 }
 
-ui_theme_toggle_label :: proc(dark_theme: bool) -> string {
-	return dark_theme ? "LIGHT" : "DARK"
-}
-
 WINDOW_STYLE :: uint(14)
 WINDOW_MINIMIZE_STYLE :: uint(15)
 WINDOW_RESIZE_INSET :: 6.0
@@ -358,7 +374,16 @@ UI_Action_Kind :: enum {
 	Window_Close,
 	Window_Minimize,
 	Window_Zoom,
-	Theme_Toggle,
+	Open_Settings,
+	Settings_Close,
+	Settings_Category,
+	Settings_Search,
+	Set_Theme,
+	Configure_Flash,
+	Shortcut_Record,
+	Shortcut_Save,
+	Shortcut_Reset,
+	Shortcut_Cancel,
 	Mode_Toggle,
 	Open_Source_Modal,
 	Cancel_Source_Modal,
@@ -501,6 +526,9 @@ PALETTE_CONTEXT_RANGE        :: command_palette.Context_Mask(1 << 4)
 PALETTE_CONTEXT_TIMESTAMPS   :: command_palette.Context_Mask(1 << 5)
 PALETTE_CONTEXT_IMPORT_BUSY  :: command_palette.Context_Mask(1 << 6)
 PALETTE_CONTEXT_EXPORT_BUSY  :: command_palette.Context_Mask(1 << 7)
+PALETTE_CONTEXT_SETTINGS     :: command_palette.Context_Mask(1 << 8)
+PALETTE_CONTEXT_LIGHT_THEME  :: command_palette.Context_Mask(1 << 9)
+PALETTE_CONTEXT_DARK_THEME   :: command_palette.Context_Mask(1 << 10)
 
 CONTROL_URL :: Id(rawptr(uintptr(1)))
 CONTROL_STATUS :: Id(rawptr(uintptr(2)))
@@ -893,6 +921,8 @@ focused_text :: proc() -> ^string {
 	#partial switch ui.focus {
 	case .Command_Palette:
 		return &ui.command_palette_query
+	case .Settings_Search:
+		return &ui.settings_query
 	case .URL:
 		return &ui.url_input
 	case .Source_Search:
@@ -926,6 +956,17 @@ focused_text_changed :: proc(target: ^string) {
 		}
 		ui.command_palette_scroll = 0
 		ensure_command_palette_selection_visible()
+	}
+	if target == &ui.settings_query {
+		if error := command_palette.set_query(
+			&ui.settings_search,
+			ui.settings_query,
+		); error != .None {
+			ui_set_string(
+				&ui.settings_query,
+				command_palette.query(&ui.settings_search),
+			)
+		}
 	}
 	if target == &ui.url_input {schedule_source_probe(30)}
 	if target == &ui.transcript_search {invalidate_transcript_matches()}
@@ -996,13 +1037,17 @@ mode_button_rect_for_size :: proc(width, height: f64) -> UI_Rect {
 	return UI_Rect{max(18, width - 214), height - 31, 196, 24}
 }
 
-theme_button_rect_for_size :: proc(width, height: f64) -> UI_Rect {
-	mode := mode_button_rect_for_size(width, height)
-	return UI_Rect{mode.x-70, height-31, 62, 24}
+settings_button_rect_for_size :: proc(height: f64) -> UI_Rect {
+	return window_control_rect_for_size(3, height)
 }
 
-theme_button_rect :: proc() -> UI_Rect {
-	return theme_button_rect_for_size(ui.width, ui.height)
+settings_button_rect :: proc() -> UI_Rect {
+	return settings_button_rect_for_size(ui.height)
+}
+
+settings_icon_rect :: proc() -> UI_Rect {
+	control := settings_button_rect()
+	return {control.x+5, control.y+5, 20, 20}
 }
 
 app_header_rect_for_size :: proc(width, height: f64) -> UI_Rect {
@@ -1032,12 +1077,12 @@ window_icon_rect :: proc(index: int) -> UI_Rect {
 }
 
 app_title_rect_for_size :: proc(width, height: f64) -> UI_Rect {
-	theme := theme_button_rect_for_size(width, height)
-	x := 122.0
+	mode := mode_button_rect_for_size(width, height)
+	x := 160.0
 	return UI_Rect{
 		x,
 		height-APP_HEADER_HEIGHT+2,
-		max(0, theme.x-x-12),
+		max(0, mode.x-x-12),
 		APP_HEADER_HEIGHT-2,
 	}
 }
@@ -2107,9 +2152,35 @@ event_opens_command_palette :: proc(event: Id, modifiers: uint) -> bool {
 	)
 }
 
-flash_leader_allowed :: proc(focus: UI_Focus, modifiers: uint, text: string) -> bool {
-	blocked := NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand
-	return focus == .None && modifiers & blocked == 0 && text == "/"
+event_opens_settings :: proc(event: Id, modifiers: uint) -> bool {
+	required := NSEventModifierFlagCommand
+	relevant :=
+		NSEventModifierFlagShift |
+		NSEventModifierFlagControl |
+		NSEventModifierFlagOption |
+		NSEventModifierFlagCommand
+	if modifiers & relevant != required {return false}
+	characters := msg_id(
+		event,
+		sel_registerName("charactersIgnoringModifiers"),
+	)
+	text, ok := text_input_string(characters)
+	return ok && text == ","
+}
+
+flash_leader_allowed :: proc(
+	focus: UI_Focus,
+	key_code: uint,
+	modifiers: uint,
+	text: string,
+) -> bool {
+	return focus == .None &&
+	       vocal_shortcut_matches_event(
+			ui.flash_leader,
+			key_code,
+			text,
+			modifiers,
+	       )
 }
 
 Text_Input_Key_Disposition :: enum {
@@ -3332,6 +3403,111 @@ draw_window_icon_path :: proc(
 	CGContextStrokePath(ctx)
 }
 
+settings_icon_point :: proc(rect: UI_Rect, x, y: f64) -> Point {
+	return {
+		(rect.x+x*rect.w/24)*ui.scale,
+		(rect.y+(24-y)*rect.h/24)*ui.scale,
+	}
+}
+
+draw_settings_icon :: proc(ctx: rawptr, rect: UI_Rect, color: [4]f64) {
+	CGContextSaveGState(ctx)
+	defer CGContextRestoreGState(ctx)
+	CGContextClipToRect(
+		ctx,
+		Rect{
+			Point{rect.x*ui.scale, rect.y*ui.scale},
+			Size{rect.w*ui.scale, rect.h*ui.scale},
+		},
+	)
+	CGContextSetRGBStrokeColor(
+		ctx,
+		color[0],
+		color[1],
+		color[2],
+		color[3],
+	)
+	CGContextSetLineWidth(
+		ctx,
+		1.5*ui.scale*min(rect.w, rect.h)/24,
+	)
+	CGContextSetLineCap(ctx, 1)
+	CGContextSetLineJoin(ctx, 1)
+	CGContextBeginPath(ctx)
+	p := settings_icon_point(rect, 12, 15)
+	CGContextMoveToPoint(ctx, p.x, p.y)
+	c1 := settings_icon_point(rect, 13.6569, 15)
+	c2 := settings_icon_point(rect, 15, 13.6569)
+	p = settings_icon_point(rect, 15, 12)
+	CGContextAddCurveToPoint(ctx, c1.x, c1.y, c2.x, c2.y, p.x, p.y)
+	c1 = settings_icon_point(rect, 15, 10.3431)
+	c2 = settings_icon_point(rect, 13.6569, 9)
+	p = settings_icon_point(rect, 12, 9)
+	CGContextAddCurveToPoint(ctx, c1.x, c1.y, c2.x, c2.y, p.x, p.y)
+	c1 = settings_icon_point(rect, 10.3431, 9)
+	c2 = settings_icon_point(rect, 9, 10.3431)
+	p = settings_icon_point(rect, 9, 12)
+	CGContextAddCurveToPoint(ctx, c1.x, c1.y, c2.x, c2.y, p.x, p.y)
+	c1 = settings_icon_point(rect, 9, 13.6569)
+	c2 = settings_icon_point(rect, 10.3431, 15)
+	p = settings_icon_point(rect, 12, 15)
+	CGContextAddCurveToPoint(ctx, c1.x, c1.y, c2.x, c2.y, p.x, p.y)
+	CGContextClosePath(ctx)
+
+	gear := [30]Point{
+		{19.6224, 10.3954},
+		{18.5247, 7.7448},
+		{20, 6},
+		{18, 4},
+		{16.2647, 5.48295},
+		{13.5578, 4.36974},
+		{12.9353, 2},
+		{10.981, 2},
+		{10.3491, 4.40113},
+		{7.70441, 5.51596},
+		{6, 4},
+		{4, 6},
+		{5.45337, 7.78885},
+		{4.3725, 10.4463},
+		{2, 11},
+		{2, 13},
+		{4.40111, 13.6555},
+		{5.51575, 16.2997},
+		{4, 18},
+		{6, 20},
+		{7.79116, 18.5403},
+		{10.397, 19.6123},
+		{11, 22},
+		{13, 22},
+		{13.6045, 19.6132},
+		{16.2551, 18.5155},
+		{18.5159, 16.2494},
+		{19.6139, 13.598},
+		{21.9999, 12.9772},
+		{22, 11},
+	}
+	p = settings_icon_point(rect, gear[0].x, gear[0].y)
+	CGContextMoveToPoint(ctx, p.x, p.y)
+	for index in 1..<26 {
+		p = settings_icon_point(rect, gear[index].x, gear[index].y)
+		CGContextAddLineToPoint(ctx, p.x, p.y)
+	}
+	c1 = settings_icon_point(rect, 16.6969, 18.8313)
+	c2 = settings_icon_point(rect, 18, 20)
+	p = settings_icon_point(rect, 18, 20)
+	CGContextAddCurveToPoint(ctx, c1.x, c1.y, c2.x, c2.y, p.x, p.y)
+	p = settings_icon_point(rect, 20, 18)
+	CGContextAddLineToPoint(ctx, p.x, p.y)
+	for index in 26..<len(gear) {
+		p = settings_icon_point(rect, gear[index].x, gear[index].y)
+		CGContextAddLineToPoint(ctx, p.x, p.y)
+	}
+	p = settings_icon_point(rect, 19.6224, 10.3954)
+	CGContextAddLineToPoint(ctx, p.x, p.y)
+	CGContextClosePath(ctx)
+	CGContextStrokePath(ctx)
+}
+
 draw_window_controls :: proc(ctx: rawptr) {
 	theme := ui_theme_colors()
 	colors := [3][4]f64{
@@ -3375,6 +3551,11 @@ draw_window_controls :: proc(ctx: rawptr) {
 		colors[2],
 		maximize[:],
 	)
+	settings_control := settings_button_rect()
+	background := theme.panel_alt
+	if contains(settings_control, ui.mouse) {background = theme.row_hover}
+	fill_overlay_rect(ctx, settings_control, background)
+	draw_settings_icon(ctx, settings_icon_rect(), theme.muted)
 }
 
 flash_badge_rect :: proc(target: flash.Target, label_length: int, view_width, view_height: f64) -> UI_Rect {
@@ -4731,8 +4912,6 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	orange := UI_COLOR_COFFEE_32
 	push_rect(vertices, UI_Rect{0, 0, ui.width, ui.height}, chassis)
 	push_rect(vertices, app_header_rect(), ui_color_32(theme.header))
-	theme_rect := ui_control_rect(.Theme_Toggle)
-	push_rect(vertices, theme_rect, panel_alt)
 	mode_rect := ui_control_rect(.Mode_Toggle)
 	mode_color := panel_alt
 	if contains(mode_rect, ui.mouse) {mode_color = row_hover}
@@ -5087,6 +5266,261 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		push_border(vertices, focus_rect, orange)
 		push_rect(vertices, UI_Rect{focus_rect.x, focus_rect.y, 3, focus_rect.h}, orange)
 	}
+	if ui.settings_open && !ui.shortcut_open {
+		push_rect(
+			vertices,
+			{0, 0, ui.width, ui.height},
+			ui_color_32(theme.backdrop),
+		)
+		push_rect(vertices, vocal_settings_rect(), ui_color_32(theme.modal))
+		search := vocal_settings_search_rect()
+		push_rect(vertices, search, field)
+		if ui.focus == .Settings_Search {
+			push_border(vertices, search, UI_COLOR_GUM_32)
+		}
+		push_rect(vertices, vocal_settings_close_rect(), panel_alt)
+		categories := [2]Vocal_Settings_Category{.Styling, .Shortcuts}
+		for category, index in categories {
+			rect := vocal_settings_category_rect(index)
+			color := panel_alt
+			if contains(rect, ui.mouse) {color = row_hover}
+			push_rect(vertices, rect, color)
+			if !vocal_settings_search_active() &&
+			   category == ui.settings_category {
+				push_border(vertices, rect, UI_COLOR_GUM_32)
+				push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
+			}
+		}
+		for descriptor, index in vocal_settings_result_descriptors() {
+			rect := vocal_settings_result_rect(index)
+			color := panel_alt
+			if contains(rect, ui.mouse) {color = row_hover}
+			push_rect(vertices, rect, color)
+			if descriptor.action.kind == .Set_Theme &&
+			   (descriptor.action.value != 0) == ui.dark_theme {
+				push_border(vertices, rect, UI_COLOR_GUM_32)
+				push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
+			}
+		}
+	}
+	if ui.shortcut_open {
+		push_rect(
+			vertices,
+			{0, 0, ui.width, ui.height},
+			ui_color_32(theme.backdrop),
+		)
+		push_rect(
+			vertices,
+			vocal_shortcut_modal_rect(),
+			ui_color_32(theme.modal),
+		)
+		record := vocal_shortcut_record_rect()
+		push_rect(vertices, record, field)
+		if ui.shortcut_listening {
+			push_border(vertices, record, UI_COLOR_GUM_32)
+		}
+		for index in 0..<3 {
+			rect := vocal_shortcut_action_rect(index)
+			color := panel_alt
+			if contains(rect, ui.mouse) {color = row_hover}
+			push_rect(vertices, rect, color)
+		}
+		if ui.shortcut_candidate_valid &&
+		   len(ui.shortcut_collision) == 0 {
+			push_border(
+				vertices,
+				vocal_shortcut_action_rect(0),
+				UI_COLOR_COFFEE_32,
+			)
+		}
+	}
+}
+
+draw_settings_overlays :: proc(
+	ctx, font: rawptr,
+	ink, bright, muted, dim, orange, cyan: [4]f64,
+) {
+	if ui.settings_open {
+		theme := ui_theme_colors()
+		fill_overlay_rect(ctx, {0, 0, ui.width, ui.height}, theme.backdrop)
+		modal := vocal_settings_rect()
+		fill_overlay_rect(ctx, modal, theme.modal)
+		draw_editable_text_field(
+			ctx,
+			font,
+			ui.settings_query,
+			"SEARCH SETTINGS",
+			vocal_settings_search_rect(),
+			.Settings_Search,
+			ink,
+			muted,
+			cyan,
+		)
+		xmark := window_icon_xmark_points()
+		close := vocal_settings_close_rect()
+		draw_window_icon_path(
+			ctx,
+			{close.x+5, close.y+8, 18, 18},
+			muted,
+			xmark[:],
+		)
+		categories := [2]Vocal_Settings_Category{.Styling, .Shortcuts}
+		for category, index in categories {
+			color := muted
+			if !vocal_settings_search_active() &&
+			   category == ui.settings_category {
+				color = ink
+			}
+			draw_text_in_rect(
+				ctx,
+				font,
+				fmt.tprintf(
+					"%s  %02d",
+					vocal_settings_category_name(category),
+					vocal_settings_category_match_count(category),
+				),
+				vocal_settings_category_rect(index),
+				.Start,
+				.Center,
+				color,
+				8,
+			)
+		}
+		for descriptor, index in vocal_settings_result_descriptors() {
+			rect := vocal_settings_result_rect(index)
+			draw_text_in_rect(
+				ctx,
+				font,
+				descriptor.title,
+				{rect.x+8, rect.y, rect.w*0.58, rect.h},
+				.Start,
+				.Center,
+				ink,
+			)
+			value := ""
+			value_color := muted
+			if descriptor.action.kind == .Set_Theme &&
+			   (descriptor.action.value != 0) == ui.dark_theme {
+				value = "CURRENT"
+				value_color = cyan
+			} else if descriptor.action.kind == .Configure_Flash {
+				value = vocal_shortcut_display(ui.flash_leader)
+			}
+			draw_text_in_rect(
+				ctx,
+				font,
+				value,
+				{rect.x+rect.w*0.60, rect.y, rect.w*0.38-8, rect.h},
+				.End,
+				.Center,
+				value_color,
+			)
+		}
+		if len(ui.settings_error) > 0 {
+			content := vocal_settings_content_rect()
+			draw_text_in_rect(
+				ctx,
+				font,
+				ui.settings_error,
+				{content.x, content.y, content.w, 24},
+				.Start,
+				.Center,
+				orange,
+			)
+		}
+	}
+	if ui.shortcut_open {
+		theme := ui_theme_colors()
+		fill_overlay_rect(ctx, {0, 0, ui.width, ui.height}, theme.backdrop)
+		modal := vocal_shortcut_modal_rect()
+		fill_overlay_rect(ctx, modal, theme.modal)
+		draw_text_in_rect(
+			ctx,
+			font,
+			"CONFIGURE FLASH LEADER",
+			{modal.x+24, modal.y+modal.h-50, modal.w-48, 30},
+			.Start,
+			.Center,
+			bright,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			"PRESS ONE KEY WITH ANY COMMAND, CONTROL, OPTION, OR SHIFT MODIFIERS",
+			{modal.x+24, modal.y+modal.h-80, modal.w-48, 22},
+			.Start,
+			.Center,
+			muted,
+		)
+		record_text := "PRESS A KEY…"
+		if ui.shortcut_candidate_valid {
+			record_text = vocal_shortcut_display(ui.shortcut_candidate)
+		} else if ui.shortcut_listening &&
+		          ui.shortcut_live_modifiers != {} {
+			record_text = vocal_shortcut_display(Vocal_Shortcut{
+				kind = .Character,
+				key = "…",
+				modifiers = ui.shortcut_live_modifiers,
+			})
+		}
+		draw_text_in_rect(
+			ctx,
+			font,
+			record_text,
+			vocal_shortcut_record_rect(),
+			.Center,
+			.Center,
+			ui.shortcut_listening ? cyan : ink,
+		)
+		status := ui.shortcut_collision
+		if len(status) == 0 {status = ui.shortcut_error}
+		if len(status) > 0 {
+			draw_text_in_rect(
+				ctx,
+				font,
+				status,
+				{modal.x+24, modal.y+64, modal.w-48, 18},
+				.Start,
+				.Center,
+				orange,
+			)
+		}
+		save_color := dim
+		if ui.shortcut_candidate_valid &&
+		   len(ui.shortcut_collision) == 0 {
+			save_color = orange
+		}
+		draw_text_in_rect(
+			ctx,
+			font,
+			"01  SAVE",
+			vocal_shortcut_action_rect(0),
+			.Start,
+			.Center,
+			save_color,
+			12,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			"02  RESET DEFAULT",
+			vocal_shortcut_action_rect(1),
+			.Start,
+			.Center,
+			ink,
+			12,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			"03  CANCEL",
+			vocal_shortcut_action_rect(2),
+			.Start,
+			.Center,
+			muted,
+			12,
+		)
+	}
 }
 
 build_text_overlay :: proc(width, height: uint) -> []u8 {
@@ -5137,16 +5571,6 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		.Center,
 		bright,
 		86,
-	)
-	theme_rect := ui_control_rect(.Theme_Toggle)
-	draw_text_in_rect(
-		ctx,
-		small_font,
-		ui_theme_toggle_label(ui.dark_theme),
-		theme_rect,
-		.Center,
-		.Center,
-		ui.dark_theme ? UI_COLOR_SAND_64 : UI_COLOR_BASALT_64,
 	)
 	mode_rect := ui_control_rect(.Mode_Toggle)
 	mode_text := "MODE / BUILD EXERCISES"
@@ -6203,6 +6627,16 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			ui.status_error ? danger : (ui.status_success ? success : muted),
 		)
 	}
+	draw_settings_overlays(
+		ctx,
+		small_font,
+		ink,
+		bright,
+		muted,
+		dim,
+		orange,
+		cyan,
+	)
 	draw_command_palette(ctx, small_font, bright, muted, dim, orange, cyan)
 	draw_library_recovery(
 		ctx,
@@ -6387,6 +6821,13 @@ ui_controls_valid :: proc(controls: []UI_Control) -> bool {
 
 ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Command_Palette_Disabled {return false}
+	if kind == .Open_Settings {
+		return !library_recovery_state.required && !major_change_pending.open
+	}
+	if kind == .Shortcut_Save {
+		return ui.shortcut_candidate_valid &&
+		       len(ui.shortcut_collision) == 0
+	}
 	if kind == .Activate_Notification_Action {
 		return notification_action_available(notification_selected())
 	}
@@ -6514,7 +6955,7 @@ add_ax_element :: proc(
 		flags += {.Secondary_Press}
 	}
 	#partial switch kind {
-	case .Command_Palette_Search, .URL, .Source_Search, .Transcript_Search, .Exercise_Search, .Exercise_Name, .Exercise_Rename:
+	case .Command_Palette_Search, .Settings_Search, .URL, .Source_Search, .Transcript_Search, .Exercise_Search, .Exercise_Name, .Exercise_Rename:
 		flags += {.Editable, .Drag}
 	}
 	control := UI_Control {
@@ -6565,6 +7006,33 @@ add_ax_element :: proc(
 			checked,
 		)
 		msg_void_id(element, sel_registerName("setAccessibilityValue:"), value)
+	}
+	if kind == .Set_Theme {
+		value := msg_id_uint(
+			objc_getClass("NSNumber"),
+			sel_registerName("numberWithUnsignedInt:"),
+			uint((value != 0) == ui.dark_theme),
+		)
+		msg_void_id(element, sel_registerName("setAccessibilityValue:"), value)
+	} else if kind == .Settings_Category {
+		value := msg_id_uint(
+			objc_getClass("NSNumber"),
+			sel_registerName("numberWithUnsignedInt:"),
+			uint(index == int(ui.settings_category)),
+		)
+		msg_void_id(element, sel_registerName("setAccessibilityValue:"), value)
+	} else if kind == .Settings_Search {
+		msg_void_id(
+			element,
+			sel_registerName("setAccessibilityValue:"),
+			nsstring(ui.settings_query),
+		)
+	} else if kind == .Configure_Flash {
+		msg_void_id(
+			element,
+			sel_registerName("setAccessibilityValue:"),
+			nsstring(vocal_shortcut_display(ui.flash_leader)),
+		)
 	}
 	msg_void_bool(element, sel_registerName("setAccessibilityEnabled:"), enabled)
 	msg_void_rect(element, sel_registerName("setAccessibilityFrame:"), ax_screen_rect(rect))
@@ -6624,6 +7092,18 @@ add_window_controls :: proc(array, element_class: Id) {
 			action,
 			flash_label = flash_labels[index],
 			functional_name = names[index],
+		)
+	}
+	if !ui.shortcut_open {
+		add_ax_element(
+			array,
+			element_class,
+			"Open Settings",
+			"AXButton",
+			settings_button_rect(),
+			.Open_Settings,
+			flash_label = "settings",
+			functional_name = "settings",
 		)
 	}
 }
@@ -6725,6 +7205,130 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			.Backup_Warning_Continue,
 			flash_label = "continue without backup",
 		)
+		validate_ui_controls()
+		return
+	}
+	if ui.shortcut_open {
+		record := vocal_shortcut_record_rect()
+		if !ui.shortcut_listening {
+			add_ax_element(
+				array,
+				element_class,
+				"Record another Flash leader",
+				"AXButton",
+				record,
+				.Shortcut_Record,
+				flash_label = "record shortcut",
+			)
+		}
+		save_enabled := ui.shortcut_candidate_valid &&
+		                len(ui.shortcut_collision) == 0
+		if save_enabled {
+			add_ax_element(
+				array,
+				element_class,
+				"01 Save Flash leader",
+				"AXButton",
+				vocal_shortcut_action_rect(0),
+				.Shortcut_Save,
+				flash_label = "save shortcut",
+			)
+		} else {
+			add_ax_element(
+				array,
+				element_class,
+				"01 Save Flash leader, unavailable",
+				"AXStaticText",
+				vocal_shortcut_action_rect(0),
+				.Command_Palette_Disabled,
+				flash_label = "save shortcut",
+				functional_name = "shortcut save disabled",
+			)
+		}
+		add_ax_element(
+			array,
+			element_class,
+			"02 Reset Flash leader to slash",
+			"AXButton",
+			vocal_shortcut_action_rect(1),
+			.Shortcut_Reset,
+			flash_label = "reset shortcut",
+		)
+		add_ax_element(
+			array,
+			element_class,
+			"03 Cancel Flash leader configuration",
+			"AXButton",
+			vocal_shortcut_action_rect(2),
+			.Shortcut_Cancel,
+			flash_label = "cancel shortcut",
+		)
+		validate_ui_controls()
+		return
+	}
+	if ui.settings_open {
+		add_ax_element(
+			array,
+			element_class,
+			"Search Settings",
+			"AXTextField",
+			vocal_settings_search_rect(),
+			.Settings_Search,
+			flash_label = "search settings",
+		)
+		add_ax_element(
+			array,
+			element_class,
+			"Close Settings",
+			"AXButton",
+			vocal_settings_close_rect(),
+			.Settings_Close,
+			flash_label = "close settings",
+		)
+		categories := [2]Vocal_Settings_Category{.Styling, .Shortcuts}
+		for category, index in categories {
+			add_ax_element(
+				array,
+				element_class,
+				fmt.tprintf(
+					"Show %s settings",
+					vocal_settings_category_name(category),
+				),
+				"AXRadioButton",
+				vocal_settings_category_rect(index),
+				.Settings_Category,
+				index,
+				flash_label = fmt.tprintf(
+					"%s settings",
+					vocal_settings_category_name(category),
+				),
+				functional_name = fmt.tprintf(
+					"settings category %s",
+					vocal_settings_category_name(category),
+				),
+			)
+		}
+		for descriptor, index in vocal_settings_result_descriptors() {
+			role := "AXButton"
+			if descriptor.action.kind == .Set_Theme {role = "AXRadioButton"}
+			add_ax_element(
+				array,
+				element_class,
+				descriptor.title,
+				role,
+				vocal_settings_result_rect(index),
+				descriptor.action.kind,
+				value = descriptor.action.value,
+				flash_label = strings.to_lower(
+					descriptor.title,
+					context.temp_allocator,
+				),
+				functional_name = fmt.tprintf(
+					"setting:%d",
+					descriptor.id,
+				),
+			)
+		}
 		validate_ui_controls()
 		return
 	}
@@ -7169,18 +7773,6 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	theme_label := "Switch to dark theme"
-	if ui.dark_theme {theme_label = "Switch to light theme"}
-	add_ax_element(
-		array,
-		element_class,
-		theme_label,
-		"AXButton",
-		theme_button_rect(),
-		.Theme_Toggle,
-		flash_label = "toggle theme",
-		functional_name = "theme toggle",
-	)
 	toggle_label := "Switch to Play mode"
 	if ui.mode == .Play {toggle_label = "Switch to Create mode"}
 	add_ax_element(
@@ -7638,12 +8230,35 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		)
 	case .Window_Zoom:
 		toggle_window_zoom()
-	case .Theme_Toggle:
-		ui.dark_theme = !ui.dark_theme
-		if !database_interface_theme_save(library_database, ui.dark_theme) {
-			fmt.eprintln("[vocal-training] could not persist the interface theme")
+	case .Open_Settings:
+		if command_palette.is_open(&command_palette_state) {
+			close_command_palette(false)
 		}
-		ui.needs_redraw = true
+		return vocal_settings_open()
+	case .Settings_Close:
+		vocal_settings_close()
+	case .Settings_Category:
+		if action.index >= 0 &&
+		   action.index <= int(Vocal_Settings_Category.Shortcuts) {
+			ui.settings_category = Vocal_Settings_Category(action.index)
+			ui.settings_query_focused = false
+			if ui.focus == .Settings_Search {_ = unfocus_text_input()}
+		}
+	case .Settings_Search:
+		ui.settings_query_focused = true
+		focus_text_input(.Settings_Search)
+	case .Set_Theme:
+		return vocal_settings_apply_theme(action.value != 0)
+	case .Configure_Flash:
+		vocal_shortcut_recorder_open()
+	case .Shortcut_Record:
+		vocal_shortcut_recorder_open()
+	case .Shortcut_Save:
+		return vocal_shortcut_recorder_save()
+	case .Shortcut_Reset:
+		return vocal_shortcut_recorder_reset()
+	case .Shortcut_Cancel:
+		vocal_shortcut_recorder_close()
 	case .Mode_Toggle:
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 	case .Open_Source_Modal:
@@ -7870,6 +8485,12 @@ palette_active_context :: proc() -> command_palette.Context_Mask {
 	}
 	if import_job != nil {bits |= u64(PALETTE_CONTEXT_IMPORT_BUSY)}
 	if export_job != nil {bits |= u64(PALETTE_CONTEXT_EXPORT_BUSY)}
+	if ui.settings_open {bits |= u64(PALETTE_CONTEXT_SETTINGS)}
+	if ui.dark_theme {
+		bits |= u64(PALETTE_CONTEXT_DARK_THEME)
+	} else {
+		bits |= u64(PALETTE_CONTEXT_LIGHT_THEME)
+	}
 	return command_palette.Context_Mask(bits)
 }
 
@@ -7912,6 +8533,47 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 	entries := make([dynamic]command_palette.Entry, allocator)
 	clear(&command_palette_actions)
 	busy := palette_busy_mask()
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Open_Settings},
+		"Open Settings",
+		"Search and configure application settings",
+		"Command",
+		[]string{"preferences", "configuration", "gear"},
+		palette_condition(none = PALETTE_CONTEXT_SETTINGS),
+		"Settings is already open",
+	)
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Configure_Flash},
+		"Configure leader key for Flash",
+		fmt.tprintf(
+			"Current shortcut: %s",
+			vocal_shortcut_display(ui.flash_leader),
+		),
+		"Shortcut",
+		[]string{"keyboard", "shortcut", "leader", "jump", "navigation"},
+	)
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Set_Theme, value = 0},
+		"Switch theme to light mode",
+		"HW Light interface theme",
+		"Theme",
+		[]string{"appearance", "style", "light", "HW Light"},
+		palette_condition(none = PALETTE_CONTEXT_LIGHT_THEME),
+		"Current theme",
+	)
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Set_Theme, value = 1},
+		"Switch theme to dark mode",
+		"HW Dark interface theme",
+		"Theme",
+		[]string{"appearance", "style", "dark", "HW Dark"},
+		palette_condition(none = PALETTE_CONTEXT_DARK_THEME),
+		"Current theme",
+	)
 	mode_context := PALETTE_CONTEXT_CREATE
 	mode_title := "Switch to Play mode"
 	mode_subtitle := "Open the saved exercise library"
@@ -8192,6 +8854,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 
 begin_command_palette :: proc() -> bool {
 	if command_palette.is_open(&command_palette_state) {return true}
+	if ui.settings_open {vocal_settings_close()}
 	cancel_ui_flash()
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
@@ -8327,6 +8990,26 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 		)
 	case .Command_Palette_Search:
 		return nsstring(ui.command_palette_query)
+	case .Settings_Search:
+		return nsstring(ui.settings_query)
+	case .Set_Theme:
+		checked := uint(0)
+		if (control.action.value != 0) == ui.dark_theme {checked = 1}
+		return msg_id_uint(
+			objc_getClass("NSNumber"),
+			sel_registerName("numberWithUnsignedInt:"),
+			checked,
+		)
+	case .Settings_Category:
+		checked := uint(0)
+		if control.action.index == int(ui.settings_category) {checked = 1}
+		return msg_id_uint(
+			objc_getClass("NSNumber"),
+			sel_registerName("numberWithUnsignedInt:"),
+			checked,
+		)
+	case .Configure_Flash:
+		return nsstring(vocal_shortcut_display(ui.flash_leader))
 	case .URL:
 		return nsstring(ui.url_input)
 	case .Source_Search:
@@ -8369,6 +9052,10 @@ on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
 		}
 		ui.command_palette_scroll = 0
 		ensure_command_palette_selection_visible()
+	case .Settings_Search:
+		ui_set_string(&ui.settings_query, text)
+		focused_text_changed(&ui.settings_query)
+		focus_text_input(.Settings_Search)
 	case .URL:
 		ui_set_string(&ui.url_input, text)
 	case .Source_Search:
@@ -8554,6 +9241,12 @@ ui_memory_destroy :: proc() {
 	delete(ui.exercise_name)
 	delete(ui.exercise_rename)
 	delete(ui.command_palette_query)
+	delete(ui.settings_query)
+	delete(ui.settings_error)
+	delete(ui.shortcut_collision)
+	delete(ui.shortcut_error)
+	vocal_shortcut_destroy(&ui.flash_leader)
+	vocal_shortcut_destroy(&ui.shortcut_candidate)
 	delete(ui.status)
 	delete(ui.status_source_video_id)
 	text_input.destroy(&ui.input_state)
@@ -8562,6 +9255,7 @@ ui_memory_destroy :: proc() {
 	delete(command_palette_actions)
 	flash.state_destroy(&flash_state)
 	command_palette.state_destroy(&command_palette_state)
+	command_palette.state_destroy(&ui.settings_search)
 	ui = {}
 	ax_actions = nil
 	ui_build = {}
@@ -9109,6 +9803,14 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
+	if ui.shortcut_open {
+		_ = activate_registered_target_at_point(point, click_count)
+		return
+	}
+	if ui.settings_open {
+		_ = activate_registered_target_at_point(point, click_count)
+		return
+	}
 	if ui.notification_modal_open {
 		modal := notification_modal_rect()
 		if !contains(modal, point) {close_notification_history(); return}
@@ -9653,6 +10355,54 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	modifiers := msg_uint(event, sel_registerName("modifierFlags"))
 	characters := msg_id(event, sel_registerName("characters"))
 	event_text, has_event_text := text_input_string(characters)
+	shortcut_characters := msg_id(
+		event,
+		sel_registerName("charactersIgnoringModifiers"),
+	)
+	shortcut_text, has_shortcut_text :=
+		text_input_string(shortcut_characters)
+	if ui.shortcut_open {
+		if key == 53 {
+			vocal_shortcut_recorder_close()
+			return
+		}
+		relevant :=
+			NSEventModifierFlagShift |
+			NSEventModifierFlagControl |
+			NSEventModifierFlagOption |
+			NSEventModifierFlagCommand
+		if modifiers & relevant == 0 {
+			if digit, found := number_digit_for_key_code(key); found {
+				switch digit {
+				case 1:
+					_ = vocal_shortcut_recorder_save()
+				case 2:
+					_ = vocal_shortcut_recorder_reset()
+				case 3:
+					vocal_shortcut_recorder_close()
+				case:
+				}
+				return
+			}
+		}
+		if has_shortcut_text {
+			_ = vocal_shortcut_recorder_capture(
+				key,
+				shortcut_text,
+				modifiers,
+			)
+		} else {
+			_ = vocal_shortcut_recorder_capture(key, "", modifiers)
+		}
+		return
+	}
+	if event_opens_settings(event, modifiers) {
+		if command_palette.is_open(&command_palette_state) {
+			close_command_palette(false)
+		}
+		_ = vocal_settings_open()
+		return
+	}
 	palette_shortcut := event_opens_command_palette(event, modifiers)
 	if command_palette.is_open(&command_palette_state) {
 		if palette_shortcut || key == 53 {
@@ -9709,7 +10459,44 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		if result.kind == .Activated {_ = activate_flash_target(result.target_id)}
 		return
 	}
-	if has_event_text && flash_leader_allowed(ui.focus, modifiers, event_text) {
+	if ui.settings_open {
+		if ui.focus == .Settings_Search {
+			if key == 53 {
+				_ = unfocus_text_input()
+				ui.settings_query_focused = false
+				return
+			}
+		} else {
+			if key == 53 {
+				vocal_settings_close()
+			} else if key == 48 {
+				ui.settings_query_focused = true
+				focus_text_input(.Settings_Search)
+			} else if key == 125 {
+				ui.settings_category = .Shortcuts
+				ui.needs_redraw = true
+			} else if key == 126 {
+				ui.settings_category = .Styling
+				ui.needs_redraw = true
+			} else if has_shortcut_text &&
+			          flash_leader_allowed(
+						.None,
+						key,
+						modifiers,
+						shortcut_text,
+			          ) {
+				_ = begin_ui_flash()
+			}
+			return
+		}
+	}
+	if has_shortcut_text &&
+	   flash_leader_allowed(
+			ui.focus,
+			key,
+			modifiers,
+			shortcut_text,
+	   ) {
 		_ = begin_ui_flash()
 		return
 	}
@@ -9808,6 +10595,15 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	array := msg_id_id(objc_getClass("NSArray"), sel_registerName("arrayWithObject:"), event)
 	msg_void_id(self, sel_registerName("interpretKeyEvents:"), array)
+}
+
+on_metal_flags_changed :: proc "c" (self: Id, command: Sel, event: Id) {
+	context = runtime.default_context()
+	if !ui.shortcut_open || !ui.shortcut_listening {return}
+	modifiers := msg_uint(event, sel_registerName("modifierFlags"))
+	ui.shortcut_live_modifiers =
+		vocal_shortcut_modifiers_from_event(modifiers)
+	ui.needs_redraw = true
 }
 
 on_metal_set_marked :: proc "c" (
@@ -10035,6 +10831,12 @@ register_metal_view_class :: proc() -> Id {
 	class_addMethod(class, sel_registerName("mouseUp:"), rawptr(on_metal_mouse_up), "v@:@")
 	class_addMethod(class, sel_registerName("scrollWheel:"), rawptr(on_metal_scroll), "v@:@")
 	class_addMethod(class, sel_registerName("keyDown:"), rawptr(on_metal_key_down), "v@:@")
+	class_addMethod(
+		class,
+		sel_registerName("flagsChanged:"),
+		rawptr(on_metal_flags_changed),
+		"v@:@",
+	)
 	class_addMethod(class, sel_registerName("copy:"), rawptr(on_metal_copy), "v@:@")
 	class_addMethod(class, sel_registerName("cut:"), rawptr(on_metal_cut), "v@:@")
 	class_addMethod(class, sel_registerName("paste:"), rawptr(on_metal_paste), "v@:@")
@@ -10202,6 +11004,16 @@ vocal_gui_initialize :: proc(
 		&ui.pitch,
 		database_pitch_settings_load(library_database),
 	)
+	ui.flash_leader = vocal_shortcut_clone(vocal_shortcut_default())
+	if encoded, found := database_flash_leader_load(
+		library_database,
+		context.temp_allocator,
+	); found {
+		if decoded, valid := vocal_shortcut_deserialize(encoded); valid {
+			vocal_shortcut_destroy(&ui.flash_leader)
+			ui.flash_leader = decoded
+		}
+	}
 	flash.state_init(&flash_state)
 	palette_error := command_palette.state_init(
 		&command_palette_state,
@@ -10209,6 +11021,12 @@ vocal_gui_initialize :: proc(
 		search_commit_size = SEARCH_COMMIT_SIZE,
 	)
 	assert(palette_error == nil, "Unable to initialize the command palette")
+	settings_error := command_palette.state_init(
+		&ui.settings_search,
+		search_reserve_size = 4*1024*1024,
+		search_commit_size = 64*1024,
+	)
+	assert(settings_error == nil, "Unable to initialize Settings search")
 
 	frame := Rect{Point{120, 100}, Size{1100, 720}}
 	window_class := Id(services.window_class) if services != nil else register_window_class()

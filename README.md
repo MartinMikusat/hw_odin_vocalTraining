@@ -28,12 +28,15 @@ The application bundles its Iosevka Regular interface font. The user does not
 need to install the font.
 
 The application opens as a square, borderless window without a native shadow.
-Use the three controls at the upper left to close, minimize, or zoom the window.
-Drag the title strip to move the window. Drag a window edge or corner to resize
-it. The minimum window size is 1100 by 720 points.
+Use the first three controls at the upper left to close, minimize, or zoom the
+window. Use the gear control beside them to open Settings. Drag the title strip
+to move the window. Drag a window edge or corner to resize it. The minimum
+window size is 1100 by 720 points.
 
-Use the `DARK` or `LIGHT` control in the title strip to switch the interface
-theme. The application stores the selected theme in its local database.
+Use the gear control or `Command-,` to open the searchable two-column Settings
+modal. Select `Styling` to choose HW Light or HW Dark. Select `Shortcuts` to
+configure the Flash leader. The application stores both selections in its
+local database.
 
 The application stores its SQLite library and downloaded media in
 `~/Library/Application Support/VocalTraining`. It migrates and removes the old
@@ -182,14 +185,15 @@ the saved source file and time range. The app updates the existing exercise
 record and starts playback after the rebuild. If the source file is also
 missing, refetch the source first.
 
-Press **/** when no text field has focus to show keyboard labels on all visible
-discrete controls. Each label is a compact mnemonic with two or three
-characters. For example, Mark In uses `mi` and Mark Out uses `mo`. A unique
-mnemonic activates its control immediately. If controls share one mnemonic,
-use Tab or Shift-Tab to select a control, then press Return. Press **Escape**,
-click, scroll, or resize the window to cancel label mode. A slash typed in a
-focused text field remains normal text. Press **Escape** to leave a focused
-text field and make Flash navigation available again.
+Press the configured Flash leader when no text field has focus to show keyboard
+labels on all visible discrete controls. The default leader is `/`. Each label
+is a compact mnemonic with two or three characters. For example, Mark In uses
+`mi` and Mark Out uses `mo`. A unique mnemonic activates its control
+immediately. If controls share one mnemonic, use Tab or Shift-Tab to select a
+control, then press Return. Press **Escape**, click, scroll, or resize the
+window to cancel label mode. A leader character typed in a focused text field
+remains normal text. Press **Escape** to leave a focused text field and make
+Flash navigation available again.
 
 Drag across text to select a range. Double-click to select a word, or
 triple-click to select the complete field. The selection supports replacement,
@@ -324,11 +328,12 @@ Bundled font provenance:
 
 Bundled window icon provenance:
 
-- Assets: Iconoir xmark, minus, and maximize from version 7.11.1
+- Assets: Iconoir xmark, minus, maximize, and settings from version 7.11.1
 - Source: [Iconoir commit `59e3d5d969c59b3fb652a556795e08c1b3371c5b`](https://github.com/iconoir-icons/iconoir/tree/59e3d5d969c59b3fb652a556795e08c1b3371c5b/icons/regular)
 - Xmark SHA-256: `61aa0a4913a440aaafcc45064a87e24fe8eb22ba4abc4c5ef020530928ed8daf`
 - Minus SHA-256: `babb05bca016bffdd38cbd1dcaeef6ccdf42fc8654124dee169a412eeed6d425`
 - Maximize SHA-256: `3a3048cdc0e8e4aef5d68353b5434f0c0e074dc672b6c0abf25a5a64bc5cc8f4`
+- Settings SHA-256: `437c253a1c11ff214c490c766f2a3cdcf8547399fd0be48a7d222bf0703aefb5`
 - License: [MIT License](resources/icons/iconoir/LICENSE)
 
 The application builds each visible interactive control once per frame. Each
@@ -473,17 +478,6 @@ external distribution:
   accepts a normal double-click launch, startup helper validation passes,
   import and clip export complete without Homebrew, and the final app size and
   embedded helper versions are recorded.
-
-### Settings migration TODO
-
-Replace the title-strip theme toggle with the common gear control and
-two-column Settings modal after the calendar implementation is stable. Put
-themes in `Styling` and the configurable Flash leader in `Shortcuts`.
-
-Complete the migration when pointer input, Accessibility, Flash, and the
-command palette dispatch the same typed actions. Add direct theme commands,
-show unavailable actions with reasons, and validate shortcut collisions before
-Save.
 
 ### Reload loop
 

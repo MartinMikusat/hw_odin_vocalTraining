@@ -612,6 +612,40 @@ database_interface_theme_save :: proc(
 	       sqlite3_step(statement) == SQLITE_DONE
 }
 
+database_flash_leader_load :: proc(
+	database: ^SQLite_DB,
+	allocator := context.allocator,
+) -> (string, bool) {
+	if database == nil {return "", false}
+	statement, ok := sqlite_prepare(
+		database,
+		"SELECT value FROM app_preferences WHERE key = 'flash_leader'",
+	)
+	if !ok {return "", false}
+	defer sqlite3_finalize(statement)
+	if sqlite3_step(statement) != SQLITE_ROW {return "", false}
+	value := sqlite3_column_text(statement, 0)
+	if value == nil {return "", false}
+	return strings.clone(string(value), allocator), true
+}
+
+database_flash_leader_save :: proc(
+	database: ^SQLite_DB,
+	value: string,
+) -> bool {
+	if database == nil {return false}
+	statement, ok := sqlite_prepare(
+		database,
+		`INSERT INTO app_preferences (key, value)
+		 VALUES ('flash_leader', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	)
+	if !ok {return false}
+	defer sqlite3_finalize(statement)
+	return sqlite_bind_text_value(statement, 1, value) &&
+	       sqlite3_step(statement) == SQLITE_DONE
+}
+
 database_pitch_settings_load :: proc(
 	database: ^SQLite_DB,
 ) -> Pitch_Settings {

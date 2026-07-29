@@ -1735,14 +1735,15 @@ metal_ui_titlebar_uses_compact_height_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-metal_ui_theme_switch_precedes_mode_control_test :: proc(t: ^testing.T) {
-	theme := theme_button_rect_for_size(1100, 720)
+metal_ui_settings_control_precedes_title_test :: proc(t: ^testing.T) {
+	settings := settings_button_rect_for_size(720)
 	mode := mode_button_rect_for_size(1100, 720)
-	testing.expect_value(t, theme, UI_Rect{816, 689, 62, 24})
+	title := app_title_rect_for_size(1100, 720)
+	testing.expect_value(t, settings, UI_Rect{114, 690, 30, 30})
+	testing.expect_value(t, title.x, 160.0)
 	testing.expect_value(t, mode, UI_Rect{886, 689, 196, 24})
-	testing.expect_value(t, mode.x-(theme.x+theme.w), 8.0)
-	testing.expect_value(t, ui_theme_toggle_label(false), "DARK")
-	testing.expect_value(t, ui_theme_toggle_label(true), "LIGHT")
+	testing.expect(t, title.x > settings.x+settings.w)
+	testing.expect(t, title.x+title.w < mode.x)
 }
 
 @(test)
@@ -1772,16 +1773,22 @@ metal_ui_header_controls_take_precedence_over_window_gestures_test :: proc(
 	t: ^testing.T,
 ) {
 	header := app_header_rect_for_size(1100, 720)
-	theme := theme_button_rect_for_size(1100, 720)
-	theme_center := Point{theme.x+theme.w/2, theme.y+theme.h/2}
+	settings := settings_button_rect_for_size(720)
+	settings_center := Point{
+		settings.x+settings.w/2,
+		settings.y+settings.h/2,
+	}
 	controls := []UI_Control{{
-		id = ui_control_id("toggle theme"),
-		functional_name = "toggle theme",
-		rect = theme,
+		id = ui_control_id("settings"),
+		functional_name = "settings",
+		rect = settings,
 		flags = {.Primary_Press, .Enabled},
-		action = {kind = .Theme_Toggle},
+		action = {kind = .Open_Settings},
 	}}
-	testing.expect(t, !header_window_gesture_allowed(header, controls, theme_center))
+	testing.expect(
+		t,
+		!header_window_gesture_allowed(header, controls, settings_center),
+	)
 	testing.expect(t, header_window_gesture_allowed(header, controls, Point{500, 710}))
 }
 
@@ -3648,6 +3655,43 @@ interface_theme_round_trips_through_application_preferences_test :: proc(
 }
 
 @(test)
+flash_leader_round_trips_through_application_preferences_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+	_, found := database_flash_leader_load(database)
+	testing.expect(t, !found)
+	shortcut := vocal_shortcut_character("g", {.Control, .Shift})
+	encoded, valid := vocal_shortcut_serialize(
+		shortcut,
+		context.temp_allocator,
+	)
+	testing.expect(t, valid)
+	testing.expect(t, database_flash_leader_save(database, encoded))
+	stored: string
+	stored, found = database_flash_leader_load(database)
+	testing.expect(t, found)
+	defer delete(stored)
+	decoded: Vocal_Shortcut
+	decoded, valid = vocal_shortcut_deserialize(stored)
+	testing.expect(t, valid)
+	defer vocal_shortcut_destroy(&decoded)
+	testing.expect(t, vocal_shortcut_equal(shortcut, decoded))
+}
+
+@(test)
 source_probe_uses_a_saved_browser_only_after_an_authentication_challenge_test :: proc(
 	t: ^testing.T,
 ) {
@@ -4422,11 +4466,29 @@ source_search_matches_title_and_video_id_without_case_test :: proc(t: ^testing.T
 
 @(test)
 flash_leader_starts_only_without_text_focus_test :: proc(t: ^testing.T) {
-	testing.expect(t, flash_leader_allowed(.None, 0, "/"))
-	testing.expect(t, !flash_leader_allowed(.Source_Search, 0, "/"))
-	testing.expect(t, !flash_leader_allowed(.None, NSEventModifierFlagCommand, "/"))
-	testing.expect(t, !flash_leader_allowed(.None, NSEventModifierFlagOption, "/"))
-	testing.expect(t, !flash_leader_allowed(.None, 0, "a"))
+	ui.flash_leader = vocal_shortcut_clone(vocal_shortcut_default())
+	defer vocal_shortcut_destroy(&ui.flash_leader)
+	testing.expect(t, flash_leader_allowed(.None, 44, 0, "/"))
+	testing.expect(t, !flash_leader_allowed(.Source_Search, 44, 0, "/"))
+	testing.expect(
+		t,
+		!flash_leader_allowed(
+			.None,
+			44,
+			NSEventModifierFlagCommand,
+			"/",
+		),
+	)
+	testing.expect(
+		t,
+		!flash_leader_allowed(
+			.None,
+			44,
+			NSEventModifierFlagOption,
+			"/",
+		),
+	)
+	testing.expect(t, !flash_leader_allowed(.None, 0, 0, "a"))
 }
 
 @(test)
