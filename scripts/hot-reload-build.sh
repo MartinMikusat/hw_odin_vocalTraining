@@ -47,7 +47,7 @@ mkdir -p \
   "$APP/Contents/Resources/Icons/Iconoir"
 
 COMMON_COLLECTIONS="-collection:match_sorter=$MATCH_SORTER_ROOT -collection:flash=$UI_FLASH_ROOT -collection:command_palette=$COMMAND_PALETTE_ROOT -collection:components=$COMPONENTS_ROOT"
-APP_FRAMEWORKS="-framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
+APP_FRAMEWORKS="-framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
 HOST_FRAMEWORKS="-framework AppKit -framework Foundation"
 
 build_host() {

@@ -3903,7 +3903,7 @@ draw_pitch_help :: proc(
 		"Note Labels and Transpose change displayed names. They do not change measured pitch.",
 		"Highlight marks the nearest stable note while a voiced pitch is detected.",
 		"The trace keeps the most recent 12 seconds and clears on the next start.",
-		"Use headphones during exercise playback to keep speaker audio out of the microphone.",
+		"A Bluetooth default input uses the Mac microphone to preserve headphone playback quality.",
 	}
 	for line, index in lines {
 		draw_text_in_rect(

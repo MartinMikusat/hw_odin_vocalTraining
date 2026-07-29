@@ -25,4 +25,4 @@ odin test "$ROOT/src" \
   -collection:flash="$ROOT/../hw_odin_ui_flash" \
   -collection:command_palette="$ROOT/../hw_odin_ui_commandPalette" \
   -collection:components="$ROOT/../hw_odin_ui_components" \
-  -extra-linker-flags:"$PITCH_CAPTURE_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
+  -extra-linker-flags:"$PITCH_CAPTURE_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"

@@ -66,9 +66,11 @@ library, 30% to the practice monitor, and 50% to the live pitch monitor.
 Press **7 Start Pitch** to begin live microphone analysis. The first start asks
 macOS for microphone access. The app does not record or store microphone audio.
 The chart keeps the newest 12 seconds of stable pitch and preserves the trace
-when tracking stops. Starting again clears the trace. Exercise playback and
-pitch tracking can run together. Use headphones to prevent playback audio from
-entering the microphone.
+when tracking stops. Starting again clears the trace. An input-only Core Audio
+queue captures the microphone without connecting to the playback graph. When
+the default input is a Bluetooth headset, the app uses the Mac's built-in
+microphone to preserve high-quality headphone playback. Exercise playback and
+pitch tracking can run together.
 
 The pitch settings select the A4 reference from 400 to 480 Hz, the displayed
 range, note labels, chromatic transposition, and nearest-note highlight. The app
