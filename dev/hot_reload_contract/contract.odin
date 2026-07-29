@@ -3,7 +3,7 @@ package hot_reload_contract
 API_VERSION :: u32(2)
 // Increment this value when a preserved state type changes without changing
 // the snapshot size or alignment.
-STATE_VERSION :: u32(3)
+STATE_VERSION :: u32(4)
 RESTART_EXIT_CODE :: 75
 
 Point :: struct {x, y: f64}

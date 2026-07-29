@@ -60,8 +60,21 @@ requires explicit confirmation before it continues.
 
 Use the mode control in the title strip to separate the two workflows. **Create**
 shows source ingest, the timed transcript, range markers, exercise naming, and
-export controls. **Play** shows the saved-exercise library, a larger practice
-monitor, and only playback controls.
+export controls. **Play** gives 20% of the content width to the exercise
+library, 30% to the practice monitor, and 50% to the live pitch monitor.
+
+Press **7 Start Pitch** to begin live microphone analysis. The first start asks
+macOS for microphone access. The app does not record or store microphone audio.
+The chart keeps the newest 12 seconds of stable pitch and preserves the trace
+when tracking stops. Starting again clears the trace. Exercise playback and
+pitch tracking can run together. Use headphones to prevent playback audio from
+entering the microphone.
+
+The pitch settings select the A4 reference from 400 to 480 Hz, the displayed
+range, note labels, chromatic transposition, and nearest-note highlight. The app
+stores these settings locally. Label and transposition settings change only the
+displayed note names. Select the pitch monitor **?** control for the complete
+setting rules and microphone behavior.
 
 In Play mode, select **Randomize** to choose from the complete exercise library
 and start playback. An active search does not limit the random pool. When two
@@ -136,7 +149,7 @@ The speed controls adjust playback from `0.1x` to `2.0x` in `0.1x` steps.
 When no text field has focus, press **Space** to toggle playback or **1–8** to
 activate the matching numbered transport control.
 The Play actions are **1 Randomize**, **2 Run**, **3 Hold**, **4 Rename**,
-**5 Data**, and **6 Metadata**.
+**5 Data**, **6 Metadata**, and **7 Start Pitch** or **7 Stop Pitch**.
 Press **Left Arrow** or **Right Arrow** to scrub by one second. Hold **Shift**
 to scrub by 0.1 seconds, or hold **Command** to scrub by 10 seconds.
 
@@ -234,7 +247,9 @@ removed, changed, and unexpected controls. Complete artifacts stay in
 `build/dev-support/ui-checks/`. The app keeps the newest 20 artifacts and
 removes older files after each successful write. UI commands return
 `gui_not_running` when the development application is closed. Each snapshot
-also records playback state, audio engine state, and the submitted frame count.
+records playback state, audio engine state, pitch tracking state, microphone
+permission, detected frequency, pitch confidence, trace count, and the
+submitted frame count.
 
 The debug build can simulate concurrent task notifications without running
 FFmpeg or `yt-dlp`:

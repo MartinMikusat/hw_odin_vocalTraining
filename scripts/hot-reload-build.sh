@@ -72,6 +72,13 @@ build_host() {
 }
 
 build_module() {
+  pitch_capture_object="$HOT_DIR/pitch_capture.o"
+  xcrun clang \
+    -fobjc-arc \
+    -fblocks \
+    -mmacosx-version-min=13.0 \
+    -c "$ROOT/src/pitch_capture.m" \
+    -o "$pitch_capture_object"
   asan_runtime=""
   if [ "$MODE" = "asan" ]; then
     if [ ! -x "$HOST" ]; then
@@ -84,7 +91,7 @@ build_module() {
       return 1
     fi
   fi
-  module_link_flags="$APP_FRAMEWORKS"
+  module_link_flags="$pitch_capture_object $APP_FRAMEWORKS"
   if [ -n "$asan_runtime" ]; then
     module_link_flags="$module_link_flags $asan_runtime"
   fi

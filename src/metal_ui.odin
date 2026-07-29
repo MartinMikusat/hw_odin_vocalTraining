@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:c"
 import "core:fmt"
 import "core:hash"
+import "core:math"
 import mem_virtual "core:mem/virtual"
 import "core:os"
 import "core:strings"
@@ -193,6 +194,7 @@ UI_State :: struct {
 	source_playback_active: bool,
 	source_scrubbing:   bool,
 	source_hint_menu_open: bool,
+	pitch:              Pitch_Monitor_State,
 	activity_tick:      uint,
 	frame_tick:         uint,
 	render_count:         uint,
@@ -373,6 +375,16 @@ UI_Action_Kind :: enum {
 	Randomize,
 	Open_Randomize_Help,
 	Close_Randomize_Help,
+	Pitch_Toggle,
+	Pitch_Reference_Down,
+	Pitch_Reference_Up,
+	Pitch_Range,
+	Pitch_Labels,
+	Pitch_Transpose,
+	Pitch_Highlight,
+	Pitch_Chart,
+	Open_Pitch_Help,
+	Close_Pitch_Help,
 	Exercise_Name,
 	Cancel_Exercise_Rename,
 	Confirm_Exercise_Rename,
@@ -1310,6 +1322,16 @@ randomize_help_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
 }
 
+pitch_help_modal_rect :: proc() -> UI_Rect {
+	width := min(max(620, ui.width * 0.54), 760)
+	height := min(max(390, ui.height * 0.5), 470)
+	return UI_Rect{(ui.width - width) / 2, (ui.height - height) / 2, width, height}
+}
+
+pitch_help_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
+}
+
 randomize_help_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 	return UI_Rect{
 		modal.x + 24,
@@ -1483,6 +1505,7 @@ open_notification_history :: proc(notification_id: i64 = 0) {
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
 	if ui.randomize_help_open {close_randomize_help()}
+	if ui.pitch.help_open {close_pitch_help()}
 	if ui.source_details_open {close_source_details()}
 	if ui.source_modal_open {close_source_modal()}
 	ui.notification_modal_open = true
@@ -1667,6 +1690,28 @@ close_randomize_help :: proc() {
 	ui.needs_redraw = true
 }
 
+open_pitch_help :: proc() {
+	cancel_ui_flash()
+	if ui.randomize_help_open {close_randomize_help()}
+	ui.pitch.help_open = true
+	ui.focus = .None
+	text_input.end_pointer_selection(&ui.input_state)
+	ui.needs_redraw = true
+}
+
+close_pitch_help :: proc() {
+	cancel_ui_flash()
+	ui.pitch.help_open = false
+	ui.needs_redraw = true
+}
+
+save_pitch_settings :: proc() {
+	if !database_pitch_settings_save(library_database, ui.pitch.settings) {
+		fmt.eprintln("[vocal-training] could not persist pitch settings")
+	}
+	ui.needs_redraw = true
+}
+
 open_data_modal :: proc() {
 	cancel_ui_flash()
 	app_state_collections_destroy(&pending_library_import)
@@ -1756,6 +1801,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
 	if ui.randomize_help_open {close_randomize_help()}
+	if ui.pitch.help_open {close_pitch_help()}
 	if ui.data_modal_open {close_data_modal()}
 	if ui.notification_modal_open {close_notification_history()}
 	ui.source_scrubbing = false
@@ -1763,6 +1809,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	if mode == .Play {
 		metal_player_clear()
 	} else {
+		pitch_monitor_stop(&ui.pitch)
 		ui.active_exercise = -1
 		if state.active_source >= 0 && state.active_source < len(state.sources) {
 			_ = load_source_player(state.active_source)
@@ -1787,6 +1834,7 @@ layout_rects :: proc(
 	exercise_search,
 	exercise_panel,
 	exercise_name,
+	pitch_panel,
 	controls: UI_Rect,
 ) {
 	w, h := ui.width, ui.height
@@ -1804,13 +1852,8 @@ layout_rects :: proc(
 	body_h := max(120, body_top - body_y)
 	left_w := min(max(w * 0.218, 250), 328)
 	right_w := min(max(w * 0.205, 238), 304)
-	if ui.mode == .Play {
-		left_w = min(max(w * 0.31, 300), 430)
-		right_w = left_w
-	}
 	center_x := margin + left_w + gap
 	center_w := max(280, w - margin * 2 - left_w - right_w - gap * 2)
-	if ui.mode == .Play {center_w = max(280, w - margin * 2 - left_w - gap)}
 	right_x := center_x + center_w + gap
 
 	if ui.mode == .Create {
@@ -1822,9 +1865,16 @@ layout_rects :: proc(
 		player = UI_Rect{center_x, body_top - player_h, center_w, player_h}
 		transcript = UI_Rect{center_x, body_y, center_w, max(80, body_h - player_h - gap)}
 	} else {
+		available_w := w - margin * 2 - gap * 2
+		left_w = available_w * 0.20
+		center_w = available_w * 0.30
+		pitch_w := available_w - left_w - center_w
+		center_x = margin + left_w + gap
+		right_x = center_x + center_w + gap
 		exercise_search = UI_Rect{margin + 8, body_top - 72, left_w - 16, 28}
 		exercise_panel = UI_Rect{margin, body_y, left_w, body_h}
 		player = UI_Rect{center_x, body_y, center_w, body_h}
+		pitch_panel = UI_Rect{right_x, body_y, pitch_w, body_h}
 	}
 	controls = UI_Rect{margin, 42, w - margin * 2, 28}
 	return
@@ -1845,6 +1895,8 @@ control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
 		return 7
 	case 5:
 		return 9
+	case 6:
+		return 11
 	}
 	return -1
 }
@@ -1864,6 +1916,8 @@ control_slot_for_action :: proc(mode: UI_Mode, action: int) -> int {
 		return 3
 	case 9:
 		return 5
+	case 11:
+		return 6
 	}
 	return -1
 }
@@ -2067,7 +2121,7 @@ control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
 	slot := control_slot_for_action(ui.mode, action)
 	if slot < 0 {return {}}
 	count := 8
-	if ui.mode == .Play {count = 6}
+	if ui.mode == .Play {count = 7}
 	gap := 6.0
 	cell_w := (controls.w - gap * f64(count - 1)) / f64(count)
 	return UI_Rect{controls.x + f64(slot) * (cell_w + gap), controls.y, cell_w, controls.h}
@@ -2084,6 +2138,84 @@ randomize_help_rect :: proc(controls: UI_Rect) -> UI_Rect {
 	rect := control_rect(controls, 10)
 	help_width := min(rect.h, rect.w)
 	return UI_Rect{rect.x + rect.w - help_width, rect.y, help_width, rect.h}
+}
+
+pitch_help_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	return UI_Rect{panel.x + panel.w - 34, panel.y + panel.h - 34, 34, 34}
+}
+
+pitch_content_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	return UI_Rect{panel.x + 8, panel.y + 8, panel.w - 16, panel.h - 50}
+}
+
+pitch_settings_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	content := pitch_content_rect(panel)
+	width := min(max(content.w * 0.34, 160), 190)
+	return UI_Rect{content.x + content.w - width, content.y, width, content.h}
+}
+
+pitch_chart_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	content := pitch_content_rect(panel)
+	settings := pitch_settings_rect(panel)
+	return UI_Rect{content.x, content.y, max(80, settings.x - content.x - 10), content.h}
+}
+
+pitch_plot_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	chart := pitch_chart_rect(panel)
+	return UI_Rect{chart.x + 38, chart.y + 10, max(20, chart.w - 76), max(40, chart.h - 52)}
+}
+
+pitch_plot_y :: proc(plot: UI_Rect, midi: f64, minimum, maximum: int) -> f64 {
+	span := max(1, maximum - minimum)
+	return plot.y + (midi - f64(minimum)) / f64(span) * plot.h
+}
+
+pitch_reference_rect :: proc(panel: UI_Rect, part: int) -> UI_Rect {
+	settings := pitch_settings_rect(panel)
+	y := settings.y + settings.h - 48
+	widths := [3]f64{32, settings.w - 64, 32}
+	x := settings.x
+	for index in 0 ..< part {x += widths[index]}
+	return UI_Rect{x, y, widths[part], 26}
+}
+
+pitch_range_option_rect :: proc(panel: UI_Rect, index: int) -> UI_Rect {
+	settings := pitch_settings_rect(panel)
+	return UI_Rect{
+		settings.x,
+		settings.y + settings.h - 104 - f64(index) * 25,
+		settings.w,
+		23,
+	}
+}
+
+pitch_label_option_rect :: proc(panel: UI_Rect, index: int) -> UI_Rect {
+	settings := pitch_settings_rect(panel)
+	return UI_Rect{
+		settings.x,
+		settings.y + settings.h - 214 - f64(index) * 25,
+		settings.w,
+		23,
+	}
+}
+
+pitch_transpose_option_rect :: proc(panel: UI_Rect, index: int) -> UI_Rect {
+	settings := pitch_settings_rect(panel)
+	gap := 4.0
+	width := (settings.w - gap) / 2
+	column := index % 2
+	row := index / 2
+	return UI_Rect{
+		settings.x + f64(column) * (width + gap),
+		settings.y + settings.h - 324 - f64(row) * 25,
+		width,
+		23,
+	}
+}
+
+pitch_highlight_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	settings := pitch_settings_rect(panel)
+	return UI_Rect{settings.x, settings.y + settings.h - 484, settings.w, 26}
 }
 
 source_content_rect :: proc(source_search, source_panel: UI_Rect) -> UI_Rect {
@@ -2477,7 +2609,7 @@ sync_transcript_playback :: proc() {
 		search_active,
 		ui.source_playback_active,
 	) {
-		_, _, _, _, _, transcript, _, _, _, _ := layout_rects()
+		_, _, _, _, _, transcript, _, _, _, _, _ := layout_rects()
 		content := transcript_content_rect(transcript)
 		next_scroll := transcript_centered_scroll(match_index, len(ui.transcript_matches), content.h)
 		if next_scroll != ui.transcript_scroll {
@@ -2500,7 +2632,7 @@ filtered_exercise_count :: proc() -> int {
 }
 
 normalize_scroll_offsets :: proc() {
-	_, _, source_search, source_panel, _, transcript, exercise_search, exercise_panel, exercise_name, _ :=
+	_, _, source_search, source_panel, _, transcript, exercise_search, exercise_panel, exercise_name, _, _ :=
 		layout_rects()
 	if ui.mode == .Create {
 		source_content := source_content_rect(source_search, source_panel)
@@ -2545,6 +2677,45 @@ push_rect :: proc(vertices: ^[dynamic]Solid_Vertex, rect: UI_Rect, color: [4]f32
 	v2 := Solid_Vertex{x1, y1, color[0], color[1], color[2], color[3]}
 	v3 := Solid_Vertex{x0, y1, color[0], color[1], color[2], color[3]}
 	append(vertices, v0, v1, v2, v0, v2, v3)
+}
+
+push_line_segment :: proc(
+	vertices: ^[dynamic]Solid_Vertex,
+	start, end: Point,
+	thickness: f64,
+	color: [4]f32,
+) {
+	dx, dy := end.x - start.x, end.y - start.y
+	length := math.sqrt(dx * dx + dy * dy)
+	if length <= 0 || ui.width <= 0 || ui.height <= 0 {return}
+	nx := -dy / length * thickness / 2
+	ny := dx / length * thickness / 2
+	points := [4]Point{
+		{start.x + nx, start.y + ny},
+		{end.x + nx, end.y + ny},
+		{end.x - nx, end.y - ny},
+		{start.x - nx, start.y - ny},
+	}
+	output: [4]Solid_Vertex
+	for point, index in points {
+		output[index] = {
+			f32(point.x / ui.width * 2 - 1),
+			f32(point.y / ui.height * 2 - 1),
+			color[0],
+			color[1],
+			color[2],
+			color[3],
+		}
+	}
+	append(
+		vertices,
+		output[0],
+		output[1],
+		output[2],
+		output[0],
+		output[2],
+		output[3],
+	)
 }
 
 push_border :: proc(vertices: ^[dynamic]Solid_Vertex, rect: UI_Rect, color: [4]f32) {
@@ -3503,6 +3674,261 @@ draw_randomize_help :: proc(
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
 }
 
+draw_pitch_monitor :: proc(
+	ctx, font: rawptr,
+	panel: UI_Rect,
+	bright, muted, dim, accent, cool: [4]f64,
+) {
+	if ui.mode != .Play || panel.w <= 0 {return}
+	header := UI_Rect{panel.x, panel.y + panel.h - 35, panel.w, 35}
+	draw_text_in_rect(
+		ctx,
+		font,
+		"03 / PITCH MONITOR",
+		UI_Rect{header.x + 10, header.y, header.w - 50, header.h},
+		.Start,
+		.Center,
+		muted,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"?",
+		ui_control_rect(.Open_Pitch_Help),
+		.Center,
+		.Center,
+		bright,
+	)
+
+	chart := pitch_chart_rect(panel)
+	plot := pitch_plot_rect(panel)
+	status := pitch_monitor_status_text(&ui.pitch)
+	readout := "PITCH / --"
+	readout_color := dim
+	if ui.pitch.voiced {
+		readout = fmt.tprintf(
+			"%s / %.1f HZ / %+.0f CENTS",
+			pitch_note_name(
+				int(math.round(ui.pitch.current_midi)),
+				ui.pitch.settings,
+			),
+			ui.pitch.current_hz,
+			ui.pitch.current_cents,
+		)
+		readout_color = accent
+	} else if ui.pitch.tracking {
+		readout = "PITCH / LISTENING"
+		readout_color = cool
+	}
+	draw_text_in_rect(
+		ctx,
+		font,
+		readout,
+		UI_Rect{chart.x + 8, chart.y + chart.h - 28, chart.w - 16, 18},
+		.Start,
+		.Center,
+		readout_color,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		status,
+		UI_Rect{chart.x + 8, chart.y + chart.h - 47, chart.w - 16, 16},
+		.Start,
+		.Center,
+		muted,
+		8,
+	)
+	minimum_midi, maximum_midi := pitch_range_midi(ui.pitch.settings.range)
+	natural := [12]bool{true, false, true, false, true, true, false, true, false, true, false, true}
+	for midi in minimum_midi ..= maximum_midi {
+		pitch_class := midi % 12
+		if !natural[pitch_class] {continue}
+		y := pitch_plot_y(plot, f64(midi), minimum_midi, maximum_midi)
+		label := pitch_note_name(midi, ui.pitch.settings)
+		color := muted
+		if pitch_class == 0 {color = bright}
+		draw_text_in_rect(
+			ctx,
+			font,
+			label,
+			UI_Rect{chart.x, y - 7, 34, 14},
+			.End,
+			.Center,
+			color,
+			2,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			label,
+			UI_Rect{plot.x + plot.w + 4, y - 7, 34, 14},
+			.Start,
+			.Center,
+			color,
+			2,
+		)
+	}
+
+	settings := pitch_settings_rect(panel)
+	top := settings.y + settings.h
+	draw_text_in_rect(
+		ctx,
+		font,
+		"PITCH STANDARD",
+		UI_Rect{settings.x, top - 20, settings.w, 18},
+		.Start,
+		.Center,
+		muted,
+	)
+	draw_text_in_rect(ctx, font, "-", ui_control_rect(.Pitch_Reference_Down), .Center, .Center, bright)
+	draw_text_in_rect(
+		ctx,
+		font,
+		fmt.tprintf("%d HZ", ui.pitch.settings.reference_hz),
+		pitch_reference_rect(panel, 1),
+		.Center,
+		.Center,
+		bright,
+	)
+	draw_text_in_rect(ctx, font, "+", ui_control_rect(.Pitch_Reference_Up), .Center, .Center, bright)
+
+	draw_text_in_rect(
+		ctx,
+		font,
+		"RANGE",
+		UI_Rect{settings.x, top - 80, settings.w, 18},
+		.Start,
+		.Center,
+		muted,
+	)
+	range_labels := [3]string{"C3 TO C8", "C2 TO C7", "C1 TO C6"}
+	for label, index in range_labels {
+		color := muted
+		if index == int(ui.pitch.settings.range) {color = cool}
+		draw_text_in_rect(
+			ctx,
+			font,
+			label,
+			ui_control_rect(.Pitch_Range, index),
+			.Center,
+			.Center,
+			color,
+		)
+	}
+
+	draw_text_in_rect(
+		ctx,
+		font,
+		"NOTE LABELS",
+		UI_Rect{settings.x, top - 190, settings.w, 18},
+		.Start,
+		.Center,
+		muted,
+	)
+	label_options := [3]string{"ABCDEFG", "DO RE MI", "1 2 3 4 5 6 7"}
+	for label, index in label_options {
+		color := muted
+		if index == int(ui.pitch.settings.labels) {color = cool}
+		draw_text_in_rect(
+			ctx,
+			font,
+			label,
+			ui_control_rect(.Pitch_Labels, index),
+			.Center,
+			.Center,
+			color,
+		)
+	}
+
+	draw_text_in_rect(
+		ctx,
+		font,
+		"TRANSPOSE",
+		UI_Rect{settings.x, top - 300, settings.w, 18},
+		.Start,
+		.Center,
+		muted,
+	)
+	for index in 0 ..< 12 {
+		color := muted
+		if index == int(ui.pitch.settings.transpose) {color = cool}
+		draw_text_in_rect(
+			ctx,
+			font,
+			pitch_transpose_label(index),
+			ui_control_rect(.Pitch_Transpose, index),
+			.Center,
+			.Center,
+			color,
+			4,
+		)
+	}
+	draw_text_in_rect(
+		ctx,
+		font,
+		ui.pitch.settings.highlight ? "HIGHLIGHT / ON" : "HIGHLIGHT / OFF",
+		ui_control_rect(.Pitch_Highlight),
+		.Center,
+		.Center,
+		ui.pitch.settings.highlight ? cool : muted,
+	)
+}
+
+draw_pitch_help :: proc(
+	ctx, font: rawptr,
+	bright, muted, cool: [4]f64,
+) {
+	if !ui.pitch.help_open {return}
+	theme := ui_theme_colors()
+	modal := pitch_help_modal_rect()
+	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, theme.backdrop)
+	fill_overlay_rect(ctx, modal, theme.modal)
+	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
+	fill_overlay_rect(ctx, header, theme.panel_alt)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"LIVE PITCH MONITOR",
+		UI_Rect{header.x + 20, header.y, header.w - 40, header.h},
+		.Start,
+		.Center,
+		bright,
+	)
+	lines := [8]string{
+		"Press action 07 to start or stop live microphone analysis.",
+		"The first start asks macOS for microphone access. No audio is stored.",
+		"Pitch Standard changes the A4 reference frequency from 400 to 480 Hz.",
+		"Range selects the frequencies shown by the chart and detector.",
+		"Note Labels and Transpose change displayed names. They do not change measured pitch.",
+		"Highlight marks the nearest stable note while a voiced pitch is detected.",
+		"The trace keeps the most recent 12 seconds and clears on the next start.",
+		"Use headphones during exercise playback to keep speaker audio out of the microphone.",
+	}
+	for line, index in lines {
+		draw_text_in_rect(
+			ctx,
+			font,
+			line,
+			UI_Rect{
+				modal.x + 24,
+				modal.y + modal.h - 94 - f64(index) * 31,
+				modal.w - 48,
+				26,
+			},
+			.Start,
+			.Center,
+			index == 0 ? cool : muted,
+		)
+	}
+	close_button := ui_control_rect(.Close_Pitch_Help)
+	fill_overlay_rect(ctx, close_button, theme.panel_alt)
+	if contains(close_button, ui.mouse) {
+		fill_overlay_rect(ctx, close_button, theme.row_hover)
+	}
+	draw_text_in_rect(ctx, font, "01  CLOSE", close_button, .Center, .Center, muted)
+}
+
 draw_data_modal :: proc(
 	ctx, font: rawptr,
 	bright, muted, dim, orange, cyan: [4]f64,
@@ -4157,7 +4583,7 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 }
 
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
-	_, _, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, _ :=
+	_, _, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, pitch_panel, _ :=
 		layout_rects()
 	theme := ui_theme_colors()
 	chassis := ui_color_32(theme.chassis)
@@ -4178,11 +4604,142 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	push_rect(vertices, mode_rect, mode_color)
 	push_border(vertices, mode_rect, orange)
 	push_rect(vertices, left_accent_edge_rect(mode_rect), orange)
-	panels := [4]UI_Rect{source_panel, player, transcript, exercise_panel}
+	panels := [5]UI_Rect{source_panel, player, transcript, exercise_panel, pitch_panel}
 	for rect in panels {
 		if rect.w <= 0 || rect.h <= 0 {continue}
 		push_rect(vertices, rect, panel)
 		push_rect(vertices, UI_Rect{rect.x, rect.y + rect.h - 34, rect.w, 34}, panel_alt)
+	}
+	if ui.mode == .Play {
+		chart := pitch_chart_rect(pitch_panel)
+		settings := pitch_settings_rect(pitch_panel)
+		plot := pitch_plot_rect(pitch_panel)
+		push_rect(vertices, chart, row_color)
+		push_rect(vertices, settings, field)
+		minimum_midi, maximum_midi := pitch_range_midi(ui.pitch.settings.range)
+		for midi in minimum_midi ..= maximum_midi {
+			y := pitch_plot_y(plot, f64(midi), minimum_midi, maximum_midi)
+			line_color := rule
+			thickness := 1.0
+			if midi % 12 == 0 {
+				line_color = ui_color_32(theme.border)
+				thickness = 2
+			}
+			push_rect(vertices, UI_Rect{plot.x, y, plot.w, thickness}, line_color)
+		}
+		if ui.pitch.settings.highlight && ui.pitch.voiced {
+			nearest := math.round(ui.pitch.current_midi)
+			if nearest >= f64(minimum_midi) && nearest <= f64(maximum_midi) {
+				lane_height := plot.h / f64(maximum_midi - minimum_midi)
+				y := pitch_plot_y(plot, nearest, minimum_midi, maximum_midi)
+				highlight := UI_COLOR_GUM_32
+				highlight[3] = 0.22
+				push_rect(
+					vertices,
+					UI_Rect{plot.x, y - lane_height / 2, plot.w, lane_height},
+					highlight,
+				)
+			}
+		}
+		if ui.pitch.trace_count > 1 {
+			for point_index in 1 ..< ui.pitch.trace_count {
+				previous_index :=
+					(ui.pitch.trace_start + point_index - 1) % len(ui.pitch.trace)
+				current_index :=
+					(ui.pitch.trace_start + point_index) % len(ui.pitch.trace)
+				previous := ui.pitch.trace[previous_index]
+				current := ui.pitch.trace[current_index]
+				if !previous.voiced || !current.voiced {continue}
+				if previous.midi < f64(minimum_midi) ||
+				   previous.midi > f64(maximum_midi) ||
+				   current.midi < f64(minimum_midi) ||
+				   current.midi > f64(maximum_midi) {
+					continue
+				}
+				start_x := plot.x +
+					f64(point_index - 1) / f64(PITCH_TRACE_POINTS - 1) * plot.w
+				end_x := plot.x +
+					f64(point_index) / f64(PITCH_TRACE_POINTS - 1) * plot.w
+				push_line_segment(
+					vertices,
+					Point{
+						start_x,
+						pitch_plot_y(
+							plot,
+							previous.midi,
+							minimum_midi,
+							maximum_midi,
+						),
+					},
+					Point{
+						end_x,
+						pitch_plot_y(
+							plot,
+							current.midi,
+							minimum_midi,
+							maximum_midi,
+						),
+					},
+					2,
+					UI_COLOR_COFFEE_32,
+				)
+			}
+		}
+		pitch_control_kinds := [2]UI_Action_Kind{
+			.Pitch_Reference_Down,
+			.Pitch_Reference_Up,
+		}
+		for kind in pitch_control_kinds {
+			rect := ui_control_rect(kind)
+			color := panel_alt
+			if contains(rect, ui.mouse) {color = row_hover}
+			push_rect(vertices, rect, color)
+		}
+		for index in 0 ..< 3 {
+			rect := ui_control_rect(.Pitch_Range, index)
+			push_rect(vertices, rect, panel_alt)
+			if index == int(ui.pitch.settings.range) {
+				push_border(vertices, rect, UI_COLOR_GUM_32)
+				push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
+			} else if contains(rect, ui.mouse) {
+				push_rect(vertices, rect, row_hover)
+			}
+			rect = ui_control_rect(.Pitch_Labels, index)
+			push_rect(vertices, rect, panel_alt)
+			if index == int(ui.pitch.settings.labels) {
+				push_border(vertices, rect, UI_COLOR_GUM_32)
+				push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
+			} else if contains(rect, ui.mouse) {
+				push_rect(vertices, rect, row_hover)
+			}
+		}
+		for index in 0 ..< 12 {
+			rect := ui_control_rect(.Pitch_Transpose, index)
+			push_rect(vertices, rect, panel_alt)
+			if index == int(ui.pitch.settings.transpose) {
+				push_border(vertices, rect, UI_COLOR_GUM_32)
+				push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
+			} else if contains(rect, ui.mouse) {
+				push_rect(vertices, rect, row_hover)
+			}
+		}
+		highlight_rect := ui_control_rect(.Pitch_Highlight)
+		push_rect(vertices, highlight_rect, panel_alt)
+		if ui.pitch.settings.highlight {
+			push_border(vertices, highlight_rect, UI_COLOR_GUM_32)
+			push_rect(
+				vertices,
+				left_accent_edge_rect(highlight_rect),
+				UI_COLOR_GUM_32,
+			)
+		} else if contains(highlight_rect, ui.mouse) {
+			push_rect(vertices, highlight_rect, row_hover)
+		}
+		help_rect := ui_control_rect(.Open_Pitch_Help)
+		push_rect(vertices, help_rect, panel_alt)
+		if contains(help_rect, ui.mouse) {
+			push_rect(vertices, help_rect, row_hover)
+		}
 	}
 	field_kinds := [4]UI_Action_Kind{
 		.Source_Search,
@@ -4329,7 +4886,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 	}
 
-	control_kinds := [11]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize}
+	control_kinds := [12]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle}
 	valid_range := active_exercise_range_is_valid()
 	for kind in control_kinds {
 		rect := ui_control_rect(kind)
@@ -4348,6 +4905,9 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 				valid_range,
 		   ) {
 			push_border(vertices, rect, orange)
+		}
+		if enabled && kind == .Pitch_Toggle && ui.pitch.tracking {
+			push_border(vertices, rect, UI_COLOR_GUM_32)
 		}
 	}
 	if ui.mode == .Play {
@@ -4415,7 +4975,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	cyan := ui.dark_theme ? UI_COLOR_GUM_64 : UI_COLOR_FOREST_64
 	danger := ui.dark_theme ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
 
-	_, _, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, _ :=
+	_, _, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, pitch_panel, _ :=
 		layout_rects()
 
 	draw_text_in_rect(
@@ -4540,6 +5100,16 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_editable_text_field(ctx, small_font, ui.exercise_name, "NAME / optional designation", ui_control_rect(.Exercise_Name), .Exercise_Name, ink, dim, orange)
 	} else {
 		draw_editable_text_field(ctx, small_font, ui.exercise_search, "/ filter exercise library", ui_control_rect(.Exercise_Search), .Exercise_Search, ink, dim, orange)
+		draw_pitch_monitor(
+			ctx,
+			small_font,
+			pitch_panel,
+			bright,
+			muted,
+			dim,
+			orange,
+			cyan,
+		)
 	}
 
 	if ui.mode == .Create {
@@ -4980,7 +5550,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		CGContextRestoreGState(ctx)
 	}
 
-	labels := [11]string {
+	labels := [12]string {
 		"MARK IN",
 		"MARK OUT",
 		"COMMIT",
@@ -4992,10 +5562,15 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		"RENAME",
 		"METADATA",
 		"RANDOMIZE",
+		"PITCH",
 	}
-	control_kinds := [11]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize}
+	control_kinds := [12]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle}
 	valid_range := active_exercise_range_is_valid()
 	for label, i in labels {
+		button_label := label
+		if control_kinds[i] == .Pitch_Toggle {
+			button_label = ui.pitch.tracking ? "STOP PITCH" : "START PITCH"
+		}
 		rect := ui_control_rect(control_kinds[i])
 		slot := control_slot_for_action(ui.mode, i)
 		if slot < 0 {continue}
@@ -5023,7 +5598,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			label,
+			button_label,
 			UI_Rect{rect.x + 34, rect.y, rect.w - 40, rect.h},
 			.Start,
 			.Center,
@@ -5210,6 +5785,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	draw_exercise_rename(ctx, small_font, bright, muted, dim, orange)
 	draw_exercise_metadata(ctx, small_font, bright, muted, dim, orange, cyan, danger)
 	draw_randomize_help(ctx, small_font, bright, muted, dim, cyan)
+	draw_pitch_help(ctx, small_font, bright, muted, cyan)
 	draw_data_modal(ctx, small_font, bright, muted, dim, orange, cyan)
 	draw_notification_history(
 		ctx,
@@ -5680,6 +6256,28 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Open_Randomize_Help {
 		return ui.mode == .Play
 	}
+	if kind == .Pitch_Toggle {
+		if ui.mode != .Play || ui.pitch.permission_pending {return false}
+		if ui.pitch.tracking {return true}
+		return ui.pitch.permission != .Denied &&
+		       ui.pitch.permission != .Restricted
+	}
+	if kind == .Pitch_Reference_Down {
+		return ui.mode == .Play && ui.pitch.settings.reference_hz > 400
+	}
+	if kind == .Pitch_Reference_Up {
+		return ui.mode == .Play && ui.pitch.settings.reference_hz < 480
+	}
+	if kind == .Pitch_Range ||
+	   kind == .Pitch_Labels ||
+	   kind == .Pitch_Transpose ||
+	   kind == .Pitch_Highlight ||
+	   kind == .Open_Pitch_Help {
+		return ui.mode == .Play
+	}
+	if kind == .Close_Pitch_Help {
+		return ui.pitch.help_open
+	}
 	if kind == .Rename || kind == .Metadata {
 		return import_job == nil &&
 		       ui.active_exercise >= 0 &&
@@ -5746,6 +6344,9 @@ add_ax_element :: proc(
 	if enabled {
 		flags += {.Enabled, .Flash, .Primary_Press}
 	}
+	if kind == .Pitch_Chart {
+		flags = {.Accessibility, .Enabled}
+	}
 	if kind == .Open_Source_Details {
 		flags -= {.Primary_Press}
 		flags += {.Secondary_Press}
@@ -5771,9 +6372,25 @@ add_ax_element :: proc(
 	msg_void_id(element, sel_registerName("setAccessibilityParent:"), ui.view)
 	msg_void_id(element, sel_registerName("setAccessibilityRole:"), nsstring(role))
 	msg_void_id(element, sel_registerName("setAccessibilityLabel:"), nsstring(label))
-	if kind == .Toggle_Save_Source_Browser {
+	if kind == .Toggle_Save_Source_Browser ||
+	   kind == .Pitch_Highlight ||
+	   kind == .Pitch_Range ||
+	   kind == .Pitch_Labels ||
+	   kind == .Pitch_Transpose {
 		checked := uint(0)
-		if ui.save_source_browser_choice {checked = 1}
+		#partial switch kind {
+		case .Toggle_Save_Source_Browser:
+			if ui.save_source_browser_choice {checked = 1}
+		case .Pitch_Highlight:
+			if ui.pitch.settings.highlight {checked = 1}
+		case .Pitch_Range:
+			if value == int(ui.pitch.settings.range) {checked = 1}
+		case .Pitch_Labels:
+			if value == int(ui.pitch.settings.labels) {checked = 1}
+		case .Pitch_Transpose:
+			if value == int(ui.pitch.settings.transpose) {checked = 1}
+		case:
+		}
 		value := msg_id_uint(
 			objc_getClass("NSNumber"),
 			sel_registerName("numberWithUnsignedInt:"),
@@ -5859,7 +6476,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		array = temporary
 	}
 	element_class := objc_getClass("VocalAccessibilityElement")
-	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, controls :=
+	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, pitch_panel, controls :=
 		layout_rects()
 	add_window_controls(array, element_class)
 	if library_recovery_state.required {
@@ -5953,6 +6570,20 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			randomize_help_close_rect(modal),
 			.Close_Randomize_Help,
 			flash_label = "close randomize help",
+		)
+		validate_ui_controls()
+		return
+	}
+	if ui.pitch.help_open {
+		modal := pitch_help_modal_rect()
+		add_ax_element(
+			array,
+			element_class,
+			"01 Close pitch monitor help",
+			"AXButton",
+			pitch_help_close_rect(modal),
+			.Close_Pitch_Help,
+			flash_label = "close pitch monitor help",
 		)
 		validate_ui_controls()
 		return
@@ -6522,6 +7153,108 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			}
 			row.y -= 30
 		}
+		add_ax_element(
+			array,
+			element_class,
+			"Decrease pitch reference frequency",
+			"AXButton",
+			pitch_reference_rect(pitch_panel, 0),
+			.Pitch_Reference_Down,
+			flash_label = "lower pitch reference",
+		)
+		add_ax_element(
+			array,
+			element_class,
+			"Increase pitch reference frequency",
+			"AXButton",
+			pitch_reference_rect(pitch_panel, 2),
+			.Pitch_Reference_Up,
+			flash_label = "raise pitch reference",
+		)
+		range_labels := [3]string{"C3 to C8", "C2 to C7", "C1 to C6"}
+		for label, index in range_labels {
+			add_ax_element(
+				array,
+				element_class,
+				label,
+				"AXRadioButton",
+				pitch_range_option_rect(pitch_panel, index),
+				.Pitch_Range,
+				index,
+				value = index,
+				flash_label = "pitch range",
+				functional_name = fmt.tprintf("pitch range %d", index),
+			)
+		}
+		label_labels := [3]string{"Note labels ABCDEFG", "Note labels Do Re Mi", "Note labels 1 to 7"}
+		for label, index in label_labels {
+			add_ax_element(
+				array,
+				element_class,
+				label,
+				"AXRadioButton",
+				pitch_label_option_rect(pitch_panel, index),
+				.Pitch_Labels,
+				index,
+				value = index,
+				flash_label = "pitch note labels",
+				functional_name = fmt.tprintf("pitch note labels %d", index),
+			)
+		}
+		for index in 0 ..< 12 {
+			add_ax_element(
+				array,
+				element_class,
+				fmt.tprintf("Transpose %s", pitch_transpose_label(index)),
+				"AXRadioButton",
+				pitch_transpose_option_rect(pitch_panel, index),
+				.Pitch_Transpose,
+				index,
+				value = index,
+				flash_label = "pitch transposition",
+				functional_name = fmt.tprintf("pitch transposition %d", index),
+			)
+		}
+		highlight_label := "Pitch highlight off"
+		if ui.pitch.settings.highlight {highlight_label = "Pitch highlight on"}
+		add_ax_element(
+			array,
+			element_class,
+			highlight_label,
+			"AXCheckBox",
+			pitch_highlight_rect(pitch_panel),
+			.Pitch_Highlight,
+			flash_label = "toggle pitch highlight",
+		)
+		chart_label := pitch_monitor_status_text(&ui.pitch)
+		if ui.pitch.voiced {
+			chart_label = fmt.tprintf(
+				"%s, %s, %.1f hertz, %+.0f cents",
+				chart_label,
+				pitch_note_name(int(math.round(ui.pitch.current_midi)), ui.pitch.settings),
+				ui.pitch.current_hz,
+				ui.pitch.current_cents,
+			)
+		}
+		add_ax_element(
+			array,
+			element_class,
+			chart_label,
+			"AXGroup",
+			pitch_chart_rect(pitch_panel),
+			.Pitch_Chart,
+			flash_label = "pitch chart",
+			functional_name = "pitch chart",
+		)
+		add_ax_element(
+			array,
+			element_class,
+			"Explain pitch monitor",
+			"AXButton",
+			pitch_help_rect(pitch_panel),
+			.Open_Pitch_Help,
+			flash_label = "pitch monitor help",
+		)
 	}
 	if state.player != nil {
 		playing := msg_f32(state.player, sel_registerName("rate")) > 0
@@ -6585,8 +7318,8 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			flash_label = "louder",
 		)
 	}
-	kinds := [11]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize}
-	labels := [11]string {
+	kinds := [12]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle}
+	labels := [12]string {
 		"Set start",
 		"Set end",
 		"Save exercise",
@@ -6598,10 +7331,11 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		"Rename exercise",
 		"Show exercise metadata",
 		"Play a random exercise",
+		"Toggle pitch tracking",
 	}
-	flash_labels := [11]string{"mark in", "mark out", "commit", "run", "hold", "captions", "audition", "data", "rename exercise", "exercise metadata", "randomize exercise"}
+	flash_labels := [12]string{"mark in", "mark out", "commit", "run", "hold", "captions", "audition", "data", "rename exercise", "exercise metadata", "randomize exercise", "toggle pitch tracking"}
 	slot_count := 8
-	if ui.mode == .Play {slot_count = 6}
+	if ui.mode == .Play {slot_count = 7}
 	for slot in 0 ..< slot_count {
 		action_index := control_action_for_slot(ui.mode, slot)
 		if action_index < 0 {continue}
@@ -6796,6 +7530,38 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		open_randomize_help()
 	case .Close_Randomize_Help:
 		close_randomize_help()
+	case .Pitch_Toggle:
+		if !pitch_monitor_toggle(&ui.pitch) {
+			ui.pitch.permission = Pitch_Permission(vt_pitch_permission_status())
+		}
+	case .Pitch_Reference_Down:
+		ui.pitch.settings.reference_hz =
+			max(400, ui.pitch.settings.reference_hz - 1)
+		pitch_trace_clear(&ui.pitch)
+		save_pitch_settings()
+	case .Pitch_Reference_Up:
+		ui.pitch.settings.reference_hz =
+			min(480, ui.pitch.settings.reference_hz + 1)
+		pitch_trace_clear(&ui.pitch)
+		save_pitch_settings()
+	case .Pitch_Range:
+		ui.pitch.settings.range = Pitch_Range(action.value)
+		save_pitch_settings()
+	case .Pitch_Labels:
+		ui.pitch.settings.labels = Pitch_Label_Mode(action.value)
+		save_pitch_settings()
+	case .Pitch_Transpose:
+		ui.pitch.settings.transpose = i32(action.value)
+		save_pitch_settings()
+	case .Pitch_Highlight:
+		ui.pitch.settings.highlight = !ui.pitch.settings.highlight
+		save_pitch_settings()
+	case .Pitch_Chart:
+		return false
+	case .Open_Pitch_Help:
+		open_pitch_help()
+	case .Close_Pitch_Help:
+		close_pitch_help()
 	case .Exercise_Name:
 		focus_text_input(.Exercise_Name)
 	case .Cancel_Exercise_Rename:
@@ -7123,6 +7889,16 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 	}
 	append_command_palette_entry(
 		&entries,
+		UI_Action{kind = .Pitch_Toggle},
+		ui.pitch.tracking ? "Stop pitch tracking" : "Start pitch tracking",
+		"Start or stop live microphone pitch analysis",
+		"Command",
+		[]string{"microphone", "sing", "tuner", "pitch"},
+		palette_condition(PALETTE_CONTEXT_PLAY),
+		"Available in Play mode",
+	)
+	append_command_palette_entry(
+		&entries,
 		UI_Action{kind = .Data},
 		"Open library data",
 		"Export, import, or inspect the active library directory",
@@ -7197,6 +7973,7 @@ begin_command_palette :: proc() -> bool {
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
 	if ui.randomize_help_open {close_randomize_help()}
+	if ui.pitch.help_open {close_pitch_help()}
 	if ui.data_modal_open {close_data_modal()}
 	if ui.notification_modal_open {close_notification_history()}
 	ui.palette_previous_focus = ui.focus
@@ -7278,6 +8055,7 @@ activate_command_palette_result :: proc(result_index: int) -> bool {
 	if ui.exercise_rename_open {close_exercise_rename()}
 	if ui.exercise_metadata_open {close_exercise_metadata()}
 	if ui.randomize_help_open {close_randomize_help()}
+	if ui.pitch.help_open {close_pitch_help()}
 	if ui.data_modal_open {close_data_modal()}
 	if ui.notification_modal_open {close_notification_history()}
 	if action.kind == .Source {set_ui_mode(.Create)}
@@ -7496,7 +8274,7 @@ render_frame :: proc() {
 	msg_void_id(encoder, sel_registerName("setRenderPipelineState:"), ui.solid_pipeline)
 	if vertices_error == nil {encode_solid_vertices(encoder, vertices[:])}
 
-	_, _, _, _, player, _, _, _, _, _ := layout_rects()
+	_, _, _, _, player, _, _, _, _, _, _ := layout_rects()
 	player_rect := player_content_rect(player)
 	if video_texture, video_width, video_height := current_video_texture(); video_texture != nil {
 		aspect := f64(video_width) / f64(video_height)
@@ -7523,6 +8301,7 @@ render_frame :: proc() {
 }
 
 ui_memory_destroy :: proc() {
+	pitch_monitor_stop(&ui.pitch)
 	metal_player_clear()
 	app_state_collections_destroy(&pending_library_import)
 	if ui.ax_children != nil {msg_void(ui.ax_children, sel_registerName("release"))}
@@ -7920,7 +8699,7 @@ metal_player_load :: proc(path: string) -> bool {
 }
 
 activate_control :: proc(index: int) {
-	kinds := [11]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize}
+	kinds := [12]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle}
 	if index < 0 || index >= len(kinds) {return}
 	control := find_ui_control_by_action(kinds[index])
 	if control != nil && .Enabled in control.flags {_ = activate_ui_action(control.action)}
@@ -8088,6 +8867,12 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
+	if ui.pitch.help_open {
+		modal := pitch_help_modal_rect()
+		if !contains(modal, point) {close_pitch_help(); return}
+		_ = activate_registered_target_at_point(point, click_count)
+		return
+	}
 	if ui.notification_modal_open {
 		modal := notification_modal_rect()
 		if !contains(modal, point) {close_notification_history(); return}
@@ -8215,7 +9000,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if !command_palette.is_open(&command_palette_state) &&
 	   !ui.source_modal_open && !ui.source_details_open &&
 	   !ui.exercise_rename_open && !ui.exercise_metadata_open &&
-	   !ui.randomize_help_open &&
+	   !ui.randomize_help_open && !ui.pitch.help_open &&
 	   !ui.data_modal_open && !ui.notification_modal_open &&
 	   header_window_gesture_allowed(
 			app_header_rect(),
@@ -8241,7 +9026,7 @@ on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if command_palette.is_open(&command_palette_state) {return}
 	if ui.source_modal_open || ui.source_details_open ||
 	   ui.exercise_rename_open || ui.exercise_metadata_open ||
-	   ui.randomize_help_open ||
+	   ui.randomize_help_open || ui.pitch.help_open ||
 	   ui.data_modal_open || ui.notification_modal_open ||
 	   ui.mode != .Create {
 		return
@@ -8329,7 +9114,7 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	if ui.source_modal_open || ui.source_details_open ||
 	   ui.exercise_rename_open || ui.exercise_metadata_open ||
-	   ui.randomize_help_open || ui.data_modal_open {
+	   ui.randomize_help_open || ui.pitch.help_open || ui.data_modal_open {
 		return
 	}
 	delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
@@ -8340,7 +9125,7 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 		window_point,
 		nil,
 	)
-	_, _, source_search, source_panel, _, transcript, exercise_search, exercise_panel, exercise_name, _ :=
+	_, _, source_search, source_panel, _, transcript, exercise_search, exercise_panel, exercise_name, _, _ :=
 		layout_rects()
 	source_content := source_content_rect(source_search, source_panel)
 	transcript_content := transcript_content_rect(transcript)
@@ -8698,6 +9483,11 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		if key == 53 {close_randomize_help()}
 		return
 	}
+	if ui.pitch.help_open {
+		if key == 53 {close_pitch_help()}
+		if key == 18 {close_pitch_help()}
+		return
+	}
 	if ui.data_modal_open && key == 53 {close_data_modal(); return}
 	if ui.notification_modal_open {
 		if key == 53 {close_notification_history(); return}
@@ -8744,6 +9534,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		   !ui.exercise_rename_open &&
 		   !ui.exercise_metadata_open &&
 		   !ui.randomize_help_open &&
+		   !ui.pitch.help_open &&
 		   !ui.data_modal_open &&
 		   !ui.notification_modal_open &&
 		   state.player != nil {
@@ -8845,6 +9636,9 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	ui.frame_tick += 1
+	if pitch_monitor_poll(&ui.pitch, ui.frame_tick) {
+		ui.needs_redraw = true
+	}
 	if ui.url_probe_pending && ui.frame_tick >= ui.url_probe_due_tick {
 		ui.url_probe_pending = false
 		source_probe_request()
@@ -9129,6 +9923,10 @@ vocal_gui_initialize :: proc(
 	ui.exercise_metadata_index = -1
 	ui.transcript_matches_dirty = true
 	ui.needs_redraw = true
+	pitch_monitor_initialize(
+		&ui.pitch,
+		database_pitch_settings_load(library_database),
+	)
 	flash.state_init(&flash_state)
 	palette_error := command_palette.state_init(
 		&command_palette_state,

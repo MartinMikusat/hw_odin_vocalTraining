@@ -1633,7 +1633,7 @@ terminal_layout_stays_partitioned_at_minimum_size_test :: proc(t: ^testing.T) {
 	defer { ui.width, ui.height = old_width, old_height; ui.mode, ui.source_modal_open = old_mode, old_modal }
 	ui.width, ui.height = 1100, 720
 	ui.mode, ui.source_modal_open = .Create, false
-	import_field, import_button, _, source_panel, player, transcript, _, exercise_panel, _, controls := layout_rects()
+	import_field, import_button, _, source_panel, player, transcript, _, exercise_panel, _, _, controls := layout_rects()
 	testing.expect(t, import_field.w == 0 && import_button.w == 0)
 	testing.expect(t, source_panel.x+source_panel.w < player.x)
 	testing.expect(t, player.x+player.w < exercise_panel.x)
@@ -2690,14 +2690,84 @@ mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, control_action_for_slot(.Play, 3), 8)
 	testing.expect_value(t, control_action_for_slot(.Play, 4), 7)
 	testing.expect_value(t, control_action_for_slot(.Play, 5), 9)
-	testing.expect_value(t, control_action_for_slot(.Play, 6), -1)
+	testing.expect_value(t, control_action_for_slot(.Play, 6), 11)
 	testing.expect_value(t, control_slot_for_action(.Play, 10), 0)
 	testing.expect_value(t, control_slot_for_action(.Play, 3), 1)
 	testing.expect_value(t, control_slot_for_action(.Play, 4), 2)
 	testing.expect_value(t, control_slot_for_action(.Play, 7), 4)
 	testing.expect_value(t, control_slot_for_action(.Play, 8), 3)
 	testing.expect_value(t, control_slot_for_action(.Play, 9), 5)
+	testing.expect_value(t, control_slot_for_action(.Play, 11), 6)
 	testing.expect_value(t, control_slot_for_action(.Play, 0), -1)
+}
+
+@(test)
+pitch_monitor_registers_controls_and_help_overlay_test :: proc(
+	t: ^testing.T,
+) {
+	previous_state := state
+	previous_ui := ui
+	previous_ui_build := ui_build
+	previous_recovery := library_recovery_state
+	previous_pending := major_change_pending
+	defer {
+		state = previous_state
+		ui = previous_ui
+		ui_build = previous_ui_build
+		library_recovery_state = previous_recovery
+		major_change_pending = previous_pending
+	}
+	state = App_State{active_source = -1}
+	ui = UI_State{
+		width = 1100,
+		height = 720,
+		mode = .Play,
+		active_exercise = -1,
+		source_details_index = -1,
+		source_modal_refetch_index = -1,
+		exercise_rename_index = -1,
+		exercise_metadata_index = -1,
+		transcript_active_match = -1,
+	}
+	ui.pitch.settings = pitch_default_settings()
+	ui.pitch.permission = .Unknown
+	library_recovery_state = {}
+	major_change_pending = {}
+
+	frame_arena: mem_virtual.Arena
+	frame_error := mem_virtual.arena_init_static(
+		&frame_arena,
+		1024 * 1024,
+		4096,
+	)
+	testing.expect(t, frame_error == nil)
+	if frame_error != nil {return}
+	defer mem_virtual.arena_destroy(&frame_arena)
+	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	testing.expect(t, find_ui_control_by_action(.Pitch_Toggle) != nil)
+	testing.expect(t, find_ui_control_by_action(.Pitch_Reference_Down) != nil)
+	testing.expect(t, find_ui_control_by_action(.Pitch_Reference_Up) != nil)
+	for index in 0 ..< 3 {
+		testing.expect(t, find_ui_control_by_action_and_index(.Pitch_Range, index) != nil)
+		testing.expect(t, find_ui_control_by_action_and_index(.Pitch_Labels, index) != nil)
+	}
+	for index in 0 ..< 12 {
+		testing.expect(t, find_ui_control_by_action_and_index(.Pitch_Transpose, index) != nil)
+	}
+	chart := find_ui_control_by_action(.Pitch_Chart)
+	testing.expect(t, chart != nil)
+	if chart != nil {
+		testing.expect(t, .Accessibility in chart.flags)
+		testing.expect(t, .Flash not_in chart.flags)
+		testing.expect(t, .Primary_Press not_in chart.flags)
+	}
+
+	ui.pitch.help_open = true
+	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
+	testing.expect_value(t, ui_build.diagnostic_surface.overlay, "pitch-help")
+	testing.expect(t, find_ui_control_by_action(.Close_Pitch_Help) != nil)
+	testing.expect(t, find_ui_control_by_action(.Pitch_Toggle) == nil)
 }
 
 @(test)

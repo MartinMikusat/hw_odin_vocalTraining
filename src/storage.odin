@@ -612,6 +612,43 @@ database_interface_theme_save :: proc(
 	       sqlite3_step(statement) == SQLITE_DONE
 }
 
+database_pitch_settings_load :: proc(
+	database: ^SQLite_DB,
+) -> Pitch_Settings {
+	defaults := pitch_default_settings()
+	if database == nil {return defaults}
+	statement, ok := sqlite_prepare(
+		database,
+		"SELECT value FROM app_preferences WHERE key = 'pitch_settings'",
+	)
+	if !ok {return defaults}
+	defer sqlite3_finalize(statement)
+	if sqlite3_step(statement) != SQLITE_ROW {return defaults}
+	value := sqlite3_column_text(statement, 0)
+	if value == nil {return defaults}
+	settings, valid := pitch_settings_decode(string(value))
+	if !valid {return defaults}
+	return settings
+}
+
+database_pitch_settings_save :: proc(
+	database: ^SQLite_DB,
+	settings: Pitch_Settings,
+) -> bool {
+	if database == nil || !pitch_settings_valid(settings) {return false}
+	statement, ok := sqlite_prepare(
+		database,
+		`INSERT INTO app_preferences (key, value)
+		 VALUES ('pitch_settings', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	)
+	if !ok {return false}
+	defer sqlite3_finalize(statement)
+	value := pitch_settings_encode(settings)
+	return sqlite_bind_text_value(statement, 1, value) &&
+	       sqlite3_step(statement) == SQLITE_DONE
+}
+
 database_exercise_randomization_save :: proc(
 	database: ^SQLite_DB,
 	exercise_id: string,

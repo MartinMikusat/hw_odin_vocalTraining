@@ -101,6 +101,8 @@ vocal_hot_can_reload :: proc "c" () -> bool {
 	       source_metadata_job == nil &&
 	       source_probe_job == nil &&
 	       library_recovery == nil &&
+	       !ui.pitch.tracking &&
+	       !ui.pitch.permission_pending &&
 	       cli_ipc_work == nil
 }
 

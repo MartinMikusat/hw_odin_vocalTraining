@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Vocal Training uses the microphone to show your live singing pitch. Audio is not recorded or stored.</string>
   <key>CFBundleExecutable</key><string>VocalTraining</string>
   <key>CFBundleIdentifier</key><string>local.vocal-training.app</string>
   <key>CFBundleName</key><string>Vocal Training</string>

@@ -59,13 +59,20 @@ mkdir -p "$APP/Contents/MacOS"
 EXECUTABLE="$APP/Contents/MacOS/VocalTraining"
 TEMP="$ROOT/build/temp/$MODE"
 mkdir -p "$TEMP"
+PITCH_CAPTURE_OBJECT="$TEMP/pitch_capture.o"
+xcrun clang \
+  -fobjc-arc \
+  -fblocks \
+  -mmacosx-version-min=13.0 \
+  -c "$ROOT/src/pitch_capture.m" \
+  -o "$PITCH_CAPTURE_OBJECT"
 cd "$TEMP"
 odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
   -collection:match_sorter="$MATCH_SORTER_ROOT" \
   -collection:flash="$UI_FLASH_ROOT" \
   -collection:command_palette="$COMMAND_PALETTE_ROOT" \
   -collection:components="$COMPONENTS_ROOT" \
-  -extra-linker-flags:"-framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
+  -extra-linker-flags:"$PITCH_CAPTURE_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/Fonts"
 cp "$FONT_ROOT/Iosevka-Regular.ttf" "$APP/Contents/Resources/Fonts/Iosevka-Regular.ttf"

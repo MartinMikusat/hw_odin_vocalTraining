@@ -11,7 +11,7 @@ import "core:time"
 import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
 
-UI_DIAGNOSTIC_SCHEMA_VERSION :: 2
+UI_DIAGNOSTIC_SCHEMA_VERSION :: 3
 UI_DIAGNOSTIC_ARTIFACT_RETENTION :: 20
 
 UI_Diagnostic_Surface :: struct {
@@ -20,6 +20,11 @@ UI_Diagnostic_Surface :: struct {
 	background:           string,
 	playback_active:      bool,
 	audio_engine_running: bool,
+	pitch_tracking:       bool,
+	pitch_permission:     int,
+	pitch_trace_count:    int,
+	pitch_frequency_hz:   f64,
+	pitch_confidence:     f64,
 	rendered_frame_count: uint,
 }
 
@@ -93,6 +98,7 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 	case major_change_pending.open: overlay = "backup-warning"
 	case command_palette.is_open(&command_palette_state): overlay = "command-palette"
 	case ui.notification_modal_open: overlay = "notification-history"
+	case ui.pitch.help_open: overlay = "pitch-help"
 	case ui.randomize_help_open: overlay = "randomize-help"
 	case ui.exercise_metadata_open: overlay = "exercise-metadata"
 	case ui.exercise_rename_open: overlay = "exercise-rename"
@@ -112,6 +118,11 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 		playback_active = state.player != nil &&
 		                  msg_f32(state.player, sel_registerName("rate")) > 0,
 		audio_engine_running = metal_audio_engine_running(),
+		pitch_tracking = ui.pitch.tracking,
+		pitch_permission = int(ui.pitch.permission),
+		pitch_trace_count = ui.pitch.trace_count,
+		pitch_frequency_hz = ui.pitch.current_hz,
+		pitch_confidence = ui.pitch.current_confidence,
 		rendered_frame_count = ui.render_count,
 	}
 }
@@ -153,6 +164,11 @@ ui_diagnostic_snapshot :: proc(
 			background = strings.clone(surface.background, allocator),
 			playback_active = surface.playback_active,
 			audio_engine_running = surface.audio_engine_running,
+			pitch_tracking = surface.pitch_tracking,
+			pitch_permission = surface.pitch_permission,
+			pitch_trace_count = surface.pitch_trace_count,
+			pitch_frequency_hz = surface.pitch_frequency_hz,
+			pitch_confidence = surface.pitch_confidence,
 			rendered_frame_count = surface.rendered_frame_count,
 		},
 		controls = outputs,
