@@ -942,11 +942,34 @@ resume_player_playback :: proc() -> bool {
 	if state.player == nil {return false}
 	seconds, ok := current_seconds()
 	if !ok {return false}
+	if playback_position_finished(seconds, ui.player_duration) {
+		start_loaded_playback_at(0)
+		return msg_f32(state.player, sel_registerName("rate")) > 0
+	}
 	metal_audio_seek(seconds, false)
 	if !metal_audio_play() {return false}
 	msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
 	ui.needs_redraw = true
 	return true
+}
+
+playback_position_finished :: proc(seconds, duration: f64) -> bool {
+	return duration > 0 && seconds >= max(0, duration - 0.05)
+}
+
+exercise_autoplay_should_advance :: proc(
+	enabled,
+	source_playback,
+	was_active,
+	playback_active: bool,
+	seconds,
+	duration: f64,
+) -> bool {
+	return enabled &&
+	       !source_playback &&
+	       was_active &&
+	       !playback_active &&
+	       playback_position_finished(seconds, duration)
 }
 
 reset_player_playback :: proc() {
@@ -2598,6 +2621,136 @@ randomize_exercise :: proc() -> bool {
 	if !record_randomized_exercise(index) {
 		set_error_status(
 			"Exercise playback started, but Randomize history could not be saved",
+		)
+	}
+	return true
+}
+
+exercise_matches_filter :: proc(exercise: Exercise, filter: string) -> bool {
+	return len(filter) == 0 || strings.contains(exercise.name, filter)
+}
+
+filtered_exercise_count_for :: proc(
+	exercises: []Exercise,
+	filter: string,
+) -> int {
+	count := 0
+	for exercise in exercises {
+		if exercise_matches_filter(exercise, filter) {count += 1}
+	}
+	return count
+}
+
+next_filtered_exercise_index :: proc(
+	exercises: []Exercise,
+	active_exercise: int,
+	filter: string,
+) -> int {
+	if len(exercises) == 0 {return -1}
+	start := -1
+	if active_exercise >= 0 &&
+	   active_exercise < len(exercises) &&
+	   exercise_matches_filter(exercises[active_exercise], filter) {
+		start = active_exercise
+	}
+	for offset in 1 ..= len(exercises) {
+		index := (start + offset) % len(exercises)
+		if exercise_matches_filter(exercises[index], filter) {
+			return index
+		}
+	}
+	return -1
+}
+
+filtered_random_exercise_total_weight :: proc(
+	exercises: []Exercise,
+	active_exercise: int,
+	filter: string,
+) -> int {
+	eligible_count := filtered_exercise_count_for(exercises, filter)
+	if eligible_count == 0 {return 0}
+	latest := random_exercise_latest_sequence(exercises)
+	exclude_active :=
+		eligible_count > 1 &&
+		active_exercise >= 0 &&
+		active_exercise < len(exercises) &&
+		exercise_matches_filter(exercises[active_exercise], filter)
+	total := 0
+	for exercise, index in exercises {
+		if !exercise_matches_filter(exercise, filter) {continue}
+		if exclude_active && index == active_exercise {continue}
+		total += random_exercise_weight(
+			exercise.last_randomized_sequence,
+			latest,
+		)
+	}
+	return total
+}
+
+filtered_random_exercise_index_for_weighted_roll :: proc(
+	exercises: []Exercise,
+	active_exercise: int,
+	filter: string,
+	roll: int,
+) -> int {
+	total := filtered_random_exercise_total_weight(
+		exercises,
+		active_exercise,
+		filter,
+	)
+	if total <= 0 {return -1}
+	remaining := roll % total
+	latest := random_exercise_latest_sequence(exercises)
+	eligible_count := filtered_exercise_count_for(exercises, filter)
+	exclude_active :=
+		eligible_count > 1 &&
+		active_exercise >= 0 &&
+		active_exercise < len(exercises) &&
+		exercise_matches_filter(exercises[active_exercise], filter)
+	for exercise, index in exercises {
+		if !exercise_matches_filter(exercise, filter) {continue}
+		if exclude_active && index == active_exercise {continue}
+		weight := random_exercise_weight(
+			exercise.last_randomized_sequence,
+			latest,
+		)
+		if remaining < weight {return index}
+		remaining -= weight
+	}
+	return -1
+}
+
+play_next_exercise :: proc() -> bool {
+	index := -1
+	if ui.exercise_shuffle {
+		total_weight := filtered_random_exercise_total_weight(
+			state.exercises[:],
+			ui.active_exercise,
+			ui.exercise_search,
+		)
+		if total_weight > 0 {
+			index = filtered_random_exercise_index_for_weighted_roll(
+				state.exercises[:],
+				ui.active_exercise,
+				ui.exercise_search,
+				rand.int_max(total_weight),
+			)
+		}
+	} else {
+		index = next_filtered_exercise_index(
+			state.exercises[:],
+			ui.active_exercise,
+			ui.exercise_search,
+		)
+	}
+	if index < 0 {
+		set_text(state.status, "No exercises match the current filter")
+		return false
+	}
+	if !play_exercise(index) {return false}
+	if ui.exercise_shuffle && !record_randomized_exercise(index) {
+		set_error_status(
+			"Exercise playback started, but Shuffle history could not be saved",
 		)
 	}
 	return true

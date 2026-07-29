@@ -594,8 +594,14 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	testing.expect(t, len(ui_build.controls) > 4)
 	randomize := find_ui_control_by_action(.Randomize)
 	randomize_help := find_ui_control_by_action(.Open_Randomize_Help)
+	play_next := find_ui_control_by_action(.Play_Next)
+	shuffle := find_ui_control_by_action(.Shuffle_Toggle)
+	autoplay := find_ui_control_by_action(.Autoplay_Toggle)
 	testing.expect(t, randomize != nil)
 	testing.expect(t, randomize_help != nil)
+	testing.expect(t, play_next != nil)
+	testing.expect(t, shuffle != nil)
+	testing.expect(t, autoplay != nil)
 	if randomize != nil {
 		testing.expect(t, .Enabled in randomize.flags)
 		testing.expect_value(
@@ -625,6 +631,27 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 		testing.expect_value(t, randomize.rect.y, randomize_help.rect.y)
 		testing.expect_value(t, randomize.rect.h, randomize_help.rect.h)
 		testing.expect_value(t, randomize_help.rect.w, randomize_help.rect.h)
+	}
+	if play_next != nil {
+		testing.expect(t, .Enabled in play_next.flags)
+		testing.expect_value(
+			t,
+			play_next.accessibility_label,
+			"Play the next filtered exercise",
+		)
+		testing.expect_value(t, play_next.flash_label, "play next exercise")
+	}
+	if shuffle != nil {
+		testing.expect(t, .Enabled in shuffle.flags)
+		testing.expect_value(t, shuffle.accessibility_role, "AXCheckBox")
+		testing.expect_value(t, shuffle.accessibility_label, "Shuffle off")
+		testing.expect_value(t, shuffle.flash_label, "toggle shuffle")
+	}
+	if autoplay != nil {
+		testing.expect(t, .Enabled in autoplay.flags)
+		testing.expect_value(t, autoplay.accessibility_role, "AXCheckBox")
+		testing.expect_value(t, autoplay.accessibility_label, "Autoplay off")
+		testing.expect_value(t, autoplay.flash_label, "toggle autoplay")
 	}
 	randomize_registry_index, run_registry_index := -1, -1
 	for control, index in ui_build.controls {
@@ -1647,9 +1674,20 @@ terminal_control_rail_fills_width_without_overlap_test :: proc(t: ^testing.T) {
 	defer ui.mode = old_mode
 	ui.mode = .Create
 	controls := UI_Rect{18,42,1064,28}
-	previous := control_rect(controls, 0)
-	for index in 1..<8 {
-		current := control_rect(controls, index)
+	previous := control_rect(controls, control_action_for_slot(.Create, 0))
+	for slot in 1..<8 {
+		action := control_action_for_slot(.Create, slot)
+		current := control_rect(controls, action)
+		testing.expect(t, previous.x+previous.w < current.x)
+		previous = current
+	}
+	testing.expect(t, previous.x+previous.w <= controls.x+controls.w)
+
+	ui.mode = .Play
+	previous = control_rect(controls, control_action_for_slot(.Play, 0))
+	for slot in 1..<10 {
+		action := control_action_for_slot(.Play, slot)
+		current := control_rect(controls, action)
 		testing.expect(t, previous.x+previous.w < current.x)
 		previous = current
 	}
@@ -2680,25 +2718,97 @@ library_recovery_quality_requires_the_saved_height_test :: proc(t: ^testing.T) {
 
 @(test)
 mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
-	for slot in 0..<8 {
-		testing.expect_value(t, control_action_for_slot(.Create, slot), slot)
-		testing.expect_value(t, control_slot_for_action(.Create, slot), slot)
+	create_actions := [8]int{5, 7, 3, 4, 6, 0, 1, 2}
+	for action, slot in create_actions {
+		testing.expect_value(t, control_action_for_slot(.Create, slot), action)
+		testing.expect_value(t, control_slot_for_action(.Create, action), slot)
 	}
-	testing.expect_value(t, control_action_for_slot(.Play, 0), 10)
-	testing.expect_value(t, control_action_for_slot(.Play, 1), 3)
-	testing.expect_value(t, control_action_for_slot(.Play, 2), 4)
-	testing.expect_value(t, control_action_for_slot(.Play, 3), 8)
-	testing.expect_value(t, control_action_for_slot(.Play, 4), 7)
-	testing.expect_value(t, control_action_for_slot(.Play, 5), 9)
-	testing.expect_value(t, control_action_for_slot(.Play, 6), 11)
-	testing.expect_value(t, control_slot_for_action(.Play, 10), 0)
-	testing.expect_value(t, control_slot_for_action(.Play, 3), 1)
-	testing.expect_value(t, control_slot_for_action(.Play, 4), 2)
-	testing.expect_value(t, control_slot_for_action(.Play, 7), 4)
-	testing.expect_value(t, control_slot_for_action(.Play, 8), 3)
-	testing.expect_value(t, control_slot_for_action(.Play, 9), 5)
-	testing.expect_value(t, control_slot_for_action(.Play, 11), 6)
+	play_actions := [10]int{12, 10, 8, 9, 7, 3, 4, 13, 14, 11}
+	for action, slot in play_actions {
+		testing.expect_value(t, control_action_for_slot(.Play, slot), action)
+		testing.expect_value(t, control_slot_for_action(.Play, action), slot)
+	}
 	testing.expect_value(t, control_slot_for_action(.Play, 0), -1)
+}
+
+@(test)
+numbered_action_codes_match_interface_sections_test :: proc(t: ^testing.T) {
+	create_codes := [8]Numbered_Action_Code{
+		{1, 1}, {1, 2}, {2, 1}, {2, 2},
+		{2, 3}, {3, 1}, {3, 2}, {3, 3},
+	}
+	for code, slot in create_codes {
+		action := control_action_for_slot(.Create, slot)
+		actual, found := numbered_action_code_for_action(.Create, action)
+		testing.expect(t, found)
+		testing.expect_value(t, actual, code)
+		testing.expect_value(
+			t,
+			numbered_action_for_code(.Create, code.section, code.action),
+			action,
+		)
+	}
+	play_codes := [10]Numbered_Action_Code{
+		{1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5},
+		{2, 1}, {2, 2}, {2, 3}, {2, 4}, {3, 1},
+	}
+	for code, slot in play_codes {
+		action := control_action_for_slot(.Play, slot)
+		actual, found := numbered_action_code_for_action(.Play, action)
+		testing.expect(t, found)
+		testing.expect_value(t, actual, code)
+		testing.expect_value(
+			t,
+			numbered_action_for_code(.Play, code.section, code.action),
+			action,
+		)
+	}
+}
+
+@(test)
+numbered_action_keys_use_digits_one_through_nine_test :: proc(t: ^testing.T) {
+	key_codes := [9]uint{18, 19, 20, 21, 23, 22, 26, 28, 25}
+	for key_code, index in key_codes {
+		digit, found := number_digit_for_key_code(key_code)
+		testing.expect(t, found)
+		testing.expect_value(t, digit, index+1)
+	}
+	_, found := number_digit_for_key_code(29)
+	testing.expect(t, !found)
+}
+
+@(test)
+numbered_action_prefix_waits_expires_and_clears_test :: proc(t: ^testing.T) {
+	old_prefix := ui.number_prefix
+	old_deadline := ui.number_prefix_deadline_ms
+	old_redraw := ui.needs_redraw
+	defer {
+		ui.number_prefix = old_prefix
+		ui.number_prefix_deadline_ms = old_deadline
+		ui.needs_redraw = old_redraw
+	}
+	clear_number_prefix()
+	action, handled := consume_numbered_action_digit_at(.Play, 2, 10_000)
+	testing.expect(t, handled)
+	testing.expect_value(t, action, -1)
+	testing.expect_value(t, ui.number_prefix, 2)
+
+	action, handled = consume_numbered_action_digit_at(.Play, 3, 10_500)
+	testing.expect(t, handled)
+	testing.expect_value(t, action, 13)
+	testing.expect_value(t, ui.number_prefix, 0)
+
+	action, handled = consume_numbered_action_digit_at(.Play, 2, 20_000)
+	testing.expect(t, handled)
+	action, handled = consume_numbered_action_digit_at(.Play, 3, 21_000)
+	testing.expect(t, handled)
+	testing.expect_value(t, action, -1)
+	testing.expect_value(t, ui.number_prefix, 3)
+
+	action, handled = consume_numbered_action_digit_at(.Play, 9, 21_100)
+	testing.expect(t, handled)
+	testing.expect_value(t, action, -1)
+	testing.expect_value(t, ui.number_prefix, 0)
 }
 
 @(test)
@@ -2779,6 +2889,141 @@ random_exercise_weight_increases_with_skipped_draws_test :: proc(t: ^testing.T) 
 	testing.expect_value(t, random_exercise_weight(6, 10), 6)
 	testing.expect_value(t, random_exercise_weight(1, 10), 6)
 	testing.expect_value(t, random_exercise_weight(0, 10), 6)
+}
+
+@(test)
+play_next_exercise_index_respects_filter_and_wraps_test :: proc(
+	t: ^testing.T,
+) {
+	exercises := [4]Exercise{
+		{name = "Warm up"},
+		{name = "Breathing"},
+		{name = "Warm down"},
+		{name = "Resonance"},
+	}
+	testing.expect_value(
+		t,
+		next_filtered_exercise_index(exercises[:], -1, "Warm"),
+		0,
+	)
+	testing.expect_value(
+		t,
+		next_filtered_exercise_index(exercises[:], 0, "Warm"),
+		2,
+	)
+	testing.expect_value(
+		t,
+		next_filtered_exercise_index(exercises[:], 2, "Warm"),
+		0,
+	)
+	testing.expect_value(
+		t,
+		next_filtered_exercise_index(exercises[:], 1, "Warm"),
+		0,
+	)
+	testing.expect_value(
+		t,
+		next_filtered_exercise_index(exercises[:], 0, "Missing"),
+		-1,
+	)
+}
+
+@(test)
+shuffled_play_next_uses_randomize_weights_within_filter_test :: proc(
+	t: ^testing.T,
+) {
+	exercises := [3]Exercise{
+		{name = "Warm up", last_randomized_sequence = 10},
+		{name = "Breathing", last_randomized_sequence = 9},
+		{name = "Warm down", last_randomized_sequence = 0},
+	}
+	testing.expect_value(
+		t,
+		filtered_random_exercise_total_weight(exercises[:], -1, "Warm"),
+		8,
+	)
+	for roll in 0 ..< 8 {
+		expected := 2
+		if roll < 2 {expected = 0}
+		testing.expect_value(
+			t,
+			filtered_random_exercise_index_for_weighted_roll(
+				exercises[:],
+				-1,
+				"Warm",
+				roll,
+			),
+			expected,
+		)
+	}
+	testing.expect_value(
+		t,
+		filtered_random_exercise_total_weight(exercises[:], 0, "Warm"),
+		6,
+	)
+	testing.expect_value(
+		t,
+		filtered_random_exercise_index_for_weighted_roll(
+			exercises[:],
+			0,
+			"Warm",
+			0,
+		),
+		2,
+	)
+}
+
+@(test)
+exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
+	t: ^testing.T,
+) {
+	testing.expect(t, playback_position_finished(10, 10))
+	testing.expect(t, playback_position_finished(9.96, 10))
+	testing.expect(t, !playback_position_finished(9.9, 10))
+	testing.expect(
+		t,
+		exercise_autoplay_should_advance(
+			true,
+			false,
+			true,
+			false,
+			10,
+			10,
+		),
+	)
+	testing.expect(
+		t,
+		!exercise_autoplay_should_advance(
+			true,
+			true,
+			true,
+			false,
+			10,
+			10,
+		),
+	)
+	testing.expect(
+		t,
+		!exercise_autoplay_should_advance(
+			false,
+			false,
+			true,
+			false,
+			10,
+			10,
+		),
+	)
+	testing.expect(
+		t,
+		!exercise_autoplay_should_advance(
+			true,
+			false,
+			false,
+			false,
+			10,
+			10,
+		),
+	)
 }
 
 @(test)

@@ -8,6 +8,7 @@ import "core:math"
 import mem_virtual "core:mem/virtual"
 import "core:os"
 import "core:strings"
+import "core:time"
 import posix "core:sys/posix"
 import CF "core:sys/darwin/CoreFoundation"
 import command_palette "command_palette:."
@@ -106,6 +107,10 @@ UI_Mode :: enum {
 	Play,
 }
 
+Numbered_Action_Code :: struct {
+	section, action: int,
+}
+
 Source_Hint_Control :: enum {
 	None,
 	Reset,
@@ -148,6 +153,8 @@ UI_State :: struct {
 	using input_state:  text_input.State,
 	palette_previous_input: text_input.Focus_Snapshot,
 	mode:               UI_Mode,
+	number_prefix:      int,
+	number_prefix_deadline_ms: i64,
 	dark_theme:         bool,
 	source_modal_open:  bool,
 	source_modal_refetch_index: int,
@@ -188,6 +195,9 @@ UI_State :: struct {
 	transcript_has_follow_target: bool,
 	exercise_scroll:    f64,
 	active_exercise:    int,
+	exercise_shuffle:   bool,
+	exercise_autoplay:  bool,
+	playback_was_active: bool,
 	player_volume:      f32,
 	playback_rate:      f32,
 	player_duration:    f64,
@@ -375,6 +385,9 @@ UI_Action_Kind :: enum {
 	Randomize,
 	Open_Randomize_Help,
 	Close_Randomize_Help,
+	Play_Next,
+	Shuffle_Toggle,
+	Autoplay_Toggle,
 	Pitch_Toggle,
 	Pitch_Reference_Down,
 	Pitch_Reference_Up,
@@ -1335,7 +1348,7 @@ pitch_help_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
 randomize_help_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 	return UI_Rect{
 		modal.x + 24,
-		modal.y + modal.h - 284 - f64(row) * 30,
+		modal.y + modal.h - 306 - f64(row) * 30,
 		modal.w - 48,
 		29,
 	}
@@ -1796,6 +1809,7 @@ schedule_source_probe :: proc(delay_frames: uint) {
 set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.mode == mode {return}
 	cancel_ui_flash()
+	clear_number_prefix()
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
 	if ui.exercise_rename_open {close_exercise_rename()}
@@ -1880,46 +1894,144 @@ layout_rects :: proc(
 	return
 }
 
+control_slot_count :: proc(mode: UI_Mode) -> int {
+	return mode == .Create ? 8 : 10
+}
+
 control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
-	if mode == .Create {return slot if slot >= 0 && slot < 8 else -1}
+	if mode == .Create {
+		switch slot {
+		case 0: return 5
+		case 1: return 7
+		case 2: return 3
+		case 3: return 4
+		case 4: return 6
+		case 5: return 0
+		case 6: return 1
+		case 7: return 2
+		}
+		return -1
+	}
 	switch slot {
-	case 0:
-		return 10
-	case 1:
-		return 3
-	case 2:
-		return 4
-	case 3:
-		return 8
-	case 4:
-		return 7
-	case 5:
-		return 9
-	case 6:
-		return 11
+	case 0: return 12
+	case 1: return 10
+	case 2: return 8
+	case 3: return 9
+	case 4: return 7
+	case 5: return 3
+	case 6: return 4
+	case 7: return 13
+	case 8: return 14
+	case 9: return 11
 	}
 	return -1
 }
 
 control_slot_for_action :: proc(mode: UI_Mode, action: int) -> int {
-	if mode == .Create {return action if action >= 0 && action < 8 else -1}
-	switch action {
-	case 10:
-		return 0
-	case 3:
-		return 1
-	case 4:
-		return 2
-	case 7:
-		return 4
-	case 8:
-		return 3
-	case 9:
-		return 5
-	case 11:
-		return 6
+	for slot in 0 ..< control_slot_count(mode) {
+		if control_action_for_slot(mode, slot) == action {return slot}
 	}
 	return -1
+}
+
+numbered_action_code_for_action :: proc(
+	mode: UI_Mode,
+	action: int,
+) -> (Numbered_Action_Code, bool) {
+	if mode == .Create {
+		switch action {
+		case 5: return {1, 1}, true
+		case 7: return {1, 2}, true
+		case 3: return {2, 1}, true
+		case 4: return {2, 2}, true
+		case 6: return {2, 3}, true
+		case 0: return {3, 1}, true
+		case 1: return {3, 2}, true
+		case 2: return {3, 3}, true
+		}
+		return {}, false
+	}
+	switch action {
+	case 12: return {1, 1}, true
+	case 10: return {1, 2}, true
+	case 8:  return {1, 3}, true
+	case 9:  return {1, 4}, true
+	case 7:  return {1, 5}, true
+	case 3:  return {2, 1}, true
+	case 4:  return {2, 2}, true
+	case 13: return {2, 3}, true
+	case 14: return {2, 4}, true
+	case 11: return {3, 1}, true
+	}
+	return {}, false
+}
+
+numbered_action_for_code :: proc(
+	mode: UI_Mode,
+	section, action_digit: int,
+) -> int {
+	for slot in 0 ..< control_slot_count(mode) {
+		action := control_action_for_slot(mode, slot)
+		code, found := numbered_action_code_for_action(mode, action)
+		if found && code.section == section && code.action == action_digit {
+			return action
+		}
+	}
+	return -1
+}
+
+numbered_action_section_exists :: proc(mode: UI_Mode, section: int) -> bool {
+	for slot in 0 ..< control_slot_count(mode) {
+		action := control_action_for_slot(mode, slot)
+		code, found := numbered_action_code_for_action(mode, action)
+		if found && code.section == section {return true}
+	}
+	return false
+}
+
+numbered_action_time_ms :: proc() -> i64 {
+	return time.to_unix_nanoseconds(time.now()) / 1_000_000
+}
+
+clear_number_prefix :: proc() {
+	ui.number_prefix = 0
+	ui.number_prefix_deadline_ms = 0
+}
+
+expire_number_prefix_at :: proc(now_ms: i64) -> bool {
+	if ui.number_prefix == 0 || now_ms < ui.number_prefix_deadline_ms {
+		return false
+	}
+	clear_number_prefix()
+	ui.needs_redraw = true
+	return true
+}
+
+consume_numbered_action_digit_at :: proc(
+	mode: UI_Mode,
+	digit: int,
+	now_ms: i64,
+) -> (action: int, handled: bool) {
+	_ = expire_number_prefix_at(now_ms)
+	if ui.number_prefix == 0 {
+		if !numbered_action_section_exists(mode, digit) {return -1, false}
+		ui.number_prefix = digit
+		ui.number_prefix_deadline_ms = now_ms + 1_000
+		ui.needs_redraw = true
+		return -1, true
+	}
+	section := ui.number_prefix
+	clear_number_prefix()
+	ui.needs_redraw = true
+	return numbered_action_for_code(mode, section, digit), true
+}
+
+number_digit_for_key_code :: proc(key_code: uint) -> (int, bool) {
+	key_codes := [9]uint{18, 19, 20, 21, 23, 22, 26, 28, 25}
+	for candidate, index in key_codes {
+		if candidate == key_code {return index + 1, true}
+	}
+	return 0, false
 }
 
 create_action_is_emphasized :: proc(
@@ -2120,11 +2232,36 @@ footer_task_summary_rect :: proc(card: UI_Rect, has_action: bool) -> UI_Rect {
 control_rect :: proc(controls: UI_Rect, action: int) -> UI_Rect {
 	slot := control_slot_for_action(ui.mode, action)
 	if slot < 0 {return {}}
-	count := 8
-	if ui.mode == .Play {count = 7}
-	gap := 6.0
-	cell_w := (controls.w - gap * f64(count - 1)) / f64(count)
-	return UI_Rect{controls.x + f64(slot) * (cell_w + gap), controls.y, cell_w, controls.h}
+	count := control_slot_count(ui.mode)
+	inside_gap := 4.0
+	section_gap := 12.0
+	total_gap := 0.0
+	for gap_index in 0 ..< count-1 {
+		left := control_action_for_slot(ui.mode, gap_index)
+		right := control_action_for_slot(ui.mode, gap_index+1)
+		left_code, left_found := numbered_action_code_for_action(ui.mode, left)
+		right_code, right_found := numbered_action_code_for_action(ui.mode, right)
+		if left_found && right_found && left_code.section != right_code.section {
+			total_gap += section_gap
+		} else {
+			total_gap += inside_gap
+		}
+	}
+	cell_w := (controls.w-total_gap)/f64(count)
+	x := controls.x
+	for gap_index in 0 ..< slot {
+		left := control_action_for_slot(ui.mode, gap_index)
+		right := control_action_for_slot(ui.mode, gap_index+1)
+		left_code, left_found := numbered_action_code_for_action(ui.mode, left)
+		right_code, right_found := numbered_action_code_for_action(ui.mode, right)
+		gap := inside_gap
+		if left_found && right_found && left_code.section != right_code.section {
+			gap = section_gap
+		}
+		x += cell_w+gap
+	}
+	if slot == count-1 {x = controls.x+controls.w-cell_w}
+	return UI_Rect{x, controls.y, cell_w, controls.h}
 }
 
 randomize_primary_rect :: proc(controls: UI_Rect) -> UI_Rect {
@@ -2622,13 +2759,10 @@ sync_transcript_playback :: proc() {
 }
 
 filtered_exercise_count :: proc() -> int {
-	count := 0
-	for exercise in state.exercises {
-		if len(ui.exercise_search) > 0 &&
-		   !strings.contains(exercise.name, ui.exercise_search) {continue}
-		count += 1
-	}
-	return count
+	return filtered_exercise_count_for(
+		state.exercises[:],
+		ui.exercise_search,
+	)
 }
 
 normalize_scroll_offsets :: proc() {
@@ -3532,7 +3666,7 @@ draw_randomize_help :: proc(
 		.Center,
 		bright,
 	)
-	explanation := [7]string{
+	explanation := [8]string{
 		"Randomize draws from the complete exercise library. Search text does not limit the draw.",
 		"The active exercise is skipped when another exercise is available.",
 		"A selected exercise returns to weight 2.",
@@ -3540,6 +3674,7 @@ draw_randomize_help :: proc(
 		"Never-selected exercises start at weight 6. Manual playback does not change the history.",
 		"Weight 6 has three times the chance of weight 2, but each draw remains random.",
 		"Randomize history stays on this device and is not included in library exports.",
+		"Shuffle applies the same weights to filtered Play Next selections and updates this history.",
 	}
 	for line, line_index in explanation {
 		draw_text_in_rect(
@@ -3562,7 +3697,7 @@ draw_randomize_help :: proc(
 		ctx,
 		font,
 		"HIGHEST CHANCE ON THE NEXT DRAW",
-		UI_Rect{modal.x + 24, modal.y + modal.h - 250, 276, 24},
+		UI_Rect{modal.x + 24, modal.y + modal.h - 272, 276, 24},
 		.Start,
 		.Center,
 		cyan,
@@ -3577,7 +3712,7 @@ draw_randomize_help :: proc(
 				"ACTIVE EXCLUDED: %s",
 				state.exercises[ui.active_exercise].name,
 			),
-			UI_Rect{modal.x + 310, modal.y + modal.h - 250, modal.w - 334, 24},
+			UI_Rect{modal.x + 310, modal.y + modal.h - 272, modal.w - 334, 24},
 			.End,
 			.Center,
 			muted,
@@ -3588,7 +3723,7 @@ draw_randomize_help :: proc(
 		ctx,
 		font,
 		"EXERCISE",
-		UI_Rect{modal.x + 34, modal.y + modal.h - 274, modal.w - 250, 22},
+		UI_Rect{modal.x + 34, modal.y + modal.h - 296, modal.w - 250, 22},
 		.Start,
 		.Center,
 		muted,
@@ -3597,7 +3732,7 @@ draw_randomize_help :: proc(
 		ctx,
 		font,
 		"WEIGHT",
-		UI_Rect{modal.x + modal.w - 202, modal.y + modal.h - 274, 74, 22},
+		UI_Rect{modal.x + modal.w - 202, modal.y + modal.h - 296, 74, 22},
 		.End,
 		.Center,
 		muted,
@@ -3606,7 +3741,7 @@ draw_randomize_help :: proc(
 		ctx,
 		font,
 		"CHANCE",
-		UI_Rect{modal.x + modal.w - 112, modal.y + modal.h - 274, 78, 22},
+		UI_Rect{modal.x + modal.w - 112, modal.y + modal.h - 296, 78, 22},
 		.End,
 		.Center,
 		muted,
@@ -4869,8 +5004,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			29,
 		}
 		for exercise, index in state.exercises {
-			if len(ui.exercise_search) > 0 &&
-			   !strings.contains(exercise.name, ui.exercise_search) {continue}
+			if !exercise_matches_filter(exercise, ui.exercise_search) {continue}
 			control := find_ui_control_by_action_and_index(.Exercise, index)
 			if control != nil {
 				row = control.rect
@@ -4886,8 +5020,11 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 	}
 
-	control_kinds := [12]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle}
+	control_kinds := [15]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle}
 	valid_range := active_exercise_range_is_valid()
+	number_prefix_active :=
+		ui.number_prefix > 0 &&
+		numbered_action_time_ms() < ui.number_prefix_deadline_ms
 	for kind in control_kinds {
 		rect := ui_control_rect(kind)
 		if rect.w <= 0 {continue}
@@ -4908,6 +5045,19 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 		if enabled && kind == .Pitch_Toggle && ui.pitch.tracking {
 			push_border(vertices, rect, UI_COLOR_GUM_32)
+		}
+		toggle_active :=
+			(kind == .Shuffle_Toggle && ui.exercise_shuffle) ||
+			(kind == .Autoplay_Toggle && ui.exercise_autoplay)
+		if enabled && toggle_active {
+			push_border(vertices, rect, UI_COLOR_GUM_32)
+			push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
+		}
+		action_index := int(kind)-int(UI_Action_Kind.Start)
+		code, has_code := numbered_action_code_for_action(ui.mode, action_index)
+		if number_prefix_active && has_code &&
+		   code.section == ui.number_prefix {
+			push_border(vertices, rect, orange)
 		}
 	}
 	if ui.mode == .Play {
@@ -5501,8 +5651,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		}
 		exercise_index := 1
 		for exercise, index in state.exercises {
-			if len(ui.exercise_search) > 0 &&
-			   !strings.contains(exercise.name, ui.exercise_search) {continue}
+			if !exercise_matches_filter(exercise, ui.exercise_search) {continue}
 			control := find_ui_control_by_action_and_index(.Exercise, index)
 			if control != nil {
 				row = control.rect
@@ -5550,12 +5699,12 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		CGContextRestoreGState(ctx)
 	}
 
-	labels := [12]string {
+	labels := [15]string {
 		"MARK IN",
 		"MARK OUT",
 		"COMMIT",
-		"RUN",
-		"HOLD",
+		"PLAY",
+		"PAUSE",
 		"CAPTIONS",
 		"AUDITION",
 		"DATA",
@@ -5563,21 +5712,28 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		"METADATA",
 		"RANDOMIZE",
 		"PITCH",
+		"PLAY NEXT",
+		"SHUFFLE",
+		"AUTOPLAY",
 	}
-	control_kinds := [12]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle}
+	control_kinds := [15]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle}
 	valid_range := active_exercise_range_is_valid()
 	for label, i in labels {
 		button_label := label
 		if control_kinds[i] == .Pitch_Toggle {
 			button_label = ui.pitch.tracking ? "STOP PITCH" : "START PITCH"
+		} else if control_kinds[i] == .Shuffle_Toggle {
+			button_label = ui.exercise_shuffle ? "SHUFFLE ON" : "SHUFFLE OFF"
+		} else if control_kinds[i] == .Autoplay_Toggle {
+			button_label = ui.exercise_autoplay ? "AUTOPLAY ON" : "AUTOPLAY OFF"
 		}
 		rect := ui_control_rect(control_kinds[i])
-		slot := control_slot_for_action(ui.mode, i)
-		if slot < 0 {continue}
+		code, has_code := numbered_action_code_for_action(ui.mode, i)
+		if !has_code {continue}
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			fmt.tprintf("%02d", slot + 1),
+			fmt.tprintf("%d%d", code.section, code.action),
 			UI_Rect{rect.x + 8, rect.y, 24, rect.h},
 			.Start,
 			.Center,
@@ -6253,6 +6409,12 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Randomize {
 		return ui.mode == .Play && len(state.exercises) > 0
 	}
+	if kind == .Play_Next {
+		return ui.mode == .Play && filtered_exercise_count() > 0
+	}
+	if kind == .Shuffle_Toggle || kind == .Autoplay_Toggle {
+		return ui.mode == .Play
+	}
 	if kind == .Open_Randomize_Help {
 		return ui.mode == .Play
 	}
@@ -6376,7 +6538,9 @@ add_ax_element :: proc(
 	   kind == .Pitch_Highlight ||
 	   kind == .Pitch_Range ||
 	   kind == .Pitch_Labels ||
-	   kind == .Pitch_Transpose {
+	   kind == .Pitch_Transpose ||
+	   kind == .Shuffle_Toggle ||
+	   kind == .Autoplay_Toggle {
 		checked := uint(0)
 		#partial switch kind {
 		case .Toggle_Save_Source_Browser:
@@ -6389,6 +6553,10 @@ add_ax_element :: proc(
 			if value == int(ui.pitch.settings.labels) {checked = 1}
 		case .Pitch_Transpose:
 			if value == int(ui.pitch.settings.transpose) {checked = 1}
+		case .Shuffle_Toggle:
+			if ui.exercise_shuffle {checked = 1}
+		case .Autoplay_Toggle:
+			if ui.exercise_autoplay {checked = 1}
 		case:
 		}
 		value := msg_id_uint(
@@ -7135,8 +7303,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			29,
 		}
 		for exercise, index in state.exercises {
-			if len(ui.exercise_search) > 0 &&
-			   !strings.contains(exercise.name, ui.exercise_search) {continue}
+			if !exercise_matches_filter(exercise, ui.exercise_search) {continue}
 			if row.y >= exercise_content.y &&
 			   row.y + row.h <= exercise_content.y + exercise_content.h {
 				add_ax_element(
@@ -7318,8 +7485,8 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			flash_label = "louder",
 		)
 	}
-	kinds := [12]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle}
-	labels := [12]string {
+	kinds := [15]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle}
+	labels := [15]string {
 		"Set start",
 		"Set end",
 		"Save exercise",
@@ -7332,10 +7499,12 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		"Show exercise metadata",
 		"Play a random exercise",
 		"Toggle pitch tracking",
+		"Play the next filtered exercise",
+		"Toggle shuffled Play Next",
+		"Toggle automatic Play Next",
 	}
-	flash_labels := [12]string{"mark in", "mark out", "commit", "run", "hold", "captions", "audition", "data", "rename exercise", "exercise metadata", "randomize exercise", "toggle pitch tracking"}
-	slot_count := 8
-	if ui.mode == .Play {slot_count = 7}
+	flash_labels := [15]string{"mark in", "mark out", "commit", "play", "pause", "captions", "audition", "data", "rename exercise", "exercise metadata", "randomize exercise", "toggle pitch tracking", "play next exercise", "toggle shuffle", "toggle autoplay"}
+	slot_count := control_slot_count(ui.mode)
 	for slot in 0 ..< slot_count {
 		action_index := control_action_for_slot(ui.mode, slot)
 		if action_index < 0 {continue}
@@ -7343,11 +7512,22 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		rect := control_rect(controls, action_index)
 		if kind == .Randomize {rect = randomize_primary_rect(controls)}
 		if rect.w > 0 {
+			accessibility_label := labels[action_index]
+			role := "AXButton"
+			if kind == .Shuffle_Toggle {
+				role = "AXCheckBox"
+				accessibility_label =
+					ui.exercise_shuffle ? "Shuffle on" : "Shuffle off"
+			} else if kind == .Autoplay_Toggle {
+				role = "AXCheckBox"
+				accessibility_label =
+					ui.exercise_autoplay ? "Autoplay on" : "Autoplay off"
+			}
 			add_ax_element(
 				array,
 				element_class,
-				labels[action_index],
-				"AXButton",
+				accessibility_label,
+				role,
 				rect,
 				kind,
 				flash_label = flash_labels[action_index],
@@ -7434,6 +7614,7 @@ find_ax_control :: proc(element: Id) -> ^UI_Control {
 }
 
 activate_ui_action :: proc(action: UI_Action) -> bool {
+	clear_number_prefix()
 	#partial switch action.kind {
 	case .Command_Palette_Search:
 		focus_text_input(.Command_Palette)
@@ -7530,6 +7711,18 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		open_randomize_help()
 	case .Close_Randomize_Help:
 		close_randomize_help()
+	case .Play_Next:
+		return play_next_exercise()
+	case .Shuffle_Toggle:
+		ui.exercise_shuffle = !ui.exercise_shuffle
+		set_success_status(
+			ui.exercise_shuffle ? "Shuffle enabled" : "Shuffle disabled",
+		)
+	case .Autoplay_Toggle:
+		ui.exercise_autoplay = !ui.exercise_autoplay
+		set_success_status(
+			ui.exercise_autoplay ? "Autoplay enabled" : "Autoplay disabled",
+		)
 	case .Pitch_Toggle:
 		if !pitch_monitor_toggle(&ui.pitch) {
 			ui.pitch.permission = Pitch_Permission(vt_pitch_permission_status())
@@ -7899,6 +8092,36 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 	)
 	append_command_palette_entry(
 		&entries,
+		UI_Action{kind = .Play_Next},
+		"Play next exercise",
+		"Play the next filtered exercise or a weighted shuffled exercise",
+		"Command",
+		[]string{"exercise", "next", "shuffle"},
+		palette_condition(PALETTE_CONTEXT_PLAY),
+		"Available when the current exercise filter has a result",
+	)
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Shuffle_Toggle},
+		ui.exercise_shuffle ? "Disable shuffle" : "Enable shuffle",
+		"Make Play Next use the weighted Randomize selection",
+		"Command",
+		[]string{"exercise", "next", "random"},
+		palette_condition(PALETTE_CONTEXT_PLAY),
+		"Available in Play mode",
+	)
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Autoplay_Toggle},
+		ui.exercise_autoplay ? "Disable autoplay" : "Enable autoplay",
+		"Play the next filtered exercise when the current exercise finishes",
+		"Command",
+		[]string{"exercise", "next", "continuous"},
+		palette_condition(PALETTE_CONTEXT_PLAY),
+		"Available in Play mode",
+	)
+	append_command_palette_entry(
+		&entries,
 		UI_Action{kind = .Data},
 		"Open library data",
 		"Export, import, or inspect the active library directory",
@@ -8084,6 +8307,19 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 	case .Toggle_Save_Source_Browser:
 		checked := uint(0)
 		if ui.save_source_browser_choice {checked = 1}
+		return msg_id_uint(
+			objc_getClass("NSNumber"),
+			sel_registerName("numberWithUnsignedInt:"),
+			checked,
+		)
+	case .Shuffle_Toggle, .Autoplay_Toggle:
+		checked := uint(0)
+		if (control.action.kind == .Shuffle_Toggle &&
+		    ui.exercise_shuffle) ||
+		   (control.action.kind == .Autoplay_Toggle &&
+		    ui.exercise_autoplay) {
+			checked = 1
+		}
 		return msg_id_uint(
 			objc_getClass("NSNumber"),
 			sel_registerName("numberWithUnsignedInt:"),
@@ -8699,7 +8935,7 @@ metal_player_load :: proc(path: string) -> bool {
 }
 
 activate_control :: proc(index: int) {
-	kinds := [12]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle}
+	kinds := [15]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle}
 	if index < 0 || index >= len(kinds) {return}
 	control := find_ui_control_by_action(kinds[index])
 	if control != nil && .Enabled in control.flags {_ = activate_ui_action(control.action)}
@@ -9498,6 +9734,11 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if key == 53 && unfocus_text_input() {return}
 	if ui.source_modal_open && key == 53 {close_source_modal(); return}
 	if ui.source_details_open && key == 53 {close_source_details(); return}
+	if key == 53 && ui.number_prefix != 0 {
+		clear_number_prefix()
+		ui.needs_redraw = true
+		return
+	}
 	if focused_text() != nil && is_copy_shortcut(key, modifiers) {
 		on_metal_copy(self, sel_registerName("copy:"), nil)
 		return
@@ -9529,28 +9770,39 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		}
 	}
 	if ui.focus == .None {
-		if !ui.source_modal_open &&
+		numbered_actions_available :=
+		   !ui.source_modal_open &&
 		   !ui.source_details_open &&
 		   !ui.exercise_rename_open &&
 		   !ui.exercise_metadata_open &&
 		   !ui.randomize_help_open &&
 		   !ui.pitch.help_open &&
 		   !ui.data_modal_open &&
-		   !ui.notification_modal_open &&
-		   state.player != nil {
+		   !ui.notification_modal_open
+		if numbered_actions_available && state.player != nil {
 			if delta, scrub := timeline_scrub_delta(key, modifiers); scrub {
 				scrub_player_by(delta)
 				return
 			}
 		}
-		if key == 49 {on_toggle_playback(nil, nil, nil); return}
-		key_codes := [8]uint{18, 19, 20, 21, 23, 22, 26, 28}
-		for control_key, slot in key_codes {
-			if key == control_key {
-				action := control_action_for_slot(ui.mode, slot)
+		if numbered_actions_available && key == 49 {
+			on_toggle_playback(nil, nil, nil)
+			return
+		}
+		number_modifiers :=
+			NSEventModifierFlagShift |
+			NSEventModifierFlagControl |
+			NSEventModifierFlagOption |
+			NSEventModifierFlagCommand
+		if numbered_actions_available && modifiers & number_modifiers == 0 {
+			if digit, found := number_digit_for_key_code(key); found {
+				action, handled := consume_numbered_action_digit_at(
+					ui.mode,
+					digit,
+					numbered_action_time_ms(),
+				)
 				if action >= 0 {activate_control(action)}
-				ui.needs_redraw = true
-				return
+				if handled {return}
 			}
 		}
 	}
@@ -9636,6 +9888,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	ui.frame_tick += 1
+	_ = expire_number_prefix_at(numbered_action_time_ms())
 	if pitch_monitor_poll(&ui.pitch, ui.frame_tick) {
 		ui.needs_redraw = true
 	}
@@ -9654,6 +9907,28 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	}
 	playback_active := state.player != nil &&
 	                   msg_f32(state.player, sel_registerName("rate")) > 0
+	if ui.exercise_autoplay &&
+	   ui.playback_was_active &&
+	   !playback_active {
+		seconds, has_seconds := current_seconds()
+		if has_seconds &&
+		   exercise_autoplay_should_advance(
+				ui.exercise_autoplay,
+				ui.source_playback_active,
+				ui.playback_was_active,
+				playback_active,
+				seconds,
+				ui.player_duration,
+		   ) {
+			_ = play_next_exercise()
+			playback_active = state.player != nil &&
+			                  msg_f32(
+								state.player,
+								sel_registerName("rate"),
+			                  ) > 0
+		}
+	}
+	ui.playback_was_active = playback_active
 	frame := msg_rect(ui.view, sel_registerName("bounds"))
 	if ui.width != frame.size.width || ui.height != frame.size.height {
 		cancel_ui_flash()

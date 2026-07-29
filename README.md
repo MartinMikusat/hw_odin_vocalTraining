@@ -63,7 +63,7 @@ shows source ingest, the timed transcript, range markers, exercise naming, and
 export controls. **Play** gives 20% of the content width to the exercise
 library, 30% to the practice monitor, and 50% to the live pitch monitor.
 
-Press **7 Start Pitch** to begin live microphone analysis. The first start asks
+Press **31 Start Pitch** to begin live microphone analysis. The first start asks
 macOS for microphone access. The app does not record or store microphone audio.
 The chart keeps the newest 12 seconds of stable pitch and preserves the trace
 when tracking stops. Starting again clears the trace. An input-only Core Audio
@@ -86,6 +86,12 @@ selection weight. Manual playback does not change this history. The application
 stores the history locally and does not include it in library exports.
 Select the **?** control inside Randomize to inspect the weighting rules and the
 ten exercises with the highest probability in the next draw.
+
+Select **Play Next** to play the next exercise in the filtered exercise list.
+The selection wraps to the first visible exercise after the last result.
+Enable **Shuffle** to make Play Next use the Randomize weighting rules within
+the filtered results. Enable **Autoplay** to run Play Next when the current
+exercise finishes. Autoplay uses the current Shuffle state and current filter.
 
 Press **Add** in the Source Register to open the ingest dialog, then paste one
 or more YouTube URLs with one URL per line. URLs are normalized by video ID,
@@ -148,10 +154,19 @@ timestamp selector. Selecting a value seeks there and saves it as the source's
 active timestamp.
 The speed controls adjust playback from `0.1x` to `2.0x` in `0.1x` steps.
 
-When no text field has focus, press **Space** to toggle playback or **1–8** to
-activate the matching numbered transport control.
-The Play actions are **1 Randomize**, **2 Run**, **3 Hold**, **4 Rename**,
-**5 Data**, **6 Metadata**, and **7 Start Pitch** or **7 Stop Pitch**.
+When no text field has focus, press **Space** to toggle playback or enter an
+action's two-digit code. The first digit selects an action-bar section for one
+second. The second digit activates its action. Escape or an invalid sequence
+clears the selected section. Play and Space restart a completed video from the
+beginning.
+
+The Create actions are **11 Captions**, **12 Data**, **21 Play**,
+**22 Pause**, **23 Preview**, **31 Mark In**, **32 Mark Out**, and
+**33 Commit**.
+
+The Play actions are **11 Play Next**, **12 Randomize**, **13 Rename**,
+**14 Metadata**, **15 Data**, **21 Play**, **22 Pause**, **23 Shuffle**,
+**24 Autoplay**, and **31 Start Pitch** or **31 Stop Pitch**.
 Press **Left Arrow** or **Right Arrow** to scrub by one second. Hold **Shift**
 to scrub by 0.1 seconds, or hold **Command** to scrub by 10 seconds.
 
