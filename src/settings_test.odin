@@ -171,6 +171,13 @@ video_clips_settings_controls_accept_pointer_actions_test :: proc(t: ^testing.T)
 		})
 	}
 	testing.expect(t, !ui.shortcut_open)
+
+	settings_modal := video_clips_settings_rect()
+	dispatch_click({
+		settings_modal.x-1,
+		settings_modal.y+settings_modal.h/2,
+	})
+	testing.expect(t, !ui.settings_open)
 }
 
 @(test)

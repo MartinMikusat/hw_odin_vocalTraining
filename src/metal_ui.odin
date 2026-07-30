@@ -10585,6 +10585,8 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 		return
 	}
 	if ui.settings_open {
+		modal := video_clips_settings_rect()
+		if !contains(modal, point) {video_clips_settings_close(); return}
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
