@@ -2629,6 +2629,30 @@ metal_ui_themes_use_canonical_canvas_colors_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+metal_ui_workflows_use_distinct_accents_test :: proc(t: ^testing.T) {
+	testing.expect_value(
+		t,
+		workflow_accent_color(.Vocal, false),
+		UI_COLOR_OCHRE_64,
+	)
+	testing.expect_value(
+		t,
+		workflow_accent_color(.Vocal, true),
+		UI_COLOR_COFFEE_64,
+	)
+	testing.expect_value(
+		t,
+		workflow_accent_color(.Dancing, false),
+		[4]f64{0.211765, 0.317647, 0.435294, 1},
+	)
+	testing.expect_value(
+		t,
+		workflow_accent_color(.Dancing, true),
+		[4]f64{0.470588, 0.588235, 0.701961, 1},
+	)
+}
+
+@(test)
 source_monitor_volume_controls_sit_left_of_timestamp_test :: proc(t: ^testing.T) {
 	player := UI_Rect{308, 306, 760, 310}
 	reset := source_reset_rect(player)

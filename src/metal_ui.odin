@@ -321,6 +321,8 @@ UI_COLOR_GUM_64 :: [4]f64{0.490196, 0.529412, 0.411765, 1}
 UI_COLOR_MOSS_64 :: [4]f64{0.258824, 0.298039, 0.129412, 1}
 UI_COLOR_FOREST_64 :: [4]f64{0.090196, 0.192157, 0.145098, 1}
 UI_COLOR_BASALT_64 :: [4]f64{0.129412, 0.180392, 0.250980, 1}
+UI_COLOR_DANCING_LIGHT_64 :: [4]f64{0.211765, 0.317647, 0.435294, 1}
+UI_COLOR_DANCING_DARK_64 :: [4]f64{0.470588, 0.588235, 0.701961, 1}
 
 UI_Theme_Colors :: struct {
 	chassis, header, panel, panel_alt, field: [4]f64,
@@ -366,6 +368,16 @@ ui_theme_colors :: proc(dark_theme := ui.dark_theme) -> UI_Theme_Colors {
 		muted = {0.48, 0.46, 0.42, 1},
 		dim = {0.62, 0.60, 0.55, 1},
 	}
+}
+
+workflow_accent_color :: proc(
+	workflow: Workflow_Kind,
+	dark_theme: bool,
+) -> [4]f64 {
+	if workflow == .Dancing {
+		return dark_theme ? UI_COLOR_DANCING_DARK_64 : UI_COLOR_DANCING_LIGHT_64
+	}
+	return dark_theme ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
 }
 
 ui_color_32 :: proc(color: [4]f64) -> [4]f32 {
@@ -4068,7 +4080,10 @@ draw_flash_hints :: proc(ctx, font: rawptr) {
 	}
 }
 
-draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan: [4]f64) {
+draw_command_palette :: proc(
+	ctx, font: rawptr,
+	bright, muted, dim, accent, cyan, danger: [4]f64,
+) {
 	if !command_palette.is_open(&command_palette_state) {return}
 	theme := ui_theme_colors()
 	modal := command_palette_rect()
@@ -4077,7 +4092,7 @@ draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan
 	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, theme.backdrop)
 	fill_overlay_rect(ctx, modal, theme.modal)
 	fill_overlay_rect(ctx, search, theme.field)
-	fill_overlay_border(ctx, search, orange)
+	fill_overlay_border(ctx, search, accent)
 	draw_editable_text_field(
 		ctx,
 		font,
@@ -4087,7 +4102,7 @@ draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan
 		.Command_Palette,
 		bright,
 		dim,
-		orange,
+		accent,
 		12,
 	)
 	CGContextSaveGState(ctx)
@@ -4108,7 +4123,7 @@ draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan
 		if row.y + row.h < content.y || row.y > content.y + content.h {continue}
 		if result.available && index == selected {
 			fill_overlay_rect(ctx, row, theme.row_hover)
-			fill_overlay_rect(ctx, UI_Rect{row.x, row.y, 3, row.h}, orange)
+			fill_overlay_rect(ctx, UI_Rect{row.x, row.y, 3, row.h}, accent)
 		} else if index % 2 == 0 {
 			fill_overlay_rect(ctx, row, theme.row)
 		}
@@ -4116,7 +4131,7 @@ draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan
 		detail_color := muted
 		if !result.available {
 			title_color = dim
-			detail_color = orange
+			detail_color = danger
 		}
 		draw_text_in_rect(
 			ctx,
@@ -4163,7 +4178,7 @@ draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan
 	)
 }
 
-draw_clip_rename :: proc(ctx, font: rawptr, bright, muted, dim, orange: [4]f64) {
+draw_clip_rename :: proc(ctx, font: rawptr, bright, muted, dim, accent: [4]f64) {
 	if !ui.clip_rename_open ||
 	   ui.clip_rename_index < 0 ||
 	   ui.clip_rename_index >= len(state.clips) {
@@ -4184,23 +4199,33 @@ draw_clip_rename :: proc(ctx, font: rawptr, bright, muted, dim, orange: [4]f64) 
 	draw_text_in_rect(ctx, font, clip.name, UI_Rect{modal.x + 24, modal.y + modal.h - 130, modal.w - 48, 28}, .Start, .Center, bright)
 	draw_text_in_rect(ctx, font, "NEW NAME", UI_Rect{input.x, input.y + input.h + 8, input.w, 22}, .Start, .Center, muted)
 	fill_overlay_rect(ctx, input, theme.field)
-	if ui.focus == .Clip_Rename {fill_overlay_border(ctx, input, orange)}
-	draw_editable_text_field(ctx, font, ui.clip_rename, "Enter a new clip name", input, .Clip_Rename, bright, dim, orange, 10)
+	if ui.focus == .Clip_Rename {fill_overlay_border(ctx, input, accent)}
+	draw_editable_text_field(ctx, font, ui.clip_rename, "Enter a new clip name", input, .Clip_Rename, bright, dim, accent, 10)
 	cancel_color := theme.panel_alt
 	if contains(cancel, ui.mouse) {cancel_color = theme.row_hover}
 	fill_overlay_rect(ctx, cancel, cancel_color)
 	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
 	confirm_control := find_ui_control_by_action(.Confirm_Clip_Rename)
 	confirm_enabled := confirm_control != nil && .Enabled in confirm_control.flags
-	confirm_color := confirm_enabled ? UI_COLOR_OCHRE_64 : theme.panel_alt
-	if confirm_enabled && contains(confirm, ui.mouse) {confirm_color = [4]f64{1.0, 0.42, 0.10, 1}}
+	confirm_color := confirm_enabled ? accent : theme.panel_alt
+	if confirm_enabled && contains(confirm, ui.mouse) {confirm_color = theme.row_hover}
 	fill_overlay_rect(ctx, confirm, confirm_color)
-	draw_text_in_rect(ctx, font, "RENAME", confirm, .Center, .Center, confirm_enabled ? UI_COLOR_SAND_64 : dim)
+	if confirm_enabled {fill_overlay_border(ctx, confirm, accent)}
+	draw_text_in_rect(
+		ctx,
+		font,
+		"RENAME",
+		confirm,
+		.Center,
+		.Center,
+		confirm_enabled && contains(confirm, ui.mouse) ? accent :
+			(confirm_enabled ? theme.header : dim),
+	)
 }
 
 draw_clip_metadata :: proc(
 	ctx, font: rawptr,
-	bright, muted, dim, orange, cyan, danger: [4]f64,
+	bright, muted, dim, cyan, danger: [4]f64,
 ) {
 	if !ui.clip_metadata_open ||
 	   ui.clip_metadata_index < 0 ||
@@ -4807,7 +4832,7 @@ draw_pitch_help :: proc(
 
 draw_data_modal :: proc(
 	ctx, font: rawptr,
-	bright, muted, dim, orange, cyan: [4]f64,
+	bright, muted, dim, warning, cyan: [4]f64,
 ) {
 	if !ui.data_modal_open {return}
 	theme := ui_theme_colors()
@@ -4879,7 +4904,7 @@ draw_data_modal :: proc(
 			confirm_color = [4]f64{0.23, 0.083, 0.035, 1}
 		}
 		fill_overlay_rect(ctx, confirm, confirm_color)
-		if confirm_enabled {fill_overlay_border(ctx, confirm, orange)}
+		if confirm_enabled {fill_overlay_border(ctx, confirm, warning)}
 		draw_text_in_rect(
 			ctx,
 			font,
@@ -4943,7 +4968,7 @@ draw_data_modal :: proc(
 
 draw_library_recovery :: proc(
 	ctx, font: rawptr,
-	bright, muted, dim, orange, cyan, danger: [4]f64,
+	bright, muted, dim, warning, cyan, danger: [4]f64,
 ) {
 	if !library_recovery_state.required {return}
 	theme := ui_theme_colors()
@@ -5069,7 +5094,7 @@ draw_library_recovery :: proc(
 		confirm := ui_control_rect(.Recovery_Confirm)
 		fill_overlay_rect(ctx, cancel, theme.panel_alt)
 		fill_overlay_rect(ctx, confirm, UI_COLOR_OCHRE_64)
-		fill_overlay_border(ctx, confirm, orange)
+		fill_overlay_border(ctx, confirm, warning)
 		draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
 		draw_text_in_rect(ctx, font, "ACTIVATE RECOVERY", confirm, .Center, .Center, UI_COLOR_SAND_64)
 		return
@@ -5120,7 +5145,7 @@ draw_library_recovery :: proc(
 
 draw_backup_warning :: proc(
 	ctx, font: rawptr,
-	bright, muted, orange, danger: [4]f64,
+	bright, muted, warning, danger: [4]f64,
 ) {
 	if !major_change_pending.open {return}
 	theme := ui_theme_colors()
@@ -5173,7 +5198,7 @@ draw_backup_warning :: proc(
 	confirm := ui_control_rect(.Backup_Warning_Continue)
 	fill_overlay_rect(ctx, cancel, theme.panel_alt)
 	fill_overlay_rect(ctx, confirm, UI_COLOR_OCHRE_64)
-	fill_overlay_border(ctx, confirm, orange)
+	fill_overlay_border(ctx, confirm, warning)
 	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
 	draw_text_in_rect(ctx, font, "CONTINUE WITHOUT BACKUP", confirm, .Center, .Center, UI_COLOR_SAND_64)
 }
@@ -5210,7 +5235,7 @@ notification_time_text :: proc(timestamp_ms: i64) -> string {
 
 draw_notification_history :: proc(
 	ctx, font: rawptr,
-	bright, muted, dim, orange, cyan, danger, success: [4]f64,
+	bright, muted, dim, accent, cyan, danger, success: [4]f64,
 ) {
 	if !ui.notification_modal_open {return}
 	theme := ui_theme_colors()
@@ -5253,7 +5278,7 @@ draw_notification_history :: proc(
 		if notification.kind == .Error || notification.kind == .Interrupted {
 			kind_color = danger
 		}
-		if notification.kind == .Activity {kind_color = orange}
+		if notification.kind == .Activity {kind_color = accent}
 		draw_text_in_rect(
 			ctx,
 			font,
@@ -5481,21 +5506,21 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	rule := ui_color_32(theme.rule)
 	row_color := ui_color_32(theme.row)
 	row_hover := ui_color_32(theme.row_hover)
-	orange := UI_COLOR_COFFEE_32
+	accent := ui_color_32(workflow_accent_color(ui.workflow, ui.dark_theme))
 	push_rect(vertices, UI_Rect{0, 0, ui.width, ui.height}, chassis)
 	push_rect(vertices, app_header_rect(), ui_color_32(theme.header))
 	workflow_rect := ui_control_rect(.Workflow_Toggle)
 	workflow_color := panel_alt
 	if contains(workflow_rect, ui.mouse) {workflow_color = row_hover}
 	push_rect(vertices, workflow_rect, workflow_color)
-	push_border(vertices, workflow_rect, orange)
-	push_rect(vertices, left_accent_edge_rect(workflow_rect), orange)
+	push_border(vertices, workflow_rect, accent)
+	push_rect(vertices, left_accent_edge_rect(workflow_rect), accent)
 	mode_rect := ui_control_rect(.Mode_Toggle)
 	mode_color := panel_alt
 	if contains(mode_rect, ui.mouse) {mode_color = row_hover}
 	push_rect(vertices, mode_rect, mode_color)
-	push_border(vertices, mode_rect, orange)
-	push_rect(vertices, left_accent_edge_rect(mode_rect), orange)
+	push_border(vertices, mode_rect, accent)
+	push_rect(vertices, left_accent_edge_rect(mode_rect), accent)
 	panels := [5]UI_Rect{source_panel, player, transcript, clip_panel, pitch_panel}
 	for rect in panels {
 		if rect.w <= 0 || rect.h <= 0 {continue}
@@ -5573,7 +5598,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 						),
 					},
 					2,
-					UI_COLOR_COFFEE_32,
+					accent,
 				)
 			}
 		}
@@ -5642,7 +5667,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			color := enabled ? panel_alt : field
 			if enabled && contains(rect, ui.mouse) {color = row_hover}
 			push_rect(vertices, rect, color)
-			if enabled {push_border(vertices, rect, orange)}
+			if enabled {push_border(vertices, rect, accent)}
 		}
 		value := dance_bpm_value_rect(pitch_panel)
 		push_rect(vertices, value, field)
@@ -5683,9 +5708,9 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			seconds, has_seconds := current_seconds()
 			progress := 0.0
 			if has_seconds && duration > 0 {progress = min(max(seconds / duration, 0), 1)}
-			push_rect(vertices, UI_Rect{track.x, track.y, track.w * progress, track.h}, UI_COLOR_COFFEE_32)
+			push_rect(vertices, UI_Rect{track.x, track.y, track.w * progress, track.h}, accent)
 			thumb_x := track.x + track.w * progress
-			push_rect(vertices, UI_Rect{thumb_x - 3, timeline.y + 2, 6, timeline.h - 4}, UI_COLOR_COFFEE_32)
+			push_rect(vertices, UI_Rect{thumb_x - 3, timeline.y + 2, 6, timeline.h - 4}, accent)
 		}
 	}
 	if ui.mode == .Create {
@@ -5695,7 +5720,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		add_color := panel_alt
 		if add_enabled && contains(add_rect, ui.mouse) {add_color = row_hover}
 		push_rect(vertices, add_rect, add_color)
-		if add_enabled {push_border(vertices, add_rect, orange)}
+		if add_enabled {push_border(vertices, add_rect, accent)}
 
 		commit_control := find_ui_control(ui_control_id("commit clip output"))
 		if commit_control != nil {
@@ -5707,7 +5732,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			}
 			push_rect(vertices, commit_control.rect, commit_color)
 			if .Enabled in commit_control.flags {
-				push_border(vertices, commit_control.rect, orange)
+				push_border(vertices, commit_control.rect, accent)
 			}
 		}
 	}
@@ -5729,11 +5754,11 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 				if contains(row, ui.mouse) {color = row_hover}
 				push_rect(vertices, row, color)
 				push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
+				if index == state.active_source {
+					push_rect(vertices, left_accent_edge_rect(row), accent)
+				}
 				if !source.media_available {
 					push_rect(vertices, left_accent_edge_rect(row), UI_COLOR_COFFEE_32)
-				}
-				if index == state.active_source {
-					push_rect(vertices, left_accent_edge_rect(row), orange)
 				}
 			}
 			row.y -= 30
@@ -5759,7 +5784,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 				push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
 				if active {
 					progress := clamp(ui.transcript_active_progress, 0, 1)
-					push_rect(vertices, bottom_progress_edge_rect(row, progress), UI_COLOR_COFFEE_32)
+					push_rect(vertices, bottom_progress_edge_rect(row, progress), accent)
 				}
 			}
 			row.y -= 26
@@ -5784,7 +5809,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 				push_rect(vertices, row, color)
 				push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
 				if index == ui.active_clip {
-					push_rect(vertices, left_accent_edge_rect(row), orange)
+					push_rect(vertices, left_accent_edge_rect(row), accent)
 				}
 			}
 			row.y -= 30
@@ -5811,8 +5836,8 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 				state.has_start,
 				state.has_end,
 				valid_range,
-		   ) {
-			push_border(vertices, rect, orange)
+			) {
+			push_border(vertices, rect, accent)
 		}
 		if enabled && kind == .Pitch_Toggle && ui.pitch.tracking {
 			push_border(vertices, rect, UI_COLOR_GUM_32)
@@ -5837,7 +5862,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		code, has_code := numbered_action_code_for_action(ui.mode, action_index)
 		if number_prefix_active && has_code &&
 		   code.section == ui.number_prefix {
-			push_border(vertices, rect, orange)
+			push_border(vertices, rect, accent)
 		}
 	}
 	if ui.mode == .Play {
@@ -5864,8 +5889,8 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		focus_rect = ui_control_rect(.Clip_Name)
 	}
 	if focus_rect.w > 0 {
-		push_border(vertices, focus_rect, orange)
-		push_rect(vertices, UI_Rect{focus_rect.x, focus_rect.y, 3, focus_rect.h}, orange)
+		push_border(vertices, focus_rect, accent)
+		push_rect(vertices, UI_Rect{focus_rect.x, focus_rect.y, 3, focus_rect.h}, accent)
 	}
 	if ui.settings_open && !ui.shortcut_open {
 		push_rect(
@@ -5931,7 +5956,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			push_border(
 				vertices,
 				video_clips_shortcut_action_rect(0),
-				UI_COLOR_COFFEE_32,
+				accent,
 			)
 		}
 	}
@@ -5939,7 +5964,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 
 draw_settings_overlays :: proc(
 	ctx, font: rawptr,
-	ink, bright, muted, dim, orange, cyan: [4]f64,
+	ink, bright, muted, dim, accent, cyan, danger: [4]f64,
 ) {
 	if ui.settings_open {
 		theme := ui_theme_colors()
@@ -6026,7 +6051,7 @@ draw_settings_overlays :: proc(
 				{content.x, content.y, content.w, 24},
 				.Start,
 				.Center,
-				orange,
+				danger,
 			)
 		}
 	}
@@ -6083,13 +6108,13 @@ draw_settings_overlays :: proc(
 				{modal.x+24, modal.y+64, modal.w-48, 18},
 				.Start,
 				.Center,
-				orange,
+				danger,
 			)
 		}
 		save_color := dim
 		if ui.shortcut_candidate_valid &&
 		   len(ui.shortcut_collision) == 0 {
-			save_color = orange
+			save_color = accent
 		}
 		draw_text_in_rect(
 			ctx,
@@ -6158,10 +6183,11 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	bright := theme.bright
 	muted := theme.muted
 	dim := theme.dim
-	orange := ui.dark_theme ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
+	accent := workflow_accent_color(ui.workflow, ui.dark_theme)
+	warning := ui.dark_theme ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
 	success := UI_COLOR_MOSS_64
 	cyan := ui.dark_theme ? UI_COLOR_GUM_64 : UI_COLOR_FOREST_64
-	danger := ui.dark_theme ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
+	danger := warning
 
 	_, _, source_search, source_panel, player, transcript, clip_search, clip_panel, clip_name, pitch_panel, _ :=
 		layout_rects()
@@ -6171,7 +6197,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		small_font,
 		app_title_rect(),
 		bright,
-		orange,
+		accent,
 	)
 	mode_rect := ui_control_rect(.Mode_Toggle)
 	workflow_rect := ui_control_rect(.Workflow_Toggle)
@@ -6182,7 +6208,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		workflow_rect,
 		.Center,
 		.Center,
-		orange,
+		accent,
 	)
 	draw_text_in_rect(
 		ctx,
@@ -6191,7 +6217,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		mode_rect,
 		.Center,
 		.Center,
-		orange,
+		accent,
 	)
 	source_header := UI_Rect {
 		source_panel.x,
@@ -6222,7 +6248,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		add_rect := ui_control_rect(.Open_Source_Modal)
 		add_control := find_ui_control_by_action(.Open_Source_Modal)
 		add_enabled := add_control != nil && .Enabled in add_control.flags
-		draw_text_in_rect(ctx, small_font, "ADD", add_rect, .Center, .Center, add_enabled ? orange : dim)
+		draw_text_in_rect(ctx, small_font, "ADD", add_rect, .Center, .Center, add_enabled ? accent : dim)
 		draw_text_in_rect(
 			ctx,
 			small_font,
@@ -6286,11 +6312,11 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		)
 	}
 	if ui.mode == .Create {
-		draw_editable_text_field(ctx, small_font, ui.source_search, "/ filter source register", ui_control_rect(.Source_Search), .Source_Search, ink, dim, orange)
-		draw_editable_text_field(ctx, small_font, ui.transcript_search, "/ search timed transcript", ui_control_rect(.Transcript_Search), .Transcript_Search, ink, dim, orange)
-		draw_editable_text_field(ctx, small_font, ui.clip_name, "NAME / optional designation", ui_control_rect(.Clip_Name), .Clip_Name, ink, dim, orange)
+		draw_editable_text_field(ctx, small_font, ui.source_search, "/ filter source register", ui_control_rect(.Source_Search), .Source_Search, ink, dim, accent)
+		draw_editable_text_field(ctx, small_font, ui.transcript_search, "/ search timed transcript", ui_control_rect(.Transcript_Search), .Transcript_Search, ink, dim, accent)
+		draw_editable_text_field(ctx, small_font, ui.clip_name, "NAME / optional designation", ui_control_rect(.Clip_Name), .Clip_Name, ink, dim, accent)
 	} else {
-		draw_editable_text_field(ctx, small_font, ui.clip_search, "/ filter clip library", ui_control_rect(.Clip_Search), .Clip_Search, ink, dim, orange)
+		draw_editable_text_field(ctx, small_font, ui.clip_search, "/ filter clip library", ui_control_rect(.Clip_Search), .Clip_Search, ink, dim, accent)
 		if ui.workflow == .Vocal {
 			draw_pitch_monitor(
 				ctx,
@@ -6299,7 +6325,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				bright,
 				muted,
 				dim,
-				orange,
+				accent,
 				cyan,
 			)
 		} else {
@@ -6310,7 +6336,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				bright,
 				muted,
 				dim,
-				orange,
+				accent,
 				cyan,
 			)
 		}
@@ -6339,9 +6365,8 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			if control != nil {
 				row = control.rect
 				row_color := ink
-				if index == state.active_source || !source.media_available {
-					row_color = orange
-				}
+				if index == state.active_source {row_color = accent}
+				if !source.media_available {row_color = danger}
 				draw_text_in_rect(
 					ctx,
 					small_font,
@@ -6420,7 +6445,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	} else if state.player != nil {
 		volume_down := ui_control_rect(.Volume_Down)
 		playing := msg_f32(state.player, sel_registerName("rate")) > 0
-		draw_text_in_rect(ctx, small_font, playing ? "PAUSE" : "PLAY", ui_control_rect(.Source_Play_Pause), .Center, .Center, playing ? orange : cyan)
+		draw_text_in_rect(ctx, small_font, playing ? "PAUSE" : "PLAY", ui_control_rect(.Source_Play_Pause), .Center, .Center, playing ? accent : cyan)
 		draw_text_in_rect(ctx, small_font, "STOP", ui_control_rect(.Source_Stop), .Center, .Center, muted)
 		hint_control := Source_Hint_Control.Reset
 		if ui.source_playback_active {
@@ -6557,7 +6582,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			player_content,
 			.Center,
 			.Center,
-			orange,
+			accent,
 		)
 	}
 
@@ -6609,7 +6634,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 						UI_Rect{row.x + 126, row.y, row.w - 134, row.h},
 						.Start,
 						.Center,
-						active ? orange : ink,
+						active ? accent : ink,
 					)
 				}
 			row.y -= 26
@@ -6638,7 +6663,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		if output_commit != nil {
 			output_top = output_commit.rect.y - 8
 			commit_color := dim
-			if .Enabled in output_commit.flags {commit_color = orange}
+			if .Enabled in output_commit.flags {commit_color = accent}
 			draw_text_in_rect(
 				ctx,
 				small_font,
@@ -6722,7 +6747,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			if control != nil {
 				row = control.rect
 				row_color := ink
-				if index == ui.active_clip {row_color = orange}
+				if index == ui.active_clip {row_color = accent}
 				draw_text_in_rect(
 					ctx,
 					small_font,
@@ -6825,7 +6850,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				state.has_end,
 				valid_range,
 			) {
-			button_color = orange
+			button_color = accent
 		}
 		control := find_ui_control_by_action(control_kinds[i])
 		if control == nil || .Enabled not_in control.flags {button_color = dim}
@@ -6894,20 +6919,23 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				int(notification_id),
 			)
 			fill := theme.field
-			accent := muted
+			card_accent := muted
 			text_color := muted
 			switch notification.kind {
 			case .Activity:
-				fill = [4]f64{0.12, 0.045, 0.018, 0.88}
-				accent = orange
+				fill = [4]f64{0.120, 0.045, 0.018, 0.88}
+				if ui.workflow == .Dancing {
+					fill = [4]f64{0.025, 0.070, 0.120, 0.88}
+				}
+				card_accent = accent
 				text_color = bright
 			case .Success:
 				fill = [4]f64{0.025, 0.095, 0.065, 0.88}
-				accent = success
+				card_accent = success
 				text_color = success
 			case .Error, .Interrupted:
 				fill = [4]f64{0.14, 0.025, 0.025, 0.88}
-				accent = danger
+				card_accent = danger
 				text_color = danger
 			case .Info:
 			text_color = muted
@@ -6918,7 +6946,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				fill[2] += 0.025
 			}
 			fill_overlay_rect(ctx, card, fill)
-			fill_overlay_rect(ctx, UI_Rect{card.x, card.y, 3, card.h}, accent)
+			fill_overlay_rect(ctx, UI_Rect{card.x, card.y, 3, card.h}, card_accent)
 			has_stop := import_job != nil &&
 			            import_job.notification_id == notification_id
 			has_source_action := notification.action_kind == .View_Source &&
@@ -6968,8 +6996,12 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		}
 		if task_layout.hidden_count > 0 {
 			overflow := task_layout.overflow_rect
-			fill_overlay_rect(ctx, overflow, [4]f64{0.10, 0.065, 0.018, 0.95})
-			fill_overlay_rect(ctx, UI_Rect{overflow.x, overflow.y, 3, overflow.h}, orange)
+			overflow_fill := [4]f64{0.100, 0.065, 0.018, 0.95}
+			if ui.workflow == .Dancing {
+				overflow_fill = [4]f64{0.025, 0.065, 0.105, 0.95}
+			}
+			fill_overlay_rect(ctx, overflow, overflow_fill)
+			fill_overlay_rect(ctx, UI_Rect{overflow.x, overflow.y, 3, overflow.h}, accent)
 			draw_text_in_rect(
 				ctx,
 				small_font,
@@ -7016,18 +7048,18 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		}
 	}
 	draw_source_details(ctx, small_font, bright, muted, cyan)
-	draw_clip_rename(ctx, small_font, bright, muted, dim, orange)
-	draw_clip_metadata(ctx, small_font, bright, muted, dim, orange, cyan, danger)
+	draw_clip_rename(ctx, small_font, bright, muted, dim, accent)
+	draw_clip_metadata(ctx, small_font, bright, muted, dim, cyan, danger)
 	draw_randomize_help(ctx, small_font, bright, muted, dim, cyan)
 	draw_pitch_help(ctx, small_font, bright, muted, cyan)
-	draw_data_modal(ctx, small_font, bright, muted, dim, orange, cyan)
+	draw_data_modal(ctx, small_font, bright, muted, dim, warning, cyan)
 	draw_notification_history(
 		ctx,
 		small_font,
 		bright,
 		muted,
 		dim,
-		orange,
+		accent,
 		cyan,
 		danger,
 		success,
@@ -7088,7 +7120,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		)
 		fill_overlay_rect(ctx, input, theme.field)
 		if ui.focus == .URL && ui.source_modal_refetch_index < 0 {
-			fill_overlay_border(ctx, input, orange)
+			fill_overlay_border(ctx, input, accent)
 		}
 		if len(ui.url_input) == 0 {
 			draw_text_in_rect(
@@ -7122,7 +7154,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 						.URL,
 						ink,
 						dim,
-						orange,
+						accent,
 						0,
 						visible_line_start,
 						2,
@@ -7221,7 +7253,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 							)
 						}
 					} else {
-						draw_text_in_rect(ctx, small_font, fmt.tprintf("%s / %s", result.video_id, result.error), UI_Rect{row.x + 10, row.y, row.w - 20, row.h}, .Start, .Center, orange, 10)
+						draw_text_in_rect(ctx, small_font, fmt.tprintf("%s / %s", result.video_id, result.error), UI_Rect{row.x + 10, row.y, row.w - 20, row.h}, .Start, .Center, danger, 10)
 					}
 					continue
 				}
@@ -7253,10 +7285,20 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		if contains(cancel, ui.mouse) {cancel_color = theme.row_hover}
 		fill_overlay_rect(ctx, cancel, cancel_color)
 		draw_text_in_rect(ctx, small_font, "CANCEL", cancel, .Center, .Center, muted)
-		confirm_color := [4]f64{0.91, 0.31, 0.075, 1}
-		if contains(confirm, ui.mouse) {confirm_color = [4]f64{1.0, 0.42, 0.10, 1}}
+		refetch := ui.source_modal_refetch_index >= 0
+		confirm_color := refetch ? [4]f64{0.91, 0.31, 0.075, 1} : accent
+		confirm_border := refetch ? [4]f64{1.0, 0.45, 0.12, 1} : accent
+		confirm_text := refetch ? [4]f64{0.08, 0.025, 0.01, 1} : theme.header
+		if contains(confirm, ui.mouse) {
+			if refetch {
+				confirm_color = [4]f64{1.0, 0.42, 0.10, 1}
+			} else {
+				confirm_color = theme.row_hover
+				confirm_text = accent
+			}
+		}
 		fill_overlay_rect(ctx, confirm, confirm_color)
-		fill_overlay_border(ctx, confirm, [4]f64{1.0, 0.45, 0.12, 1})
+		fill_overlay_border(ctx, confirm, confirm_border)
 		draw_text_in_rect(
 			ctx,
 			small_font,
@@ -7264,7 +7306,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			confirm,
 			.Center,
 			.Center,
-			[4]f64{0.08, 0.025, 0.01, 1},
+			confirm_text,
 		)
 		draw_text_in_rect(
 			ctx,
@@ -7288,21 +7330,22 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		bright,
 		muted,
 		dim,
-		orange,
+		accent,
 		cyan,
+		danger,
 	)
-	draw_command_palette(ctx, small_font, bright, muted, dim, orange, cyan)
+	draw_command_palette(ctx, small_font, bright, muted, dim, accent, cyan, danger)
 	draw_library_recovery(
 		ctx,
 		small_font,
 		bright,
 		muted,
 		dim,
-		orange,
+		warning,
 		cyan,
 		danger,
 	)
-	draw_backup_warning(ctx, small_font, bright, muted, orange, danger)
+	draw_backup_warning(ctx, small_font, bright, muted, warning, danger)
 	draw_window_controls(ctx)
 	draw_flash_hints(ctx, small_font)
 	return pixels
