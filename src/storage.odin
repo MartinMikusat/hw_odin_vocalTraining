@@ -571,7 +571,7 @@ database_file_path_for_runtime :: proc(path: string, allocator := context.alloca
 	return resolved, err == nil
 }
 
-database_create_schema_v7 :: proc(database: ^SQLite_DB) -> bool {
+database_create_schema_v8 :: proc(database: ^SQLite_DB) -> bool {
 	return sqlite_execute(database, `
 		PRAGMA foreign_keys = ON;
 		CREATE TABLE IF NOT EXISTS sources (
@@ -641,6 +641,15 @@ database_create_schema_v7 :: proc(database: ^SQLite_DB) -> bool {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS clip_drafts (
+			source_id TEXT PRIMARY KEY,
+			start_seconds REAL NOT NULL,
+			end_seconds REAL NOT NULL,
+			has_start INTEGER NOT NULL,
+			has_end INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			revision INTEGER NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS clip_randomization (
 			clip_id TEXT PRIMARY KEY,
 			last_sequence INTEGER NOT NULL
@@ -668,7 +677,7 @@ database_create_schema_v7 :: proc(database: ^SQLite_DB) -> bool {
 		INSERT OR IGNORE INTO library_revisions (
 			revision, committed_at_ms
 		) VALUES (1, 0);
-		PRAGMA user_version = 7;
+		PRAGMA user_version = 8;
 	`)
 }
 
@@ -1057,6 +1066,21 @@ database_migrate_v6_to_v7 :: proc(database: ^SQLite_DB) -> bool {
 	return sqlite_execute(database, "PRAGMA user_version = 7")
 }
 
+database_migrate_v7_to_v8 :: proc(database: ^SQLite_DB) -> bool {
+	return sqlite_execute(database, `
+		CREATE TABLE IF NOT EXISTS clip_drafts (
+			source_id TEXT PRIMARY KEY,
+			start_seconds REAL NOT NULL,
+			end_seconds REAL NOT NULL,
+			has_start INTEGER NOT NULL,
+			has_end INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			revision INTEGER NOT NULL
+		);
+		PRAGMA user_version = 8;
+	`)
+}
+
 database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 	version, version_read := library_database_user_version(database)
 	if !version_read {return false}
@@ -1069,8 +1093,12 @@ database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 		if !database_migrate_v6_to_v7(database) {return false}
 		version = 7
 	}
+	if version == 7 {
+		if !database_migrate_v7_to_v8(database) {return false}
+		version = 8
+	}
 	if version != 0 && version != LIBRARY_SCHEMA_VERSION {return false}
-	return database_create_schema_v7(database)
+	return database_create_schema_v8(database)
 }
 
 database_source_auth_browser_load :: proc(
@@ -1114,6 +1142,130 @@ database_source_auth_browser_clear :: proc(database: ^SQLite_DB) -> bool {
 	return sqlite_execute(
 		database,
 		"DELETE FROM app_preferences WHERE key = 'youtube_auth_browser'",
+	)
+}
+
+clip_draft_destroy :: proc(draft: ^Clip_Draft) {
+	if draft == nil {return}
+	delete(draft.source_id)
+	delete(draft.name)
+	draft^ = {}
+}
+
+database_clip_draft_load :: proc(
+	database: ^SQLite_DB,
+	source_id: string,
+) -> (Clip_Draft, bool) {
+	if database == nil || len(source_id) == 0 {return {}, false}
+	statement, prepared := sqlite_prepare(
+		database,
+		`SELECT start_seconds, end_seconds, has_start, has_end, name, revision
+		 FROM clip_drafts
+		 WHERE source_id = ?`,
+	)
+	if !prepared {return {}, false}
+	defer sqlite3_finalize(statement)
+	if !sqlite_bind_text_value(statement, 1, source_id) ||
+	   sqlite3_step(statement) != SQLITE_ROW {
+		return {}, false
+	}
+	draft := Clip_Draft{
+		start_seconds = sqlite3_column_double(statement, 0),
+		end_seconds = sqlite3_column_double(statement, 1),
+		has_start = sqlite3_column_int(statement, 2) != 0,
+		has_end = sqlite3_column_int(statement, 3) != 0,
+		revision = sqlite3_column_int64(statement, 5),
+	}
+	copied := false
+	defer if !copied {clip_draft_destroy(&draft)}
+	source_copy, source_error := strings.clone(source_id)
+	if source_error != nil {return {}, false}
+	draft.source_id = source_copy
+	name, name_copied := sqlite_column_string(statement, 4)
+	if !name_copied {return {}, false}
+	draft.name = name
+	if draft.revision <= 0 ||
+	   draft.has_start && !portable_seconds_valid(draft.start_seconds) ||
+	   draft.has_end && !portable_seconds_valid(draft.end_seconds) {
+		return {}, false
+	}
+	copied = true
+	return draft, true
+}
+
+database_clip_draft_save :: proc(
+	database: ^SQLite_DB,
+	draft: Clip_Draft,
+) -> bool {
+	if database == nil ||
+	   len(draft.source_id) == 0 ||
+	   draft.revision <= 0 ||
+	   draft.has_start && !portable_seconds_valid(draft.start_seconds) ||
+	   draft.has_end && !portable_seconds_valid(draft.end_seconds) {
+		return false
+	}
+	statement, prepared := sqlite_prepare(
+		database,
+		`INSERT INTO clip_drafts (
+			source_id, start_seconds, end_seconds, has_start, has_end, name,
+			revision
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(source_id) DO UPDATE SET
+			start_seconds = excluded.start_seconds,
+			end_seconds = excluded.end_seconds,
+			has_start = excluded.has_start,
+			has_end = excluded.has_end,
+			name = excluded.name,
+			revision = excluded.revision`,
+	)
+	if !prepared {return false}
+	defer sqlite3_finalize(statement)
+	return sqlite_bind_text_value(statement, 1, draft.source_id) &&
+	       sqlite3_bind_double(statement, 2, draft.start_seconds) == SQLITE_OK &&
+	       sqlite3_bind_double(statement, 3, draft.end_seconds) == SQLITE_OK &&
+	       sqlite3_bind_int(statement, 4, draft.has_start ? 1 : 0) == SQLITE_OK &&
+	       sqlite3_bind_int(statement, 5, draft.has_end ? 1 : 0) == SQLITE_OK &&
+	       sqlite_bind_text_value(statement, 6, draft.name) &&
+	       sqlite3_bind_int64(statement, 7, draft.revision) == SQLITE_OK &&
+	       sqlite3_step(statement) == SQLITE_DONE
+}
+
+database_clip_draft_clear_if_revision :: proc(
+	database: ^SQLite_DB,
+	source_id: string,
+	revision: i64,
+) -> (cleared, ok: bool) {
+	if database == nil || len(source_id) == 0 || revision <= 0 {
+		return false, false
+	}
+	draft, found := database_clip_draft_load(database, source_id)
+	if !found {return false, true}
+	defer clip_draft_destroy(&draft)
+	if draft.revision != revision {return false, true}
+	statement, prepared := sqlite_prepare(
+		database,
+		`UPDATE clip_drafts
+		 SET start_seconds = 0,
+		     end_seconds = 0,
+		     has_start = 0,
+		     has_end = 0,
+		     name = ''
+		 WHERE source_id = ? AND revision = ?`,
+	)
+	if !prepared {return false, false}
+	defer sqlite3_finalize(statement)
+	ok = sqlite_bind_text_value(statement, 1, source_id) &&
+	     sqlite3_bind_int64(statement, 2, revision) == SQLITE_OK &&
+	     sqlite3_step(statement) == SQLITE_DONE
+	return ok, ok
+}
+
+database_clip_drafts_prune :: proc(database: ^SQLite_DB) -> bool {
+	if database == nil {return false}
+	return sqlite_execute(
+		database,
+		`DELETE FROM clip_drafts
+		 WHERE source_id NOT IN (SELECT id FROM sources)`,
 	)
 }
 
@@ -1415,8 +1567,15 @@ database_save_collections :: proc(
 	segments: []Transcript_Segment,
 	hints: []Import_Hint,
 	clips: []Clip,
+	draft_clear: ^Clip_Draft_Clear_Request = nil,
 ) -> bool {
 	if database == nil {return false}
+	if draft_clear != nil {
+		draft_clear.cleared = false
+		if len(draft_clear.source_id) == 0 || draft_clear.revision <= 0 {
+			return false
+		}
+	}
 	previous: App_State
 	load_result := database_load_state_result(database, &previous)
 	defer library_load_result_destroy(&load_result)
@@ -1501,6 +1660,15 @@ database_save_collections :: proc(
 	}
 	if !database_clip_randomization_apply(database, clips) {
 		return false
+	}
+	if draft_clear != nil {
+		cleared, ok := database_clip_draft_clear_if_revision(
+			database,
+			draft_clear.source_id,
+			draft_clear.revision,
+		)
+		if !ok {return false}
+		draft_clear.cleared = cleared
 	}
 	if !sqlite_execute(database, "COMMIT") {return false}
 	committed = true
@@ -2240,19 +2408,26 @@ database_load_state :: proc(database: ^SQLite_DB, destination: ^App_State) -> bo
 	return result.mode == .Ready
 }
 
-save_library :: proc() -> bool {
-	return save_library_state(&state)
+save_library :: proc(draft_clear: ^Clip_Draft_Clear_Request = nil) -> bool {
+	return save_library_state(&state, draft_clear)
 }
 
-save_library_state :: proc(value: ^App_State) -> bool {
+save_library_state :: proc(
+	value: ^App_State,
+	draft_clear: ^Clip_Draft_Clear_Request = nil,
+) -> bool {
 	if value == nil || !library_storage_writable() {return false}
-	if library_legacy_fallback {return save_legacy_library_state(value)}
+	if library_legacy_fallback {
+		if draft_clear != nil {return false}
+		return save_legacy_library_state(value)
+	}
 	return database_save_collections(
 		library_database,
 		value.sources[:],
 		value.transcripts.segments[:],
 		value.hints[:],
 		value.clips[:],
+		draft_clear,
 	)
 }
 
@@ -2401,6 +2576,7 @@ load_library :: proc() -> Library_Load_Result {
 		}
 		library_load_result_destroy(&load_result)
 	}
+	_ = database_clip_drafts_prune(database)
 	source_auth_saved_browser = database_source_auth_browser_load(database)
 	legacy_exists := os.exists(manifest_path())
 	if legacy_exists && !database_exists {

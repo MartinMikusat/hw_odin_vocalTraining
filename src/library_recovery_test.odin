@@ -125,7 +125,7 @@ legacy_workflow_test_database_create :: proc(path: string) -> bool {
 }
 
 @(test)
-schema_v7_repairs_missing_vocal_clips_without_resurrecting_deletions_test :: proc(
+schema_migration_repairs_missing_vocal_clips_without_resurrecting_deletions_test :: proc(
 	t: ^testing.T,
 ) {
 	previous_support, support_found := os.lookup_env(
@@ -170,7 +170,7 @@ schema_v7_repairs_missing_vocal_clips_without_resurrecting_deletions_test :: pro
 	testing.expect(t, opened)
 	if !opened {return}
 	defer sqlite3_close(database)
-	testing.expect(t, database_create_schema_v7(database))
+	testing.expect(t, database_create_schema_v8(database))
 	source := Source_Video{
 		id = "source-vocal",
 		workflow = .Vocal,

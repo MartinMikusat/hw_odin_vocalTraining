@@ -110,7 +110,7 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 	background := "none"
 	switch {
 	case import_job != nil: background = "import"
-	case export_job != nil: background = "export"
+	case export_jobs_any(): background = "export"
 	case source_probe_job != nil: background = "source-probe"
 	}
 	return UI_Diagnostic_Surface{

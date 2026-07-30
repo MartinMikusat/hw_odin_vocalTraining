@@ -175,6 +175,12 @@ that level when another source or clip is loaded during the session. The
 transport can play, pause, stop at zero, change speed, change volume, and scrub
 across the loaded media. Source reset seeks to the imported URL timestamp.
 Clip reset seeks to the start of the clip.
+The application stores each source's mark-in, mark-out, and optional clip name
+as a separate local draft. It restores these drafts after source changes and
+application relaunches.
+Each Commit starts an independent export immediately. A successful export
+clears its submitted draft only when that source's draft has not changed.
+Failed exports and newer drafts retain their marks and names.
 The Sources footer highlights each missing range endpoint. It enables and
 highlights **Commit** only after the range is at least one second long. The
 footer shows the calculated clip duration beside the range.
@@ -239,9 +245,10 @@ Left Arrow or Right Arrow to move by words, and add **Shift** to extend the
 selection. Hold **Command** to move to a line boundary. Option-Backspace
 deletes the previous word.
 
-Download and export diagnostics are stored as `yt-dlp.log` and `ffmpeg.log` in
-the application-support directory. Use the **Data** control to open the library
-data dialog. Press **01** to export both workflows, **02** to export the current
+Download diagnostics are stored as `yt-dlp.log` in the application-support
+directory. Each clip export writes `ffmpeg-<clip-id>.log`, which keeps parallel
+export diagnostics separate. Use the **Data** control to open the library data
+dialog. Press **01** to export both workflows, **02** to export the current
 workflow, **03** to import, **04** to open the directory in Finder, or **05** to
 close. Import reads the file scope and replaces only that scope. Its
 confirmation actions use **01 Replace and Recover** and **02 Cancel**.
@@ -412,9 +419,10 @@ entry snapshot. Query, result, and ranked-index buffers retain their capacity
 between edits and sessions.
 
 SQLite stores sources, transcript segments, hints, clips, source metadata,
-library revisions, and entity changes. It also stores the newest 10,000
-structured notifications. The main thread commits records, revisions, and
-change rows in one transaction. `src/library_recovery.odin` owns verified
+source-specific clip drafts, library revisions, and entity changes. It also
+stores the newest 10,000 structured notifications. Drafts remain local and do
+not enter portable library exports. The main thread commits records, revisions,
+and change rows in one transaction. `src/library_recovery.odin` owns verified
 backups, tolerant row salvage, recovery candidates, and crash-safe activation.
 A startup worker fills missing metadata from existing yt-dlp files. Startup
 marks an unfinished notification as interrupted when the previous process did
@@ -443,13 +451,14 @@ builds print each arena's high-water mark, reset count, and allocation-failure
 count at shutdown.
 
 Each import or export worker owns a private growing arena and never reads the
-mutable UI or application arrays. The main thread joins the worker, clones its
-small durable records into the heap, swaps any completed transcript generation
-into `App_State`, and destroys the worker arena. Transcript segments and every
-string reachable from them share one generation arena. The generation also
-stores one contiguous segment span for each source. Search and transcript
-retrieval pass the active source slice directly to their consumers.
-Replacement installs the new generation before destroying the old one.
+mutable UI or application arrays. Save workers run independently and enqueue
+their exact job pointer through a mutex-protected completion queue. The main
+thread joins each completed worker, commits its clip, and destroys its arena.
+Transcript segments and every string reachable from them share one generation
+arena. The generation also stores one contiguous segment span for each source.
+Search and transcript retrieval pass the active source slice directly to their
+consumers. Replacement installs the new generation before destroying the old
+one.
 
 Sources, import hints, clips, and mutable UI strings remain individually
 heap-owned because they change independently. Core Foundation, Objective-C,

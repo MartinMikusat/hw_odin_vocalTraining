@@ -438,7 +438,7 @@ cli_source_list :: proc(request: CLI_Request) -> CLI_Result {
 }
 
 cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
-	if import_job != nil || export_job != nil {return cli_error(request.command, .Busy, "busy", "Another media operation is active")}
+	if import_job != nil || export_jobs_any() {return cli_error(request.command, .Busy, "busy", "Another media operation is active")}
 	video_id, valid_url := parse_video_id(request.url)
 	if !valid_url {return cli_error(request.command, .Invalid, "invalid_url", "The URL is not a supported YouTube video URL")}
 	backup := library_backup_create(library_database)
@@ -533,7 +533,7 @@ cli_segment_range :: proc(source_id, from_segment, to_segment: string, segments:
 }
 
 cli_clip_create :: proc(request: CLI_Request) -> CLI_Result {
-	if import_job != nil || export_job != nil {return cli_error(request.command, .Busy, "busy", "Another media operation is active")}
+	if import_job != nil || export_jobs_any() {return cli_error(request.command, .Busy, "busy", "Another media operation is active")}
 	source := cli_find_source(request.source_id, request.workflow)
 	if source == nil {return cli_error(request.command, .Invalid, "source_not_found", "The source does not exist")}
 	if !os.exists(source.media_path) {return cli_error(request.command, .Invalid, "media_missing", "The source media file is missing")}
@@ -547,6 +547,7 @@ cli_clip_create :: proc(request: CLI_Request) -> CLI_Result {
 	if !valid_clip_range(start_seconds, end_seconds, source.duration) {return cli_error(request.command, .Invalid, "range_invalid", "The transcript segments produce an invalid clip range")}
 	if available, reason := helper_available("ffmpeg"); !available {return cli_error(request.command, .Media, "helper_unavailable", reason, diagnostic_log_path("ffmpeg"))}
 	id := cli_next_clip_id(source)
+	log_path := clip_export_log_path(id)
 	clip := Clip{
 		id=id,
 		source_id=source.id,
@@ -557,7 +558,16 @@ cli_clip_create :: proc(request: CLI_Request) -> CLI_Result {
 		dance_count_in_bpm=120,
 		dance_playback_rate=1,
 	}
-	if !export_clip(&clip, source.media_path) {return cli_error(request.command, .Media, "clip_export_failed", "FFmpeg could not create the clip", diagnostic_log_path("ffmpeg"))}
+	_ = os.write_entire_file(log_path, nil)
+	if !export_clip(&clip, source.media_path, log_path = log_path) {
+		return cli_error(
+			request.command,
+			.Media,
+			"clip_export_failed",
+			"FFmpeg could not create the clip",
+			log_path,
+		)
+	}
 	defer delete(clip.clip_path)
 	copy, copied := clone_clip(clip)
 	if !copied {

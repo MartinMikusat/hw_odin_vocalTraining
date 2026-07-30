@@ -11,7 +11,7 @@ import "core:strings"
 import "core:time"
 import "base:runtime"
 
-LIBRARY_SCHEMA_VERSION :: 7
+LIBRARY_SCHEMA_VERSION :: 8
 LIBRARY_BACKUP_RETENTION :: 10
 
 Library_Storage_Mode :: enum {

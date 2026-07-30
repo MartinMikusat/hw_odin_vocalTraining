@@ -102,6 +102,22 @@ Clip :: struct {
 	dance_playback_rate: f32,
 }
 
+Clip_Draft :: struct {
+	source_id: string,
+	start_seconds: f64,
+	end_seconds: f64,
+	has_start: bool,
+	has_end: bool,
+	name: string,
+	revision: i64,
+}
+
+Clip_Draft_Clear_Request :: struct {
+	source_id: string,
+	revision: i64,
+	cleared: bool,
+}
+
 App_State :: struct {
 	window: Id,
 	url_input: Id,
@@ -230,8 +246,10 @@ Export_Job :: struct {
 	arena: ^mem_virtual.Arena,
 	clip: Clip,
 	source_path: string,
+	log_path: string,
 	operation: Export_Operation,
 	notification_id: i64,
+	draft_revision: i64,
 	success: bool,
 }
 
@@ -265,7 +283,9 @@ Source_Metadata_Job :: struct {
 }
 
 import_job: ^Import_Job
-export_job: ^Export_Job
+export_jobs: [dynamic]^Export_Job
+export_completed_jobs: [dynamic]^Export_Job
+export_completion_mutex: sync.Mutex
 source_metadata_job: ^Source_Metadata_Job
 
 msg_id :: proc(receiver: Id, selector: Sel) -> Id {
@@ -550,6 +570,10 @@ diagnostic_log_path :: proc(name: string) -> string {
 	return fmt.tprintf("%s/%s.log", app_support_dir(), name)
 }
 
+clip_export_log_path :: proc(clip_id: string) -> string {
+	return fmt.tprintf("%s/ffmpeg-%s.log", app_support_dir(), clip_id)
+}
+
 import_progress_path :: proc() -> string {
 	return fmt.tprintf("%s/yt-dlp-progress.log", app_support_dir())
 }
@@ -692,10 +716,19 @@ youtube_download_command :: proc(url, output, log_path: string, yt_dlp := "", ff
 	return fmt.tprintf("%s --no-playlist --force-overwrites --write-info-json --write-subs --write-auto-subs --sub-langs 'en,.*-orig' --sub-format json3 --ffmpeg-location %s -f 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b' -S 'res,vcodec:h264' --merge-output-format mp4 -o %s %s >> %s 2>&1", shell_quote(yt_dlp_command), shell_quote(ffmpeg_command), shell_quote(output), shell_quote(url), shell_quote(log_path))
 }
 
-clip_export_command :: proc(source_path, clip_path: string, start_seconds, end_seconds: f64, ffmpeg := "") -> string {
+clip_export_command :: proc(
+	source_path,
+	clip_path: string,
+	start_seconds,
+	end_seconds: f64,
+	ffmpeg := "",
+	log_path := "",
+) -> string {
 	ffmpeg_command := ffmpeg
 	if len(ffmpeg_command) == 0 { ffmpeg_command = helper_command("ffmpeg") }
-	return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -c:v libx264 -c:a aac -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(diagnostic_log_path("ffmpeg")))
+	output_log := log_path
+	if len(output_log) == 0 {output_log = diagnostic_log_path("ffmpeg")}
+	return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -c:v libx264 -c:a aac -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(output_log))
 }
 
 workflow_source_directory :: proc(workflow: Workflow_Kind) -> string {
@@ -1196,12 +1229,123 @@ reset_player_playback :: proc() {
 	ui.needs_redraw = true
 }
 
+active_clip_draft :: proc() -> (Clip_Draft, bool) {
+	if state.active_source < 0 || state.active_source >= len(state.sources) {
+		return {}, false
+	}
+	return Clip_Draft{
+		source_id = state.sources[state.active_source].id,
+		start_seconds = state.range_start,
+		end_seconds = state.range_end,
+		has_start = state.has_start,
+		has_end = state.has_end,
+		name = ui.clip_name,
+		revision = ui.clip_draft_revision,
+	}, true
+}
+
+CLIP_DRAFT_PERSIST_DEBOUNCE_MS :: i64(250)
+
+flush_active_clip_draft :: proc() -> bool {
+	if !ui.clip_draft_dirty {return true}
+	draft, active := active_clip_draft()
+	if !active {
+		set_error_status("The active clip draft is unavailable")
+		return false
+	}
+	if database_clip_draft_save(library_database, draft) {
+		ui.clip_draft_dirty = false
+		ui.clip_draft_persist_due_ms = 0
+		return true
+	}
+	ui.clip_draft_persist_due_ms = 0
+	set_error_status("The clip draft could not be saved")
+	return false
+}
+
+persist_active_clip_draft :: proc(debounce := false) -> bool {
+	_, active := active_clip_draft()
+	if !active {return false}
+	ui.clip_draft_revision = max(
+		i64(1),
+		ui.clip_draft_revision + 1,
+	)
+	ui.clip_draft_dirty = true
+	if debounce {
+		ui.clip_draft_persist_due_ms =
+			numbered_action_time_ms() +
+			CLIP_DRAFT_PERSIST_DEBOUNCE_MS
+		return true
+	}
+	return flush_active_clip_draft()
+}
+
+load_clip_draft_for_source :: proc(source_index: int) {
+	state.range_start = 0
+	state.range_end = 0
+	state.has_start = false
+	state.has_end = false
+	ui.clip_draft_revision = 0
+	ui.clip_draft_dirty = false
+	ui.clip_draft_persist_due_ms = 0
+	ui_set_string(&ui.clip_name, "")
+	if source_index >= 0 && source_index < len(state.sources) {
+		source_id := state.sources[source_index].id
+		if draft, found := database_clip_draft_load(
+			library_database,
+			source_id,
+		); found {
+			state.range_start = draft.start_seconds
+			state.range_end = draft.end_seconds
+			state.has_start = draft.has_start
+			state.has_end = draft.has_end
+			ui.clip_draft_revision = draft.revision
+			ui_set_string(&ui.clip_name, draft.name)
+			clip_draft_destroy(&draft)
+		}
+	}
+	if ui.focus == .Clip_Name {
+		clear_marked_text()
+		collapse_text_selection(len(ui.clip_name))
+		ui.scroll_x = 0
+	}
+	ui.needs_redraw = true
+}
+
+apply_cleared_clip_draft :: proc(source_id: string, revision: i64) {
+	if state.active_source >= 0 &&
+	   state.active_source < len(state.sources) &&
+	   state.sources[state.active_source].id == source_id &&
+	   ui.clip_draft_revision == revision {
+		reset_clip_output()
+		ui.clip_draft_dirty = false
+		ui.clip_draft_persist_due_ms = 0
+	}
+}
+
+clear_clip_draft_after_export :: proc(source_id: string, revision: i64) -> bool {
+	cleared, ok := database_clip_draft_clear_if_revision(
+		library_database,
+		source_id,
+		revision,
+	)
+	if !ok {
+		set_error_status("The saved clip draft could not be cleared")
+		return false
+	}
+	if !cleared {return false}
+	apply_cleared_clip_draft(source_id, revision)
+	return true
+}
+
 load_source_player :: proc(index: int) -> bool {
 	if index < 0 || index >= len(state.sources) { return false }
 	if state.sources[index].workflow != ui.workflow {return false}
+	if !flush_active_clip_draft() {return false}
 	ui.source_hint_menu_open = false
 	source := &state.sources[index]
 	state.active_source = index
+	load_clip_draft_for_source(index)
 	source.media_available = os.exists(source.media_path)
 	if !source.media_available || !media_file_validate(source.media_path) {
 		metal_player_clear()
@@ -1214,8 +1358,6 @@ load_source_player :: proc(index: int) -> bool {
 	if !metal_player_load(path) {metal_player_clear(); return false}
 	ui.player_duration = source.duration
 	set_source_playback_active(true)
-	state.has_start, state.has_end = false, false
-	set_text(state.clip_name_input, "")
 	if state.has_pending_hint {
 		seek_seconds(state.pending_hint)
 		state.has_pending_hint = false
@@ -1258,11 +1400,22 @@ on_seek_transcript :: proc "c" (self: Id, command: Sel, sender: Id) {
 	seek_seconds(f64(tag)/1000)
 }
 
-export_clip :: proc(clip: ^Clip, source_path: string, allocator := context.allocator) -> bool {
+export_clip :: proc(
+	clip: ^Clip,
+	source_path: string,
+	allocator := context.allocator,
+	log_path := "",
+) -> bool {
 	dir := workflow_clip_directory(clip.workflow)
 	os.make_directory(dir)
 	clip.clip_path = fmt.aprintf("%s/%s.mp4", dir, clip.id, allocator=allocator)
-	command := clip_export_command(source_path, clip.clip_path, clip.start_seconds, clip.end_seconds)
+	command := clip_export_command(
+		source_path,
+		clip.clip_path,
+		clip.start_seconds,
+		clip.end_seconds,
+		log_path = log_path,
+	)
 	c_command := strings.clone_to_cstring(command)
 	defer delete(c_command)
 	run := transmute(proc "c" (cstring) -> int)system_address
@@ -2242,6 +2395,10 @@ refetch_source :: proc(
 	auth_browser := Source_Auth_Browser.None,
 ) {
 	if import_job != nil { set_text(state.status, "An import is already running"); return }
+	if export_jobs_any() {
+		set_text(state.status, "Wait for the active clip exports to finish")
+		return
+	}
 	if source_index < 0 || source_index >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
 	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
 	if !major_change_backup_preflight(
@@ -2322,6 +2479,10 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if import_job != nil { set_text(state.status, "An import is already running"); return }
+	if export_jobs_any() {
+		set_text(state.status, "Wait for the active clip exports to finish")
+		return
+	}
 	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
 	input := strings.trim_space(field_text(state.url_input))
 	if len(input) == 0 { set_text(state.status, "Paste at least one YouTube URL"); return }
@@ -2379,7 +2540,12 @@ on_set_start :: proc "c" (self: Id, command: Sel, sender: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if seconds, ok := current_seconds(); ok {
 		state.range_start, state.has_start = seconds, true
-		set_text(state.status, fmt.tprintf("Start: %s", format_timestamp(seconds)))
+		if persist_active_clip_draft() {
+			set_text(
+				state.status,
+				fmt.tprintf("Start: %s", format_timestamp(seconds)),
+			)
+		}
 	} else { set_text(state.status, "No active source player") }
 }
 
@@ -2388,7 +2554,16 @@ on_set_end :: proc "c" (self: Id, command: Sel, sender: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if seconds, ok := current_seconds(); ok {
 		state.range_end, state.has_end = seconds, true
-		set_text(state.status, fmt.tprintf("Range: %s - %s", format_timestamp(state.range_start), format_timestamp(seconds)))
+		if persist_active_clip_draft() {
+			set_text(
+				state.status,
+				fmt.tprintf(
+					"Range: %s - %s",
+					format_timestamp(state.range_start),
+					format_timestamp(seconds),
+				),
+			)
+		}
 	} else { set_text(state.status, "No active source player") }
 }
 
@@ -2406,18 +2581,76 @@ reset_clip_output :: proc() {
 	ui.needs_redraw = true
 }
 
+export_jobs_any :: proc() -> bool {
+	return len(export_jobs) > 0
+}
+
+export_jobs_have_exclusive_operation :: proc() -> bool {
+	for job in export_jobs {
+		if job != nil && job.operation != .Save {return true}
+	}
+	return false
+}
+
+export_jobs_add :: proc(job: ^Export_Job) {
+	if job == nil {return}
+	append(&export_jobs, job)
+}
+
+export_jobs_remove :: proc(job: ^Export_Job) -> bool {
+	for candidate, index in export_jobs {
+		if candidate != job {continue}
+		last := pop(&export_jobs)
+		if index < len(export_jobs) {export_jobs[index] = last}
+		return true
+	}
+	return false
+}
+
+clip_id_reserved :: proc(id: string) -> bool {
+	for clip in state.clips {
+		if clip.id == id {return true}
+	}
+	for job in export_jobs {
+		if job != nil && job.operation == .Save && job.clip.id == id {
+			return true
+		}
+	}
+	return false
+}
+
+next_clip_number_for_export :: proc(source: ^Source_Video) -> int {
+	if source == nil {return 0}
+	for number := 1; ; number += 1 {
+		id := fmt.tprintf("%s-%d", source.id, number)
+		if !clip_id_reserved(id) {return number}
+	}
+	return 0
+}
+
 on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if export_job != nil { set_text(state.status, "A clip export is already running"); return }
+	if import_job != nil || library_recovery != nil {
+		set_text(state.status, "Wait for the active import or recovery to finish")
+		return
+	}
+	if export_jobs_have_exclusive_operation() {
+		set_text(state.status, "Wait for the active preview or repair to finish")
+		return
+	}
+	if !flush_active_clip_draft() {return}
 	if !require_helper("ffmpeg") { return }
 	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_clip_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
 		set_text(state.status, "Select a source and mark a valid start/end range")
 		return
 	}
 	source := &state.sources[state.active_source]
-	number := 1
-	for clip in state.clips { if clip.source_id == source.id { number += 1 } }
+	number := next_clip_number_for_export(source)
+	if number <= 0 {
+		set_text(state.status, "Unable to reserve a clip identifier")
+		return
+	}
 	id := fmt.tprintf("%s-%d", source.id, number)
 	name := fmt.tprintf("%s Clip %d", source.title, number)
 	entered := strings.trim_space(field_text(state.clip_name_input))
@@ -2435,6 +2668,7 @@ on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 		},
 		source.media_path,
 		.Save,
+		ui.clip_draft_revision,
 	)
 	if job == nil { set_text(state.status, "Unable to allocate export job"); return }
 	fields := [3]Notification_Field{
@@ -2447,8 +2681,8 @@ on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 		"FFmpeg is encoding the selected source range as a standalone clip.",
 		fields[:],
 	)
-	export_job = job
-	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
+	export_jobs_add(job)
+	os.write_entire_file(job.log_path, nil)
 	thread.start(job.thread)
 }
 
@@ -2486,7 +2720,10 @@ on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
 on_preview :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if export_job != nil { set_text(state.status, "A clip export is already running"); return }
+	if export_jobs_any() {
+		set_text(state.status, "Wait for the active clip exports to finish")
+		return
+	}
 	if !require_helper("ffmpeg") { return }
 	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_clip_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
 		set_text(state.status, "Mark a valid start and end before previewing")
@@ -2518,8 +2755,8 @@ on_preview :: proc "c" (self: Id, command: Sel, sender: Id) {
 		"FFmpeg is encoding a temporary preview for the selected range.",
 		fields[:],
 	)
-	export_job = job
-	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
+	export_jobs_add(job)
+	os.write_entire_file(job.log_path, nil)
 	thread.start(job.thread)
 }
 
@@ -2533,6 +2770,7 @@ export_job_create :: proc(
 	clip: Clip,
 	source_path: string,
 	operation: Export_Operation,
+	draft_revision: i64 = 0,
 ) -> ^Export_Job {
 	arena, ok := growing_arena_create()
 	if !ok { return nil }
@@ -2544,7 +2782,12 @@ export_job_create :: proc(
 	if !copied { export_job_destroy(job); return nil }
 	job.clip = copy
 	job.source_path = strings.clone(source_path, allocator)
+	job.log_path = strings.clone(
+		clip_export_log_path(job.clip.id),
+		allocator,
+	)
 	job.operation = operation
+	job.draft_revision = draft_revision
 	worker := thread.create(export_worker)
 	if worker == nil { export_job_destroy(job); return nil }
 	job.thread = worker
@@ -2555,7 +2798,15 @@ export_job_create :: proc(
 export_worker :: proc(t: ^thread.Thread) {
 	context = runtime.default_context()
 	job := cast(^Export_Job)t.data
-	job.success = export_clip(&job.clip, job.source_path, mem_virtual.arena_allocator(job.arena))
+	job.success = export_clip(
+		&job.clip,
+		job.source_path,
+		mem_virtual.arena_allocator(job.arena),
+		job.log_path,
+	)
+	sync.mutex_lock(&export_completion_mutex)
+	append(&export_completed_jobs, job)
+	sync.mutex_unlock(&export_completion_mutex)
 	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("exportFinished:"), nil, false)
 }
 
@@ -2573,24 +2824,49 @@ repair_clip_apply :: proc(value: Clip) -> (int, bool) {
 	return index, true
 }
 
-on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
-	context = runtime.default_context()
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	job := export_job
-	if job == nil { return }
-	thread.join(job.thread)
-	thread.destroy(job.thread)
-	job.thread = nil
-	defer {
-		export_job = nil
-		export_job_destroy(job)
+save_export_apply :: proc(job: ^Export_Job) -> bool {
+	if job == nil || job.operation != .Save || !job.success {return false}
+	clip, copied := clone_clip(job.clip)
+	if !copied {return false}
+	append(&state.clips, clip)
+	draft_clear: Clip_Draft_Clear_Request
+	draft_clear_pointer: ^Clip_Draft_Clear_Request
+	if job.draft_revision > 0 {
+		draft_clear = {
+			source_id = job.clip.source_id,
+			revision = job.draft_revision,
+		}
+		draft_clear_pointer = &draft_clear
+	}
+	if !save_library(draft_clear_pointer) {
+		stored := pop(&state.clips)
+		delete_clip(&stored)
+		_ = os.remove(job.clip.clip_path)
+		return false
+	}
+	if draft_clear_pointer != nil && draft_clear.cleared {
+		apply_cleared_clip_draft(
+			draft_clear.source_id,
+			draft_clear.revision,
+		)
+	}
+	refresh_clips()
+	return true
+}
+
+finish_export_job :: proc(job: ^Export_Job) {
+	if job == nil {return}
+	if job.thread != nil {
+		thread.join(job.thread)
+		thread.destroy(job.thread)
+		job.thread = nil
 	}
 	if !job.success {
 		_ = notification_finish(
 			job.notification_id,
 			.Error,
 			"FFmpeg failed",
-			fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("ffmpeg")),
+			fmt.tprintf("Inspect the diagnostic log at %s", job.log_path),
 		)
 		return
 	}
@@ -2655,20 +2931,7 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		)
 		return
 	}
-	clip, copied := clone_clip(job.clip)
-	if !copied {
-		_ = notification_finish(
-			job.notification_id,
-			.Error,
-			"Unable to store exported clip",
-		)
-		return
-	}
-	append(&state.clips, clip)
-	if !save_library() {
-		stored := pop(&state.clips)
-		delete_clip(&stored)
-		_ = os.remove(job.clip.clip_path)
+	if !save_export_apply(job) {
 		_ = notification_finish(
 			job.notification_id,
 			.Error,
@@ -2676,8 +2939,6 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		)
 		return
 	}
-	reset_clip_output()
-	refresh_clips()
 	_ = notification_finish(
 		job.notification_id,
 		.Success,
@@ -2689,6 +2950,23 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	)
 }
 
+on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	for {
+		sync.mutex_lock(&export_completion_mutex)
+		if len(export_completed_jobs) == 0 {
+			sync.mutex_unlock(&export_completion_mutex)
+			break
+		}
+		job := pop(&export_completed_jobs)
+		sync.mutex_unlock(&export_completion_mutex)
+		if !export_jobs_remove(job) {continue}
+		finish_export_job(job)
+		export_job_destroy(job)
+	}
+}
+
 on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -2696,6 +2974,7 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if sender != nil { index = int(msg_uint(sender, sel_registerName("tag"))) }
 	if index < 0 || index >= len(state.sources) { return }
 	if state.sources[index].workflow != ui.workflow {return}
+	if !flush_active_clip_draft() {return}
 	if load_source_player(index) {
 		ui.active_clip = -1
 		set_text(state.status, fmt.tprintf("Loaded %s", state.sources[index].title))
@@ -2719,7 +2998,7 @@ play_clip :: proc(index: int) -> bool {
 		ui.playback_rate = clamp_playback_rate(clip.dance_playback_rate)
 	}
 	if !os.exists(clip.clip_path) {
-		if export_job != nil {
+		if export_jobs_any() {
 			set_text(state.status, "Wait for the active clip export to finish")
 			return false
 		}
@@ -2752,8 +3031,8 @@ play_clip :: proc(index: int) -> bool {
 			"FFmpeg is recreating the saved clip from its original source range.",
 			fields[:],
 		)
-		export_job = job
-		os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
+		export_jobs_add(job)
+		os.write_entire_file(job.log_path, nil)
 		thread.start(job.thread)
 		return true
 	}
@@ -3087,7 +3366,7 @@ on_open_data_folder :: proc "c" (self: Id, command: Sel, sender: Id) {
 
 library_transfer_busy :: proc() -> bool {
 	return import_job != nil ||
-	       export_job != nil ||
+	       export_jobs_any() ||
 	       source_probe_job != nil ||
 	       source_metadata_job != nil ||
 	       library_recovery != nil
@@ -3179,6 +3458,7 @@ confirm_library_import :: proc() {
 		set_error_status("Wait for the active media or metadata operation")
 		return
 	}
+	if !flush_active_clip_draft() {return}
 	if !major_change_backup_preflight(.Library_Replacement) {return}
 	allow_without_backup := major_change_backup_override
 	major_change_backup_override = false
@@ -3195,6 +3475,8 @@ confirm_library_import :: proc() {
 	state.active_source = -1
 	state.has_start = false
 	state.has_end = false
+	ui.clip_draft_revision = 0
+	ui_set_string(&ui.clip_name, "")
 	ui.active_clip = -1
 	ui.source_scroll = 0
 	ui.transcript_scroll = 0
@@ -3205,6 +3487,7 @@ confirm_library_import :: proc() {
 	ui.source_playback_active = false
 	refresh_sources()
 	refresh_clips()
+	_ = database_clip_drafts_prune(library_database)
 	_ = library_recovery_start()
 }
 
@@ -3238,15 +3521,20 @@ jobs_shutdown :: proc() {
 		import_job = nil
 	}
 	library_recovery_destroy()
-	if export_job != nil {
-		if export_job.thread != nil {
-			thread.join(export_job.thread)
-			thread.destroy(export_job.thread)
-			export_job.thread = nil
+	for job in export_jobs {
+		if job.thread != nil {
+			thread.join(job.thread)
+			thread.destroy(job.thread)
+			job.thread = nil
 		}
-		export_job_destroy(export_job)
-		export_job = nil
+		export_job_destroy(job)
 	}
+	delete(export_jobs)
+	export_jobs = nil
+	sync.mutex_lock(&export_completion_mutex)
+	delete(export_completed_jobs)
+	export_completed_jobs = nil
+	sync.mutex_unlock(&export_completion_mutex)
 }
 
 video_clips_process_main :: proc(args := os.args) {

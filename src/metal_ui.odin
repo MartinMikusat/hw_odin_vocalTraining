@@ -216,6 +216,9 @@ UI_State :: struct {
 	transcript_search:  string,
 	clip_search:    string,
 	clip_name:      string,
+	clip_draft_revision: i64,
+	clip_draft_dirty: bool,
+	clip_draft_persist_due_ms: i64,
 	clip_rename:    string,
 	command_palette_query: string,
 	command_palette_scroll: f64,
@@ -578,6 +581,7 @@ PALETTE_CONTEXT_DARK_THEME   :: command_palette.Context_Mask(1 << 10)
 PALETTE_CONTEXT_GLOBAL_MODAL :: command_palette.Context_Mask(1 << 11)
 PALETTE_CONTEXT_PLAY_NEXT    :: command_palette.Context_Mask(1 << 12)
 PALETTE_CONTEXT_PITCH        :: command_palette.Context_Mask(1 << 13)
+PALETTE_CONTEXT_EXPORT_EXCLUSIVE_BUSY :: command_palette.Context_Mask(1 << 14)
 
 CONTROL_URL :: Id(rawptr(uintptr(1)))
 CONTROL_STATUS :: Id(rawptr(uintptr(2)))
@@ -1019,6 +1023,9 @@ focused_text_changed :: proc(target: ^string) {
 	}
 	if target == &ui.url_input {schedule_source_probe(30)}
 	if target == &ui.transcript_search {invalidate_transcript_matches()}
+	if target == &ui.clip_name {
+		_ = persist_active_clip_draft(debounce = true)
+	}
 }
 
 text_field_id :: proc(focus: UI_Focus) -> text_input.Field_ID {
@@ -1026,6 +1033,11 @@ text_field_id :: proc(focus: UI_Focus) -> text_input.Field_ID {
 }
 
 focus_text_input :: proc(focus: UI_Focus) {
+	if ui.focus == .Clip_Name &&
+	   focus != .Clip_Name &&
+	   !flush_active_clip_draft() {
+		return
+	}
 	changed := ui.focus != focus
 	ui.focus = focus
 	if target := focused_text(); target != nil {
@@ -1054,6 +1066,7 @@ unfocus_text_input :: proc() -> bool {
 	had_marked_text := ui.has_marked_text
 	_ = text_input.blur(&ui.input_state, target)
 	if had_marked_text && target != nil {focused_text_changed(target)}
+	if target == &ui.clip_name {_ = flush_active_clip_draft()}
 	ui.focus = .None
 	text_input.end_pointer_selection(&ui.input_state)
 	ui.needs_redraw = true
@@ -1895,6 +1908,7 @@ view_clip_source :: proc() {
 }
 
 open_source_modal :: proc() {
+	if !flush_active_clip_draft() {return}
 	cancel_ui_flash()
 	if ui.source_details_open {close_source_details()}
 	ui.source_modal_refetch_index = -1
@@ -1983,7 +1997,7 @@ source_paste_dismiss_transient_ui :: proc(preserve_add_modal: bool) {
 source_paste_media_job_blocks :: proc() -> bool {
 	return import_job != nil ||
 	       library_recovery != nil ||
-	       export_job != nil && export_job.operation != .Save
+	       export_jobs_have_exclusive_operation()
 }
 
 handle_global_source_paste :: proc(text: string) -> Source_Paste_Result {
@@ -1998,12 +2012,16 @@ handle_global_source_paste :: proc(text: string) -> Source_Paste_Result {
 		)
 		return .Blocked
 	}
+	if !flush_active_clip_draft() {return .Blocked}
 	append_current :=
 		ui.mode == .Create &&
 		ui.source_modal_open &&
 		ui.source_modal_refetch_index < 0
 	source_paste_dismiss_transient_ui(append_current)
-	if ui.mode != .Create {set_ui_mode(.Create)}
+	if ui.mode != .Create {
+		set_ui_mode(.Create)
+		if ui.mode != .Create {return .Blocked}
+	}
 	updated := merge_source_paste_urls(
 		ui.url_input,
 		urls[:],
@@ -2021,6 +2039,7 @@ handle_global_source_paste :: proc(text: string) -> Source_Paste_Result {
 }
 
 open_refetch_source_modal :: proc(source_index: int) {
+	if !flush_active_clip_draft() {return}
 	cancel_ui_flash()
 	if source_index < 0 || source_index >= len(state.sources) {return}
 	if ui.source_details_open {close_source_details()}
@@ -2063,6 +2082,7 @@ persist_active_view_preference :: proc() {
 
 set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.mode == mode {return}
+	if !flush_active_clip_draft() {return}
 	cancel_ui_flash()
 	clear_number_prefix()
 	if ui.source_modal_open {close_source_modal()}
@@ -2102,6 +2122,7 @@ last_source_index_for_workflow :: proc(workflow: Workflow_Kind) -> int {
 
 set_ui_workflow :: proc(workflow: Workflow_Kind) {
 	if ui.workflow == workflow {return}
+	if !flush_active_clip_draft() {return}
 	cancel_ui_flash()
 	clear_number_prefix()
 	if ui.source_modal_open {close_source_modal()}
@@ -2117,6 +2138,7 @@ set_ui_workflow :: proc(workflow: Workflow_Kind) {
 	ui.workflow = workflow
 	ui.active_clip = -1
 	state.active_source = -1
+	load_clip_draft_for_source(-1)
 	ui.source_scroll = 0
 	ui.transcript_scroll = 0
 	ui.clip_scroll = 0
@@ -7468,6 +7490,9 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		return ui.shortcut_candidate_valid &&
 		       len(ui.shortcut_collision) == 0
 	}
+	if kind == .Workflow_Toggle || kind == .Mode_Toggle {
+		return !export_jobs_have_exclusive_operation()
+	}
 	if kind == .Activate_Notification_Action {
 		return notification_action_available(notification_selected())
 	}
@@ -7479,6 +7504,9 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Confirm_Library_Import {
 		return !library_transfer_busy() && ui.library_import_pending
 	}
+	if kind == .Import {
+		return import_job == nil && !export_jobs_any()
+	}
 	if kind == .Start || kind == .End {
 		return state.player != nil &&
 		       state.active_source >= 0 &&
@@ -7486,7 +7514,13 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	}
 	if kind == .Save {
 		return import_job == nil &&
-		       export_job == nil &&
+		       library_recovery == nil &&
+		       !export_jobs_have_exclusive_operation() &&
+		       active_clip_range_is_valid()
+	}
+	if kind == .Preview {
+		return import_job == nil &&
+		       !export_jobs_any() &&
 		       active_clip_range_is_valid()
 	}
 	if kind == .Randomize {
@@ -9266,7 +9300,10 @@ palette_active_context :: proc() -> command_palette.Context_Mask {
 		}
 	}
 	if import_job != nil {bits |= u64(PALETTE_CONTEXT_IMPORT_BUSY)}
-	if export_job != nil {bits |= u64(PALETTE_CONTEXT_EXPORT_BUSY)}
+	if export_jobs_any() {bits |= u64(PALETTE_CONTEXT_EXPORT_BUSY)}
+	if export_jobs_have_exclusive_operation() {
+		bits |= u64(PALETTE_CONTEXT_EXPORT_EXCLUSIVE_BUSY)
+	}
 	if ui.settings_open {bits |= u64(PALETTE_CONTEXT_SETTINGS)}
 	if ui.dark_theme {
 		bits |= u64(PALETTE_CONTEXT_DARK_THEME)
@@ -9320,10 +9357,18 @@ palette_busy_mask :: proc() -> command_palette.Context_Mask {
 	)
 }
 
+palette_edit_busy_mask :: proc() -> command_palette.Context_Mask {
+	return command_palette.Context_Mask(
+		u64(PALETTE_CONTEXT_IMPORT_BUSY) |
+			u64(PALETTE_CONTEXT_EXPORT_EXCLUSIVE_BUSY),
+	)
+}
+
 build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [dynamic]command_palette.Entry {
 	entries := make([dynamic]command_palette.Entry, allocator)
 	clear(&command_palette_actions)
 	busy := palette_busy_mask()
+	edit_busy := palette_edit_busy_mask()
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Open_Settings},
@@ -9400,7 +9445,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"Open the independent source and clip library for that workflow",
 		"Command",
 		[]string{"workflow", "vocal", "dancing"},
-		palette_condition(none = busy),
+		palette_condition(none = edit_busy),
 		"Wait for the active media operation to finish",
 	)
 	append_command_palette_entry(
@@ -9410,7 +9455,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		mode_subtitle,
 		"Command",
 		[]string{"mode", "workspace"},
-		palette_condition(mode_context, busy),
+		palette_condition(mode_context, edit_busy),
 		"Wait for the active media operation to finish",
 	)
 	append_command_palette_entry(
@@ -9456,7 +9501,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"Export the marked range as a saved clip",
 		"Command",
 		[]string{"save", "clip", "range"},
-		palette_condition(create_range, busy),
+		palette_condition(create_range, edit_busy),
 		"Mark a valid range in Create mode and wait for active media operations",
 	)
 	append_command_palette_entry(
@@ -9901,6 +9946,7 @@ on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
 		ui_set_string(&ui.clip_search, text)
 	case .Clip_Name:
 		ui_set_string(&ui.clip_name, text)
+		focused_text_changed(&ui.clip_name)
 	case .Clip_Rename:
 		ui_set_string(&ui.clip_rename, text)
 	case:
@@ -10073,6 +10119,7 @@ render_frame :: proc() {
 }
 
 ui_memory_destroy :: proc() {
+	_ = flush_active_clip_draft()
 	pitch_monitor_stop(&ui.pitch)
 	metal_player_clear()
 	app_state_collections_destroy(&pending_library_import)
@@ -11717,6 +11764,11 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	}
 	now_ms := numbered_action_time_ms()
 	_ = expire_number_prefix_at(now_ms)
+	if ui.clip_draft_dirty &&
+	   ui.clip_draft_persist_due_ms > 0 &&
+	   now_ms >= ui.clip_draft_persist_due_ms {
+		_ = flush_active_clip_draft()
+	}
 	_ = advance_dance_count_in(now_ms)
 	if pitch_monitor_poll(&ui.pitch, ui.frame_tick) {
 		ui.needs_redraw = true

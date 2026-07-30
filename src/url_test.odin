@@ -269,6 +269,501 @@ successful_clip_commit_resets_clip_output_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+source_clip_drafts_restore_independently_and_clear_by_revision_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+
+	previous_state := state
+	previous_ui := ui
+	previous_database := library_database
+	defer {
+		delete(state.sources)
+		delete(ui.clip_name)
+		state = previous_state
+		ui = previous_ui
+		library_database = previous_database
+	}
+	state = App_State{active_source = 0}
+	state.sources = make([dynamic]Source_Video)
+	append(
+		&state.sources,
+		Source_Video{id = "source-a", workflow = .Vocal, duration = 120},
+		Source_Video{id = "source-b", workflow = .Vocal, duration = 180},
+	)
+	ui = UI_State{}
+	library_database = database
+	testing.expect(t, database_clip_draft_save(database, Clip_Draft{
+		source_id = "source-a",
+		start_seconds = 12,
+		end_seconds = 18,
+		has_start = true,
+		has_end = true,
+		name = "First",
+		revision = 1,
+	}))
+	testing.expect(t, database_clip_draft_save(database, Clip_Draft{
+		source_id = "source-b",
+		start_seconds = 30,
+		end_seconds = 42,
+		has_start = true,
+		has_end = true,
+		name = "Second",
+		revision = 4,
+	}))
+
+	load_clip_draft_for_source(0)
+	testing.expect_value(t, state.range_start, 12)
+	testing.expect_value(t, state.range_end, 18)
+	testing.expect_value(t, ui.clip_name, "First")
+	testing.expect_value(t, ui.clip_draft_revision, i64(1))
+
+	state.active_source = 1
+	load_clip_draft_for_source(1)
+	testing.expect_value(t, state.range_start, 30)
+	testing.expect_value(t, state.range_end, 42)
+	testing.expect_value(t, ui.clip_name, "Second")
+	testing.expect_value(t, ui.clip_draft_revision, i64(4))
+
+	testing.expect(t, !clear_clip_draft_after_export("source-b", 3))
+	testing.expect_value(t, state.range_start, 30)
+	testing.expect_value(t, ui.clip_name, "Second")
+	testing.expect(t, clear_clip_draft_after_export("source-b", 4))
+	testing.expect(t, !state.has_start)
+	testing.expect(t, !state.has_end)
+	testing.expect_value(t, ui.clip_name, "")
+
+	state.active_source = 0
+	load_clip_draft_for_source(0)
+	ui_set_string(&ui.clip_name, "Changed")
+	state.range_start = 20
+	state.range_end = 28
+	state.has_start = true
+	state.has_end = true
+	testing.expect(t, persist_active_clip_draft())
+	testing.expect(t, !clear_clip_draft_after_export("source-a", 1))
+	testing.expect_value(t, state.range_start, 20)
+	testing.expect_value(t, ui.clip_name, "Changed")
+	source_a_revision := ui.clip_draft_revision
+	testing.expect(t, database_clip_draft_save(database, Clip_Draft{
+		source_id = "source-b",
+		start_seconds = 50,
+		end_seconds = 62,
+		has_start = true,
+		has_end = true,
+		name = "Current source",
+		revision = 5,
+	}))
+	state.active_source = 1
+	load_clip_draft_for_source(1)
+	testing.expect(t, clear_clip_draft_after_export(
+		"source-a",
+		source_a_revision,
+	))
+	testing.expect_value(t, state.range_start, 50)
+	testing.expect_value(t, state.range_end, 62)
+	testing.expect_value(t, ui.clip_name, "Current source")
+	failed := Export_Job{
+		operation = .Save,
+		success = false,
+		draft_revision = 5,
+		clip = {source_id = "source-b"},
+	}
+	testing.expect(t, !save_export_apply(&failed))
+	draft, found := database_clip_draft_load(database, "source-b")
+	testing.expect(t, found)
+	if found {
+		testing.expect_value(t, draft.revision, i64(5))
+		clip_draft_destroy(&draft)
+	}
+}
+
+@(test)
+parallel_save_completion_does_not_clear_a_newer_reused_source_draft_test :: proc(
+	t: ^testing.T,
+) {
+	fixture, fixture_ready := library_transaction_test_begin()
+	testing.expect(t, fixture_ready)
+	if !fixture_ready {return}
+	defer library_transaction_test_end(&fixture)
+	previous_ui := ui
+	defer {
+		delete(ui.clip_name)
+		delete(ui.status)
+		delete(ui.status_source_video_id)
+		ui = previous_ui
+	}
+	ui = UI_State{mode = .Create, workflow = .Vocal}
+	source, source_copied := clone_source_video(Source_Video{
+		id = "source",
+		workflow = .Vocal,
+		video_id = "video",
+		title = "Source",
+		url = "https://youtu.be/video",
+		media_path = "/tmp/source.mp4",
+		duration = 120,
+	})
+	testing.expect(t, source_copied)
+	if !source_copied {return}
+	append(&state.sources, source)
+	state.active_source = 0
+	testing.expect(t, database_save_state(fixture.database))
+
+	state.range_start = 10
+	state.has_start = true
+	testing.expect(t, persist_active_clip_draft())
+	state.range_end = 20
+	state.has_end = true
+	testing.expect(t, persist_active_clip_draft())
+	submitted_revision := ui.clip_draft_revision
+	testing.expect_value(t, submitted_revision, i64(2))
+
+	first := Export_Job{
+		operation = .Save,
+		success = true,
+		draft_revision = submitted_revision,
+		clip = {
+			id = "source-1",
+			source_id = "source",
+			workflow = .Vocal,
+			name = "First",
+			start_seconds = 10,
+			end_seconds = 20,
+			clip_path = "/tmp/source-1.mp4",
+			dance_count_in_bpm = 120,
+			dance_playback_rate = 1,
+		},
+	}
+	second := Export_Job{
+		operation = .Save,
+		success = true,
+		draft_revision = submitted_revision,
+		clip = {
+			id = "source-2",
+			source_id = "source",
+			workflow = .Vocal,
+			name = "Second",
+			start_seconds = 10,
+			end_seconds = 20,
+			clip_path = "/tmp/source-2.mp4",
+			dance_count_in_bpm = 120,
+			dance_playback_rate = 1,
+		},
+	}
+	testing.expect(t, save_export_apply(&second))
+	testing.expect(t, !state.has_start)
+	testing.expect(t, !state.has_end)
+	testing.expect_value(t, ui.clip_draft_revision, submitted_revision)
+
+	state.range_start = 30
+	state.has_start = true
+	testing.expect(t, persist_active_clip_draft())
+	state.range_end = 40
+	state.has_end = true
+	testing.expect(t, persist_active_clip_draft())
+	new_revision := ui.clip_draft_revision
+	testing.expect(t, new_revision > submitted_revision)
+
+	testing.expect(t, save_export_apply(&first))
+	testing.expect(t, state.has_start)
+	testing.expect(t, state.has_end)
+	testing.expect_value(t, state.range_start, 30)
+	testing.expect_value(t, state.range_end, 40)
+	testing.expect_value(t, ui.clip_draft_revision, new_revision)
+	draft, found := database_clip_draft_load(fixture.database, "source")
+	testing.expect(t, found)
+	if found {
+		testing.expect_value(t, draft.revision, new_revision)
+		testing.expect_value(t, draft.start_seconds, 30)
+		testing.expect_value(t, draft.end_seconds, 40)
+		clip_draft_destroy(&draft)
+	}
+}
+
+@(test)
+failed_draft_write_does_not_reuse_an_exported_revision_test :: proc(
+	t: ^testing.T,
+) {
+	fixture, fixture_ready := library_transaction_test_begin()
+	testing.expect(t, fixture_ready)
+	if !fixture_ready {return}
+	defer library_transaction_test_end(&fixture)
+	previous_ui := ui
+	notification_history_destroy()
+	defer {
+		notification_history_destroy()
+		delete(ui.clip_name)
+		delete(ui.status)
+		delete(ui.status_source_video_id)
+		ui = previous_ui
+	}
+	ui = UI_State{mode = .Create, workflow = .Vocal}
+	source, source_copied := clone_source_video(Source_Video{
+		id = "source",
+		workflow = .Vocal,
+		video_id = "video",
+		title = "Source",
+		url = "https://youtu.be/video",
+		media_path = "/tmp/source.mp4",
+		duration = 120,
+	})
+	testing.expect(t, source_copied)
+	if !source_copied {return}
+	append(&state.sources, source)
+	state.active_source = 0
+	testing.expect(t, database_save_state(fixture.database))
+	testing.expect(t, database_clip_draft_save(
+		fixture.database,
+		Clip_Draft{
+			source_id = "source",
+			start_seconds = 10,
+			end_seconds = 20,
+			has_start = true,
+			has_end = true,
+			revision = 2,
+		},
+	))
+	load_clip_draft_for_source(0)
+	testing.expect(t, sqlite_execute(
+		fixture.database,
+		`CREATE TRIGGER fail_clip_draft_write
+		 BEFORE UPDATE ON clip_drafts
+		 BEGIN
+		   SELECT RAISE(ABORT, 'forced clip draft write failure');
+		 END`,
+	))
+
+	ui_set_string(&ui.clip_name, "Changed after export")
+	testing.expect(t, !persist_active_clip_draft())
+	testing.expect_value(t, ui.clip_draft_revision, i64(3))
+	testing.expect(t, sqlite_execute(
+		fixture.database,
+		"DROP TRIGGER fail_clip_draft_write",
+	))
+	testing.expect(t, clear_clip_draft_after_export("source", 2))
+	testing.expect(t, state.has_start)
+	testing.expect(t, state.has_end)
+	testing.expect_value(t, ui.clip_name, "Changed after export")
+	testing.expect_value(t, ui.clip_draft_revision, i64(3))
+}
+
+@(test)
+clip_name_draft_write_waits_for_the_debounce_flush_test :: proc(
+	t: ^testing.T,
+) {
+	fixture, fixture_ready := library_transaction_test_begin()
+	testing.expect(t, fixture_ready)
+	if !fixture_ready {return}
+	defer library_transaction_test_end(&fixture)
+	previous_ui := ui
+	defer {
+		delete(ui.clip_name)
+		delete(ui.status)
+		delete(ui.status_source_video_id)
+		ui = previous_ui
+	}
+	ui = UI_State{mode = .Create, workflow = .Vocal}
+	source, source_copied := clone_source_video(Source_Video{
+		id = "source",
+		workflow = .Vocal,
+		video_id = "video",
+		title = "Source",
+		url = "https://youtu.be/video",
+		media_path = "/tmp/source.mp4",
+		duration = 120,
+	})
+	testing.expect(t, source_copied)
+	if !source_copied {return}
+	append(&state.sources, source)
+	state.active_source = 0
+	testing.expect(t, database_save_state(fixture.database))
+
+	ui_set_string(&ui.clip_name, "Debounced")
+	testing.expect(t, persist_active_clip_draft(debounce = true))
+	testing.expect(t, ui.clip_draft_dirty)
+	testing.expect(t, ui.clip_draft_persist_due_ms > 0)
+	_, found_before_flush := database_clip_draft_load(
+		fixture.database,
+		"source",
+	)
+	testing.expect(t, !found_before_flush)
+
+	testing.expect(t, flush_active_clip_draft())
+	testing.expect(t, !ui.clip_draft_dirty)
+	testing.expect_value(t, ui.clip_draft_persist_due_ms, i64(0))
+	draft, found_after_flush := database_clip_draft_load(
+		fixture.database,
+		"source",
+	)
+	testing.expect(t, found_after_flush)
+	if found_after_flush {
+		testing.expect_value(t, draft.name, "Debounced")
+		testing.expect_value(t, draft.revision, i64(1))
+		clip_draft_destroy(&draft)
+	}
+}
+
+@(test)
+clip_commit_rolls_back_when_its_draft_cannot_be_cleared_test :: proc(
+	t: ^testing.T,
+) {
+	fixture, fixture_ready := library_transaction_test_begin()
+	testing.expect(t, fixture_ready)
+	if !fixture_ready {return}
+	defer library_transaction_test_end(&fixture)
+	previous_ui := ui
+	notification_history_destroy()
+	defer {
+		notification_history_destroy()
+		delete(ui.clip_name)
+		delete(ui.status)
+		delete(ui.status_source_video_id)
+		ui = previous_ui
+	}
+	ui = UI_State{mode = .Create, workflow = .Vocal}
+	source, source_copied := clone_source_video(Source_Video{
+		id = "source",
+		workflow = .Vocal,
+		video_id = "video",
+		title = "Source",
+		url = "https://youtu.be/video",
+		media_path = "/tmp/source.mp4",
+		duration = 120,
+	})
+	testing.expect(t, source_copied)
+	if !source_copied {return}
+	append(&state.sources, source)
+	state.active_source = 0
+	testing.expect(t, database_save_state(fixture.database))
+	testing.expect(t, database_clip_draft_save(
+		fixture.database,
+		Clip_Draft{
+			source_id = "source",
+			start_seconds = 10,
+			end_seconds = 20,
+			has_start = true,
+			has_end = true,
+			revision = 2,
+		},
+	))
+	load_clip_draft_for_source(0)
+	testing.expect(t, sqlite_execute(
+		fixture.database,
+		`CREATE TRIGGER fail_clip_draft_update
+		 BEFORE UPDATE ON clip_drafts
+		 BEGIN
+		   SELECT RAISE(ABORT, 'forced clip draft update failure');
+		 END;
+		 CREATE TRIGGER fail_clip_draft_delete
+		 BEFORE DELETE ON clip_drafts
+		 BEGIN
+		   SELECT RAISE(ABORT, 'forced clip draft delete failure');
+		 END`,
+	))
+	job := Export_Job{
+		operation = .Save,
+		success = true,
+		draft_revision = 2,
+		clip = {
+			id = "source-1",
+			source_id = "source",
+			workflow = .Vocal,
+			name = "Clip",
+			start_seconds = 10,
+			end_seconds = 20,
+			clip_path = "/tmp/source-atomic-rollback.mp4",
+			dance_count_in_bpm = 120,
+			dance_playback_rate = 1,
+		},
+	}
+	testing.expect(t, !save_export_apply(&job))
+	testing.expect_value(t, len(state.clips), 0)
+	count, counted := database_count(fixture.database, "clips")
+	testing.expect(t, counted)
+	testing.expect_value(t, count, 0)
+	draft, found := database_clip_draft_load(fixture.database, "source")
+	testing.expect(t, found)
+	if found {
+		testing.expect_value(t, draft.revision, i64(2))
+		testing.expect(t, draft.has_start)
+		testing.expect(t, draft.has_end)
+		clip_draft_destroy(&draft)
+	}
+}
+
+@(test)
+parallel_save_jobs_reserve_unique_clip_numbers_and_remain_actionable_test :: proc(
+	t: ^testing.T,
+) {
+	previous_state := state
+	previous_ui := ui
+	previous_import := import_job
+	previous_recovery := library_recovery
+	previous_exports := export_jobs
+	defer {
+		delete(state.sources)
+		delete(state.clips)
+		delete(export_jobs)
+		state = previous_state
+		ui = previous_ui
+		import_job = previous_import
+		library_recovery = previous_recovery
+		export_jobs = previous_exports
+	}
+	state = App_State{
+		active_source = 0,
+		range_start = 10,
+		range_end = 20,
+		has_start = true,
+		has_end = true,
+	}
+	state.sources = make([dynamic]Source_Video)
+	append(
+		&state.sources,
+		Source_Video{id = "source", workflow = .Vocal, duration = 120},
+	)
+	state.clips = make([dynamic]Clip)
+	append(&state.clips, Clip{id = "source-1", source_id = "source"})
+	ui = UI_State{mode = .Create, workflow = .Vocal}
+	import_job = nil
+	library_recovery = nil
+	export_jobs = nil
+	first := Export_Job{
+		operation = .Save,
+		clip = {id = "source-2", source_id = "source"},
+	}
+	append(&export_jobs, &first)
+	testing.expect_value(
+		t,
+		next_clip_number_for_export(&state.sources[0]),
+		3,
+	)
+	testing.expect(t, ui_action_enabled_for_current_job(.Save))
+	testing.expect(t, !ui_action_enabled_for_current_job(.Preview))
+	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	testing.expect(t, ui_action_enabled_for_current_job(.Workflow_Toggle))
+	testing.expect(t, ui_action_enabled_for_current_job(.Mode_Toggle))
+
+	preview := Export_Job{operation = .Preview}
+	export_jobs[0] = &preview
+	testing.expect(t, !ui_action_enabled_for_current_job(.Save))
+	testing.expect(t, !ui_action_enabled_for_current_job(.Workflow_Toggle))
+	testing.expect(t, !ui_action_enabled_for_current_job(.Mode_Toggle))
+}
+
+@(test)
 parse_standard_youtube_url_test :: proc(t: ^testing.T) {
 	id, ok := parse_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1m20s")
 	testing.expect(t, ok)
@@ -357,7 +852,7 @@ global_source_paste_preserves_workflow_and_opens_sources_test :: proc(
 	previous_database := library_database
 	previous_results := source_probe_results
 	previous_import := import_job
-	previous_export := export_job
+	previous_exports := export_jobs
 	previous_library_recovery := library_recovery
 	previous_recovery_state := library_recovery_state
 	previous_pending := major_change_pending
@@ -368,7 +863,8 @@ global_source_paste_preserves_workflow_and_opens_sources_test :: proc(
 		library_database = previous_database
 		source_probe_results = previous_results
 		import_job = previous_import
-		export_job = previous_export
+		delete(export_jobs)
+		export_jobs = previous_exports
 		library_recovery = previous_library_recovery
 		library_recovery_state = previous_recovery_state
 		major_change_pending = previous_pending
@@ -388,13 +884,13 @@ global_source_paste_preserves_workflow_and_opens_sources_test :: proc(
 	library_database = nil
 	source_probe_results = nil
 	import_job = nil
-	export_job = nil
+	export_jobs = nil
 	library_recovery = nil
 	library_recovery_state = {}
 	major_change_pending = {}
 	ui_set_string(&ui.url_input, "https://youtu.be/stale")
 	save_export := Export_Job{operation = .Save}
-	export_job = &save_export
+	append(&export_jobs, &save_export)
 
 	result := handle_global_source_paste("https://youtu.be/dance?t=30")
 
@@ -407,8 +903,9 @@ global_source_paste_preserves_workflow_and_opens_sources_test :: proc(
 	testing.expect_value(t, ui.url_input, "https://youtu.be/dance?t=30")
 	testing.expect(t, !ui.randomize_help_open)
 	testing.expect(t, ui.url_probe_pending)
-	testing.expect(t, export_job == &save_export)
-	testing.expect_value(t, export_job.operation, Export_Operation.Save)
+	testing.expect_value(t, len(export_jobs), 1)
+	testing.expect(t, export_jobs[0] == &save_export)
+	testing.expect_value(t, export_jobs[0].operation, Export_Operation.Save)
 }
 
 @(test)
@@ -418,7 +915,7 @@ global_source_paste_appends_inside_open_add_modal_test :: proc(
 	previous_ui := ui
 	previous_results := source_probe_results
 	previous_import := import_job
-	previous_export := export_job
+	previous_exports := export_jobs
 	previous_library_recovery := library_recovery
 	previous_recovery_state := library_recovery_state
 	previous_pending := major_change_pending
@@ -427,7 +924,8 @@ global_source_paste_appends_inside_open_add_modal_test :: proc(
 		ui = previous_ui
 		source_probe_results = previous_results
 		import_job = previous_import
-		export_job = previous_export
+		delete(export_jobs)
+		export_jobs = previous_exports
 		library_recovery = previous_library_recovery
 		library_recovery_state = previous_recovery_state
 		major_change_pending = previous_pending
@@ -440,7 +938,7 @@ global_source_paste_appends_inside_open_add_modal_test :: proc(
 	}
 	source_probe_results = nil
 	import_job = nil
-	export_job = nil
+	export_jobs = nil
 	library_recovery = nil
 	library_recovery_state = {}
 	major_change_pending = {}
@@ -472,31 +970,32 @@ global_source_paste_appends_inside_open_add_modal_test :: proc(
 @(test)
 source_paste_blocks_only_conflicting_media_jobs_test :: proc(t: ^testing.T) {
 	previous_import := import_job
-	previous_export := export_job
+	previous_exports := export_jobs
 	previous_library_recovery := library_recovery
 	defer {
 		import_job = previous_import
-		export_job = previous_export
+		delete(export_jobs)
+		export_jobs = previous_exports
 		library_recovery = previous_library_recovery
 	}
 	import_job = nil
-	export_job = nil
+	export_jobs = nil
 	library_recovery = nil
 	testing.expect(t, !source_paste_media_job_blocks())
 
 	save_export := Export_Job{operation = .Save}
-	export_job = &save_export
+	append(&export_jobs, &save_export)
 	testing.expect(t, !source_paste_media_job_blocks())
 
 	preview_export := Export_Job{operation = .Preview}
-	export_job = &preview_export
+	export_jobs[0] = &preview_export
 	testing.expect(t, source_paste_media_job_blocks())
 
 	repair_export := Export_Job{operation = .Repair}
-	export_job = &repair_export
+	export_jobs[0] = &repair_export
 	testing.expect(t, source_paste_media_job_blocks())
 
-	export_job = nil
+	clear(&export_jobs)
 	active_import: Import_Job
 	import_job = &active_import
 	testing.expect(t, source_paste_media_job_blocks())
@@ -1910,11 +2409,17 @@ clip_command_uses_range_duration_test :: proc(t: ^testing.T) {
 		12.5,
 		20.25,
 		"/Applications/hw_videoClips.app/Contents/Resources/helpers/ffmpeg",
+		"/tmp/ffmpeg-source-1.log",
 	)
 	testing.expect(t, strings.has_prefix(command, "'/Applications/hw_videoClips.app/Contents/Resources/helpers/ffmpeg'"))
 	testing.expect(t, strings.contains(command, "-ss 12.500"))
 	testing.expect(t, strings.contains(command, "-t 7.750"))
 	testing.expect(t, strings.contains(command, "'/tmp/source video.mp4'"))
+	testing.expect(t, strings.contains(command, ">> '/tmp/ffmpeg-source-1.log'"))
+	testing.expect(t, strings.has_suffix(
+		clip_export_log_path("source-1"),
+		"/ffmpeg-source-1.log",
+	))
 }
 
 @(test)
@@ -2178,7 +2683,7 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 	previous_player := state.player
 	previous_source := state.active_source
 	previous_import := import_job
-	previous_export := export_job
+	previous_exports := export_jobs
 	previous_actions := command_palette_actions
 	defer {
 		delete(command_palette_actions)
@@ -2187,14 +2692,15 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 		state.player = previous_player
 		state.active_source = previous_source
 		import_job = previous_import
-		export_job = previous_export
+		delete(export_jobs)
+		export_jobs = previous_exports
 	}
 	command_palette_actions = nil
 	ui.mode = .Play
 	state.player = nil
 	state.active_source = -1
 	import_job = nil
-	export_job = nil
+	export_jobs = nil
 	entries := build_command_palette_entries(context.temp_allocator)
 	active := palette_active_context()
 	found_mark_in := false
@@ -2933,6 +3439,72 @@ library_transaction_test_end :: proc(fixture: ^Library_Transaction_Test_Context)
 	last_imported_source = fixture.previous_last_imported_source
 	sqlite3_close(fixture.database)
 	fixture^ = {}
+}
+
+@(test)
+parallel_save_results_commit_without_losing_reverse_completion_test :: proc(
+	t: ^testing.T,
+) {
+	fixture, fixture_ready := library_transaction_test_begin()
+	testing.expect(t, fixture_ready)
+	if !fixture_ready {return}
+	defer library_transaction_test_end(&fixture)
+	source, source_copied := clone_source_video(Source_Video{
+		id = "source",
+		workflow = .Vocal,
+		video_id = "video",
+		title = "Source",
+		url = "https://youtu.be/video",
+		media_path = "/tmp/source.mp4",
+		duration = 120,
+	})
+	testing.expect(t, source_copied)
+	if !source_copied {return}
+	append(&state.sources, source)
+	testing.expect(t, database_save_state(fixture.database))
+
+	first := Export_Job{
+		operation = .Save,
+		success = true,
+		clip = {
+			id = "source-1",
+			source_id = "source",
+			workflow = .Vocal,
+			name = "First",
+			start_seconds = 10,
+			end_seconds = 20,
+			clip_path = "/tmp/source-1.mp4",
+			dance_count_in_bpm = 120,
+			dance_playback_rate = 1,
+		},
+	}
+	second := Export_Job{
+		operation = .Save,
+		success = true,
+		clip = {
+			id = "source-2",
+			source_id = "source",
+			workflow = .Vocal,
+			name = "Second",
+			start_seconds = 30,
+			end_seconds = 40,
+			clip_path = "/tmp/source-2.mp4",
+			dance_count_in_bpm = 120,
+			dance_playback_rate = 1,
+		},
+	}
+	testing.expect(t, save_export_apply(&second))
+	testing.expect(t, save_export_apply(&first))
+	testing.expect_value(t, len(state.clips), 2)
+	testing.expect_value(t, state.clips[0].id, "source-2")
+	testing.expect_value(t, state.clips[1].id, "source-1")
+
+	loaded: App_State
+	testing.expect(t, database_load_state(fixture.database, &loaded))
+	defer app_state_collections_destroy(&loaded)
+	testing.expect_value(t, len(loaded.clips), 2)
+	testing.expect(t, clip_index_for_id(loaded.clips[:], "source-1") >= 0)
+	testing.expect(t, clip_index_for_id(loaded.clips[:], "source-2") >= 0)
 }
 
 @(test)
@@ -4395,6 +4967,118 @@ interface_theme_round_trips_through_application_preferences_test :: proc(
 	testing.expect(t, !database_interface_theme_load(database))
 	testing.expect(t, database_interface_theme_save(database, true))
 	testing.expect(t, database_interface_theme_load(database))
+}
+
+@(test)
+clip_draft_survives_database_reopen_and_prunes_missing_sources_test :: proc(
+	t: ^testing.T,
+) {
+	temporary_file, temporary_error := os2.create_temp_file(
+		"",
+		"hw_videoClips-clip-draft-*.sqlite3",
+	)
+	testing.expect(t, temporary_error == nil)
+	if temporary_error != nil {return}
+	database_path, path_error := strings.clone(os2.name(temporary_file))
+	_ = os2.close(temporary_file)
+	testing.expect(t, path_error == nil)
+	if path_error != nil {return}
+	defer {
+		_ = os.remove(database_path)
+		delete(database_path)
+	}
+	c_path := strings.clone_to_cstring(database_path)
+	defer delete(c_path)
+
+	database: ^SQLite_DB
+	opened := sqlite3_open_v2(
+		c_path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	testing.expect(t, database_create_schema(database))
+	source := Source_Video{
+		id = "source",
+		workflow = .Vocal,
+		video_id = "video",
+		title = "Source",
+		url = "https://youtu.be/video",
+		media_path = "/tmp/source.mp4",
+		duration = 120,
+	}
+	testing.expect(t, database_insert_source(database, source, 0))
+	testing.expect(t, database_clip_draft_save(database, Clip_Draft{
+		source_id = "source",
+		start_seconds = 8,
+		end_seconds = 16,
+		has_start = true,
+		has_end = true,
+		name = "Persistent",
+		revision = 7,
+	}))
+	testing.expect(t, database_save_collections(
+		database,
+		[]Source_Video{source},
+		nil,
+		nil,
+		nil,
+	))
+	testing.expect_value(t, sqlite3_close(database), SQLITE_OK)
+
+	database = nil
+	opened = sqlite3_open_v2(
+		c_path,
+		&database,
+		SQLITE_OPEN_READWRITE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	draft, found := database_clip_draft_load(database, "source")
+	testing.expect(t, found)
+	if found {
+		testing.expect_value(t, draft.start_seconds, 8)
+		testing.expect_value(t, draft.end_seconds, 16)
+		testing.expect_value(t, draft.name, "Persistent")
+		testing.expect_value(t, draft.revision, i64(7))
+		clip_draft_destroy(&draft)
+	}
+	testing.expect(t, sqlite_execute(database, "DELETE FROM sources"))
+	testing.expect(t, database_clip_drafts_prune(database))
+	_, found = database_clip_draft_load(database, "source")
+	testing.expect(t, !found)
+}
+
+@(test)
+schema_v7_migrates_source_clip_drafts_to_v8_test :: proc(t: ^testing.T) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema_v8(database))
+	testing.expect(t, sqlite_execute(
+		database,
+		"DROP TABLE clip_drafts; PRAGMA user_version = 7",
+	))
+	testing.expect(t, database_create_schema(database))
+	version, version_read := library_database_user_version(database)
+	testing.expect(t, version_read)
+	testing.expect_value(t, version, 8)
+	count, counted := database_count(database, "clip_drafts")
+	testing.expect(t, counted)
+	testing.expect_value(t, count, 0)
 }
 
 @(test)
