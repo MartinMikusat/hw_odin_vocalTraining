@@ -2885,6 +2885,11 @@ clamp_volume :: proc(value: f32) -> f32 {
 	return min(max(value, 0), 1)
 }
 
+player_volume_gain :: proc(value: f32) -> f32 {
+	level := clamp_volume(value)
+	return level * level
+}
+
 volume_percent :: proc(value: f32) -> int {
 	return int(clamp_volume(value) * 100 + 0.5)
 }
@@ -2892,7 +2897,11 @@ volume_percent :: proc(value: f32) -> int {
 adjust_player_volume :: proc(delta: f32) {
 	ui.player_volume = clamp_volume(ui.player_volume + delta)
 	if ui.audio_player != nil {
-		msg_void_f32(ui.audio_player, sel_registerName("setVolume:"), ui.player_volume)
+		msg_void_f32(
+			ui.audio_player,
+			sel_registerName("setVolume:"),
+			player_volume_gain(ui.player_volume),
+		)
 	}
 	ui.needs_redraw = true
 }
@@ -10421,7 +10430,7 @@ metal_audio_load :: proc(url: Id) -> (engine, player, pitch, file: Id, ok: bool)
 	mixer := msg_id(engine, sel_registerName("mainMixerNode"))
 	msg_void_id_id_id(engine, sel_registerName("connect:to:format:"), player, pitch, format)
 	msg_void_id_id_id(engine, sel_registerName("connect:to:format:"), pitch, mixer, format)
-	msg_void_f32(player, sel_registerName("setVolume:"), ui.player_volume)
+	msg_void_f32(player, sel_registerName("setVolume:"), player_volume_gain(ui.player_volume))
 	msg_void_f32(pitch, sel_registerName("setRate:"), ui.playback_rate)
 	metal_audio_observe_configuration(engine)
 	return engine, player, pitch, file, true

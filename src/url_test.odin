@@ -2654,6 +2654,10 @@ source_monitor_volume_clamps_and_rounds_percent_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, clamp_volume(-0.1), f32(0))
 	testing.expect_value(t, clamp_volume(0.55), f32(0.55))
 	testing.expect_value(t, clamp_volume(1.1), f32(1))
+	testing.expect_value(t, player_volume_gain(-0.1), f32(0))
+	testing.expect_value(t, player_volume_gain(0.25), f32(0.0625))
+	testing.expect_value(t, player_volume_gain(0.5), f32(0.25))
+	testing.expect_value(t, player_volume_gain(1.1), f32(1))
 	testing.expect_value(t, volume_percent(0.549), 55)
 	testing.expect_value(t, volume_percent(1.1), 100)
 }
