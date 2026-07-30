@@ -2394,9 +2394,14 @@ refetch_source :: proc(
 	maximum_height := 0,
 	auth_browser := Source_Auth_Browser.None,
 ) {
-	if import_job != nil { set_text(state.status, "An import is already running"); return }
-	if export_jobs_any() {
-		set_text(state.status, "Wait for the active clip exports to finish")
+	if source_import_media_job_blocks(true) {
+		if import_job != nil {
+			set_text(state.status, "An import is already running")
+		} else if library_recovery != nil {
+			set_text(state.status, "Wait for the active library recovery to finish")
+		} else {
+			set_text(state.status, "Wait for the active clip exports to finish")
+		}
 		return
 	}
 	if source_index < 0 || source_index >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
@@ -2478,9 +2483,17 @@ on_refetch_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if import_job != nil { set_text(state.status, "An import is already running"); return }
-	if export_jobs_any() {
-		set_text(state.status, "Wait for the active clip exports to finish")
+	refetching := ui.source_modal_refetch_index >= 0
+	if source_import_media_job_blocks(refetching) {
+		if import_job != nil {
+			set_text(state.status, "An import is already running")
+		} else if library_recovery != nil {
+			set_text(state.status, "Wait for the active library recovery to finish")
+		} else if refetching {
+			set_text(state.status, "Wait for the active clip exports to finish")
+		} else {
+			set_text(state.status, "Wait for the active preview or repair to finish")
+		}
 		return
 	}
 	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
@@ -2592,6 +2605,24 @@ export_jobs_have_exclusive_operation :: proc() -> bool {
 	return false
 }
 
+source_import_media_job_blocks :: proc(refetching: bool) -> bool {
+	if import_job != nil || library_recovery != nil {return true}
+	if refetching {return export_jobs_any()}
+	return export_jobs_have_exclusive_operation()
+}
+
+import_job_has_exclusive_operation :: proc() -> bool {
+	return import_job != nil &&
+	       (import_job.library_recovery_source ||
+	        len(import_job.replace_video_id) > 0)
+}
+
+clip_save_media_job_blocks :: proc() -> bool {
+	return library_recovery != nil ||
+	       import_job_has_exclusive_operation() ||
+	       export_jobs_have_exclusive_operation()
+}
+
 export_jobs_add :: proc(job: ^Export_Job) {
 	if job == nil {return}
 	append(&export_jobs, job)
@@ -2631,12 +2662,12 @@ next_clip_number_for_export :: proc(source: ^Source_Video) -> int {
 on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if import_job != nil || library_recovery != nil {
-		set_text(state.status, "Wait for the active import or recovery to finish")
-		return
-	}
-	if export_jobs_have_exclusive_operation() {
-		set_text(state.status, "Wait for the active preview or repair to finish")
+	if clip_save_media_job_blocks() {
+		if library_recovery != nil || import_job_has_exclusive_operation() {
+			set_text(state.status, "Wait for the active source refetch or recovery to finish")
+		} else {
+			set_text(state.status, "Wait for the active preview or repair to finish")
+		}
 		return
 	}
 	if !flush_active_clip_draft() {return}

@@ -186,6 +186,8 @@ application relaunches.
 Each Commit starts an independent export immediately. A successful export
 clears its submitted draft only when that source's draft has not changed.
 Failed exports and newer drafts retain their marks and names.
+Normal source imports and clip commits can run at the same time.
+Source refetch, preview, repair, and recovery remain exclusive media operations.
 The Sources footer highlights each missing range endpoint. It enables and
 highlights **Commit** only after the range is at least one second long. The
 footer shows the calculated clip duration beside the range.

@@ -712,15 +712,18 @@ parallel_save_jobs_reserve_unique_clip_numbers_and_remain_actionable_test :: pro
 	previous_import := import_job
 	previous_recovery := library_recovery
 	previous_exports := export_jobs
+	previous_actions := command_palette_actions
 	defer {
 		delete(state.sources)
 		delete(state.clips)
 		delete(export_jobs)
+		delete(command_palette_actions)
 		state = previous_state
 		ui = previous_ui
 		import_job = previous_import
 		library_recovery = previous_recovery
 		export_jobs = previous_exports
+		command_palette_actions = previous_actions
 	}
 	state = App_State{
 		active_source = 0,
@@ -736,7 +739,11 @@ parallel_save_jobs_reserve_unique_clip_numbers_and_remain_actionable_test :: pro
 	)
 	state.clips = make([dynamic]Clip)
 	append(&state.clips, Clip{id = "source-1", source_id = "source"})
-	ui = UI_State{mode = .Create, workflow = .Vocal}
+	ui = UI_State{
+		mode = .Create,
+		workflow = .Vocal,
+		source_modal_refetch_index = -1,
+	}
 	import_job = nil
 	library_recovery = nil
 	export_jobs = nil
@@ -752,13 +759,67 @@ parallel_save_jobs_reserve_unique_clip_numbers_and_remain_actionable_test :: pro
 	)
 	testing.expect(t, ui_action_enabled_for_current_job(.Save))
 	testing.expect(t, !ui_action_enabled_for_current_job(.Preview))
-	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	testing.expect(t, ui_action_enabled_for_current_job(.Import))
 	testing.expect(t, ui_action_enabled_for_current_job(.Workflow_Toggle))
 	testing.expect(t, ui_action_enabled_for_current_job(.Mode_Toggle))
+
+	ui.source_modal_refetch_index = 0
+	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	ui.source_modal_refetch_index = -1
+
+	active_import := Import_Job{}
+	import_job = &active_import
+	testing.expect(t, ui_action_enabled_for_current_job(.Save))
+	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	command_palette_actions = nil
+	entries := build_command_palette_entries(context.temp_allocator)
+	commit_index := -1
+	for entry, index in entries {
+		if entry.title == "Commit clip" {
+			commit_index = index
+			break
+		}
+	}
+	testing.expect(t, commit_index >= 0)
+	if commit_index >= 0 {
+		testing.expect(t, command_palette.context_matches(
+			palette_active_context(),
+			entries[commit_index].contexts,
+		))
+	}
+
+	active_import.replace_video_id = "source"
+	testing.expect(t, !ui_action_enabled_for_current_job(.Save))
+	if commit_index >= 0 {
+		testing.expect(t, !command_palette.context_matches(
+			palette_active_context(),
+			entries[commit_index].contexts,
+		))
+	}
+	import_job = nil
+
+	active_recovery: Library_Recovery
+	library_recovery = &active_recovery
+	testing.expect(t, !ui_action_enabled_for_current_job(.Save))
+	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	if commit_index >= 0 {
+		testing.expect(t, !command_palette.context_matches(
+			palette_active_context(),
+			entries[commit_index].contexts,
+		))
+	}
+	library_recovery = nil
 
 	preview := Export_Job{operation = .Preview}
 	export_jobs[0] = &preview
 	testing.expect(t, !ui_action_enabled_for_current_job(.Save))
+	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	if commit_index >= 0 {
+		testing.expect(t, !command_palette.context_matches(
+			palette_active_context(),
+			entries[commit_index].contexts,
+		))
+	}
 	testing.expect(t, !ui_action_enabled_for_current_job(.Workflow_Toggle))
 	testing.expect(t, !ui_action_enabled_for_current_job(.Mode_Toggle))
 }
@@ -3531,6 +3592,99 @@ parallel_save_results_commit_without_losing_reverse_completion_test :: proc(
 	testing.expect(t, database_load_state(fixture.database, &loaded))
 	defer app_state_collections_destroy(&loaded)
 	testing.expect_value(t, len(loaded.clips), 2)
+	testing.expect(t, clip_index_for_id(loaded.clips[:], "source-1") >= 0)
+	testing.expect(t, clip_index_for_id(loaded.clips[:], "source-2") >= 0)
+}
+
+@(test)
+source_import_and_clip_save_preserve_both_completion_orders_test :: proc(
+	t: ^testing.T,
+) {
+	fixture, fixture_ready := library_transaction_test_begin()
+	testing.expect(t, fixture_ready)
+	if !fixture_ready {return}
+	defer library_transaction_test_end(&fixture)
+	source, source_copied := clone_source_video(Source_Video{
+		id = "source",
+		workflow = .Vocal,
+		video_id = "video",
+		title = "Source",
+		url = "https://youtu.be/video",
+		media_path = "/tmp/source.mp4",
+		duration = 120,
+	})
+	testing.expect(t, source_copied)
+	if !source_copied {return}
+	append(&state.sources, source)
+	testing.expect(t, database_save_state(fixture.database))
+
+	first_import := Import_Job{
+		accepted = 1,
+		workflow = .Vocal,
+		last_video_id = "new-video-a",
+	}
+	first_import.new_sources = make([dynamic]Source_Video)
+	first_import.new_hints = make([dynamic]Import_Hint)
+	defer {
+		delete(first_import.new_sources)
+		delete(first_import.new_hints)
+	}
+	append(&first_import.new_sources, Source_Video{
+		id = "new-source-a",
+		workflow = .Vocal,
+		video_id = "new-video-a",
+		title = "New A",
+		url = "https://youtu.be/new-video-a",
+		media_path = "/tmp/new-source-a.mp4",
+		duration = 60,
+	})
+	first_save := Export_Job{
+		operation = .Save,
+		success = true,
+		clip = {
+			id = "source-1",
+			source_id = "source",
+			workflow = .Vocal,
+			name = "First",
+			start_seconds = 10,
+			end_seconds = 20,
+			clip_path = "/tmp/source-1.mp4",
+			dance_count_in_bpm = 120,
+			dance_playback_rate = 1,
+		},
+	}
+
+	testing.expect(t, save_export_apply(&first_save))
+	testing.expect(t, import_job_apply(&first_import))
+	testing.expect(t, source_index_for_id(state.sources[:], "new-source-a") >= 0)
+	testing.expect(t, clip_index_for_id(state.clips[:], "source-1") >= 0)
+
+	second_save := Export_Job{
+		operation = .Save,
+		success = true,
+		clip = {
+			id = "source-2",
+			source_id = "source",
+			workflow = .Vocal,
+			name = "Second",
+			start_seconds = 30,
+			end_seconds = 40,
+			clip_path = "/tmp/source-2.mp4",
+			dance_count_in_bpm = 120,
+			dance_playback_rate = 1,
+		},
+	}
+
+	testing.expect(t, save_export_apply(&second_save))
+	testing.expect_value(t, len(state.sources), 2)
+	testing.expect_value(t, len(state.clips), 2)
+
+	loaded: App_State
+	testing.expect(t, database_load_state(fixture.database, &loaded))
+	defer app_state_collections_destroy(&loaded)
+	testing.expect_value(t, len(loaded.sources), 2)
+	testing.expect_value(t, len(loaded.clips), 2)
+	testing.expect(t, source_index_for_id(loaded.sources[:], "new-source-a") >= 0)
 	testing.expect(t, clip_index_for_id(loaded.clips[:], "source-1") >= 0)
 	testing.expect(t, clip_index_for_id(loaded.clips[:], "source-2") >= 0)
 }

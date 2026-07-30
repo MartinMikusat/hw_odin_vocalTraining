@@ -594,6 +594,7 @@ PALETTE_CONTEXT_GLOBAL_MODAL :: command_palette.Context_Mask(1 << 11)
 PALETTE_CONTEXT_PLAY_NEXT    :: command_palette.Context_Mask(1 << 12)
 PALETTE_CONTEXT_PITCH        :: command_palette.Context_Mask(1 << 13)
 PALETTE_CONTEXT_EXPORT_EXCLUSIVE_BUSY :: command_palette.Context_Mask(1 << 14)
+PALETTE_CONTEXT_CLIP_SAVE_BUSY :: command_palette.Context_Mask(1 << 15)
 
 CONTROL_URL :: Id(rawptr(uintptr(1)))
 CONTROL_STATUS :: Id(rawptr(uintptr(2)))
@@ -2007,9 +2008,7 @@ source_paste_dismiss_transient_ui :: proc(preserve_add_modal: bool) {
 }
 
 source_paste_media_job_blocks :: proc() -> bool {
-	return import_job != nil ||
-	       library_recovery != nil ||
-	       export_jobs_have_exclusive_operation()
+	return source_import_media_job_blocks(false)
 }
 
 handle_global_source_paste :: proc(text: string) -> Source_Paste_Result {
@@ -7557,7 +7556,9 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		return !library_transfer_busy() && ui.library_import_pending
 	}
 	if kind == .Import {
-		return import_job == nil && !export_jobs_any()
+		return !source_import_media_job_blocks(
+			ui.source_modal_refetch_index >= 0,
+		)
 	}
 	if kind == .Start || kind == .End {
 		return state.player != nil &&
@@ -7565,9 +7566,7 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		       state.active_source < len(state.sources)
 	}
 	if kind == .Save {
-		return import_job == nil &&
-		       library_recovery == nil &&
-		       !export_jobs_have_exclusive_operation() &&
+		return !clip_save_media_job_blocks() &&
 		       active_clip_range_is_valid()
 	}
 	if kind == .Preview {
@@ -9356,6 +9355,9 @@ palette_active_context :: proc() -> command_palette.Context_Mask {
 	if export_jobs_have_exclusive_operation() {
 		bits |= u64(PALETTE_CONTEXT_EXPORT_EXCLUSIVE_BUSY)
 	}
+	if clip_save_media_job_blocks() {
+		bits |= u64(PALETTE_CONTEXT_CLIP_SAVE_BUSY)
+	}
 	if ui.settings_open {bits |= u64(PALETTE_CONTEXT_SETTINGS)}
 	if ui.dark_theme {
 		bits |= u64(PALETTE_CONTEXT_DARK_THEME)
@@ -9553,8 +9555,8 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"Export the marked range as a saved clip",
 		"Command",
 		[]string{"save", "clip", "range"},
-		palette_condition(create_range, edit_busy),
-		"Mark a valid range in Create mode and wait for active media operations",
+		palette_condition(create_range, PALETTE_CONTEXT_CLIP_SAVE_BUSY),
+		"Mark a valid range and wait for any source refetch, recovery, preview, or repair",
 	)
 	append_command_palette_entry(
 		&entries,
