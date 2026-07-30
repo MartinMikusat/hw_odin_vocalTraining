@@ -924,6 +924,7 @@ seek_video_seconds :: proc(seconds: f64) {
 		tolerance,
 		tolerance,
 	)
+	request_video_frame_refresh()
 }
 
 seek_seconds :: proc(seconds: f64) {

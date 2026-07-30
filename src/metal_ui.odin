@@ -118,6 +118,7 @@ UI_Mode :: enum {
 }
 
 WORKFLOW_COUNT :: 2
+VIDEO_FRAME_RETRY_TICKS :: uint(120)
 
 Numbered_Action_Code :: struct {
 	section, action: int,
@@ -161,6 +162,8 @@ UI_State :: struct {
 	last_video_texture: Id,
 	last_video_width:   uint,
 	last_video_height:  uint,
+	video_frame_pending: bool,
+	video_frame_deadline: uint,
 	ax_children:        Id,
 	width:              f64,
 	height:             f64,
@@ -9791,17 +9794,17 @@ on_metal_ax_children :: proc "c" (self: Id, command: Sel) -> Id {
 
 on_metal_is_ax_element :: proc "c" (self: Id, command: Sel) -> bool {return false}
 
-current_video_texture :: proc() -> (Id, uint, uint) {
-	if ui.video_output == nil || ui.texture_cache == nil {return nil, 0, 0}
+current_video_texture :: proc() -> (Id, uint, uint, bool) {
+	if ui.video_output == nil || ui.texture_cache == nil {return nil, 0, 0, false}
 	seconds, ok := current_seconds()
-	if !ok {return nil, 0, 0}
+	if !ok {return nil, 0, 0, false}
 	time := CMTime {
 		value     = i64(seconds * 600),
 		timescale = 600,
 		flags     = 1,
 	}
 	if !msg_bool_time(ui.video_output, sel_registerName("hasNewPixelBufferForItemTime:"), time) {
-		return ui.last_video_texture, ui.last_video_width, ui.last_video_height
+		return ui.last_video_texture, ui.last_video_width, ui.last_video_height, false
 	}
 	display_time: CMTime
 	buffer := msg_id_time_time(
@@ -9810,7 +9813,9 @@ current_video_texture :: proc() -> (Id, uint, uint) {
 		time,
 		&display_time,
 	)
-	if buffer == nil {return ui.last_video_texture, ui.last_video_width, ui.last_video_height}
+	if buffer == nil {
+		return ui.last_video_texture, ui.last_video_width, ui.last_video_height, false
+	}
 	trace_foreign_lifetime("create", "CVPixelBuffer", buffer, "current_video_texture")
 	defer foreign_release(buffer, "CVPixelBuffer", "current_video_texture")
 	width := CVPixelBufferGetWidth(buffer)
@@ -9831,18 +9836,22 @@ current_video_texture :: proc() -> (Id, uint, uint) {
 		   &cv_texture,
 	   ) !=
 	   0 {
-		return ui.last_video_texture, ui.last_video_width, ui.last_video_height
+		return ui.last_video_texture, ui.last_video_width, ui.last_video_height, false
 	}
-	if cv_texture == nil {return ui.last_video_texture, ui.last_video_width, ui.last_video_height}
+	if cv_texture == nil {
+		return ui.last_video_texture, ui.last_video_width, ui.last_video_height, false
+	}
 	trace_foreign_lifetime("create", "CVMetalTexture", cv_texture, "current_video_texture")
 	defer foreign_release(cv_texture, "CVMetalTexture", "current_video_texture")
 	texture := CVMetalTextureGetTexture(cv_texture)
-	if texture == nil {return ui.last_video_texture, ui.last_video_width, ui.last_video_height}
+	if texture == nil {
+		return ui.last_video_texture, ui.last_video_width, ui.last_video_height, false
+	}
 	retained := msg_id(texture, sel_registerName("retain"))
 	if ui.last_video_texture != nil {msg_void(ui.last_video_texture, sel_registerName("release"))}
 	ui.last_video_texture = retained
 	ui.last_video_width, ui.last_video_height = width, height
-	return retained, width, height
+	return retained, width, height, true
 }
 
 render_frame :: proc() {
@@ -9909,7 +9918,10 @@ render_frame :: proc() {
 
 	_, _, _, _, player, _, _, _, _, _, _ := layout_rects()
 	player_rect := player_content_rect(player)
-	if video_texture, video_width, video_height := current_video_texture(); video_texture != nil {
+	video_texture, video_width, video_height, fresh_video_frame :=
+		current_video_texture()
+	if fresh_video_frame {complete_video_frame_refresh()}
+	if video_texture != nil {
 		aspect := f64(video_width) / f64(video_height)
 		draw_rect := player_rect
 		if draw_rect.w / draw_rect.h > aspect {
@@ -10073,7 +10085,35 @@ fragment float4 texture_fragment(TextureOut in [[stage_in]], texture2d<float> im
 	return ui.solid_pipeline != nil && ui.texture_pipeline != nil
 }
 
+video_frame_retry_active :: proc(
+	pending: bool,
+	frame_tick,
+	deadline: uint,
+) -> bool {
+	return pending && frame_tick < deadline
+}
+
+clear_video_frame_refresh :: proc() {
+	ui.video_frame_pending = false
+	ui.video_frame_deadline = 0
+}
+
+request_video_frame_refresh :: proc() {
+	if ui.video_output == nil {
+		clear_video_frame_refresh()
+		return
+	}
+	ui.video_frame_pending = true
+	ui.video_frame_deadline = ui.frame_tick + VIDEO_FRAME_RETRY_TICKS
+	ui.needs_redraw = true
+}
+
+complete_video_frame_refresh :: proc() {
+	clear_video_frame_refresh()
+}
+
 metal_player_clear_texture :: proc() {
+	clear_video_frame_refresh()
 	if ui.last_video_texture != nil {
 		msg_void(ui.last_video_texture, sel_registerName("release"))
 		ui.last_video_texture = nil
@@ -10398,7 +10438,7 @@ metal_player_load :: proc(path: string) -> bool {
 		msg_void(old_output, sel_registerName("release"))
 	}
 	metal_audio_release(old_audio_engine, old_audio_player, old_audio_pitch, old_audio_file)
-	ui.needs_redraw = true
+	request_video_frame_refresh()
 	return true
 }
 
@@ -11514,14 +11554,26 @@ on_metal_first_rect :: proc "c" (
 
 on_metal_accepts_first :: proc "c" (self: Id, command: Sel) -> bool {return true}
 
-metal_frame_should_render :: proc(needs_redraw, playback_active: bool) -> bool {
-	return needs_redraw || playback_active
+metal_frame_should_render :: proc(
+	needs_redraw,
+	playback_active,
+	video_frame_pending: bool,
+) -> bool {
+	return needs_redraw || playback_active || video_frame_pending
 }
 
 on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	ui.frame_tick += 1
+	if ui.video_frame_pending &&
+	   !video_frame_retry_active(
+			ui.video_frame_pending,
+			ui.frame_tick,
+			ui.video_frame_deadline,
+	   ) {
+		clear_video_frame_refresh()
+	}
 	now_ms := numbered_action_time_ms()
 	_ = expire_number_prefix_at(now_ms)
 	_ = advance_dance_count_in(now_ms)
@@ -11588,7 +11640,11 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	if ui.scale <= 0 {ui.scale = 1}
 	sync_transcript_playback()
 	normalize_scroll_offsets()
-	if metal_frame_should_render(ui.needs_redraw, playback_active) {
+	if metal_frame_should_render(
+		ui.needs_redraw,
+		playback_active,
+		ui.video_frame_pending,
+	) {
 		msg_void_size(
 			ui.layer,
 			sel_registerName("setDrawableSize:"),

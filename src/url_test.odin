@@ -5342,11 +5342,59 @@ ui_flash_dynamic_identifiers_do_not_expose_synthetic_suffixes_test :: proc(t: ^t
 }
 
 @(test)
-metal_frame_only_renders_for_invalidated_ui_or_active_playback_test :: proc(
+metal_frame_renders_for_invalidated_ui_active_playback_or_pending_video_test :: proc(
 	t: ^testing.T,
 ) {
-	testing.expect(t, !metal_frame_should_render(false, false))
-	testing.expect(t, metal_frame_should_render(true, false))
-	testing.expect(t, metal_frame_should_render(false, true))
-	testing.expect(t, metal_frame_should_render(true, true))
+	testing.expect(t, !metal_frame_should_render(false, false, false))
+	testing.expect(t, metal_frame_should_render(true, false, false))
+	testing.expect(t, metal_frame_should_render(false, true, false))
+	testing.expect(t, metal_frame_should_render(false, false, true))
+	testing.expect(t, metal_frame_should_render(true, true, true))
+}
+
+@(test)
+video_frame_refresh_retries_until_completion_or_deadline_test :: proc(
+	t: ^testing.T,
+) {
+	previous_ui := ui
+	defer {ui = previous_ui}
+	ui = UI_State{
+		video_output = rawptr(uintptr(1)),
+		frame_tick = 40,
+	}
+
+	request_video_frame_refresh()
+	testing.expect(t, ui.video_frame_pending)
+	testing.expect_value(
+		t,
+		ui.video_frame_deadline,
+		uint(40)+VIDEO_FRAME_RETRY_TICKS,
+	)
+	testing.expect(t, ui.needs_redraw)
+	testing.expect(t, video_frame_retry_active(
+		ui.video_frame_pending,
+		ui.video_frame_deadline-1,
+		ui.video_frame_deadline,
+	))
+	testing.expect(t, !video_frame_retry_active(
+		ui.video_frame_pending,
+		ui.video_frame_deadline,
+		ui.video_frame_deadline,
+	))
+
+	complete_video_frame_refresh()
+	testing.expect(t, !ui.video_frame_pending)
+	testing.expect_value(t, ui.video_frame_deadline, uint(0))
+
+	request_video_frame_refresh()
+	metal_player_clear_texture()
+	testing.expect(t, !ui.video_frame_pending)
+	testing.expect_value(t, ui.video_frame_deadline, uint(0))
+
+	ui.video_output = nil
+	ui.video_frame_pending = true
+	ui.video_frame_deadline = 999
+	request_video_frame_refresh()
+	testing.expect(t, !ui.video_frame_pending)
+	testing.expect_value(t, ui.video_frame_deadline, uint(0))
 }
