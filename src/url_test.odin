@@ -3280,6 +3280,19 @@ dancing_tools_register_controls_without_pitch_controls_test :: proc(
 }
 
 @(test)
+dancing_count_each_loop_and_bpm_label_do_not_overlap_test :: proc(
+	t: ^testing.T,
+) {
+	panel := UI_Rect{0, 0, 220, 600}
+	content := dance_content_rect(panel)
+	content_top := content.y + content.h
+	count_each_loop_bottom := content_top - 32 - 4 * 32
+	bpm_down := dance_bpm_down_rect(panel)
+	bpm_label_top := bpm_down.y + bpm_down.h + 8 + 20
+	testing.expect(t, bpm_label_top <= count_each_loop_bottom)
+}
+
+@(test)
 pitch_action_availability_matches_microphone_permission_test :: proc(
 	t: ^testing.T,
 ) {

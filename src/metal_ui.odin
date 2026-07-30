@@ -2536,7 +2536,7 @@ dance_bpm_down_rect :: proc(panel: UI_Rect) -> UI_Rect {
 	content := dance_content_rect(panel)
 	return UI_Rect{
 		content.x,
-		content.y + content.h - 196,
+		content.y + content.h - 228,
 		34,
 		30,
 	}
