@@ -188,7 +188,12 @@ transcript_generation_copy :: proc(segments: []Transcript_Segment) -> (Transcrip
 }
 
 clone_source_video :: proc(source: Source_Video, allocator := context.allocator) -> (Source_Video, bool) {
-	result := Source_Video{duration=source.duration, metadata_status=source.metadata_status, media_available=source.media_available}
+	result := Source_Video{
+		workflow=source.workflow,
+		duration=source.duration,
+		metadata_status=source.metadata_status,
+		media_available=source.media_available,
+	}
 	copied := false
 	defer if !copied { delete_source_video(&result, allocator) }
 	value, err := strings.clone(source.id, allocator); if err != nil { return {}, false }; result.id = value
@@ -214,18 +219,25 @@ clone_import_hint :: proc(hint: Import_Hint, allocator := context.allocator) -> 
 	return result, true
 }
 
-clone_exercise :: proc(exercise: Exercise, allocator := context.allocator) -> (Exercise, bool) {
-	result := Exercise{
-		start_seconds = exercise.start_seconds,
-		end_seconds = exercise.end_seconds,
-		last_randomized_sequence = exercise.last_randomized_sequence,
+clone_clip :: proc(clip: Clip, allocator := context.allocator) -> (Clip, bool) {
+	result := Clip{
+		workflow = clip.workflow,
+		start_seconds = clip.start_seconds,
+		end_seconds = clip.end_seconds,
+		last_randomized_sequence = clip.last_randomized_sequence,
+		dance_mirrored = clip.dance_mirrored,
+		dance_loop = clip.dance_loop,
+		dance_count_in_beats = clip.dance_count_in_beats,
+		dance_count_each_loop = clip.dance_count_each_loop,
+		dance_count_in_bpm = clip.dance_count_in_bpm,
+		dance_playback_rate = clip.dance_playback_rate,
 	}
 	copied := false
-	defer if !copied { delete_exercise(&result, allocator) }
-	value, err := strings.clone(exercise.id, allocator); if err != nil { return {}, false }; result.id = value
-	value, err = strings.clone(exercise.source_id, allocator); if err != nil { return {}, false }; result.source_id = value
-	value, err = strings.clone(exercise.name, allocator); if err != nil { return {}, false }; result.name = value
-	value, err = strings.clone(exercise.clip_path, allocator); if err != nil { return {}, false }; result.clip_path = value
+	defer if !copied { delete_clip(&result, allocator) }
+	value, err := strings.clone(clip.id, allocator); if err != nil { return {}, false }; result.id = value
+	value, err = strings.clone(clip.source_id, allocator); if err != nil { return {}, false }; result.source_id = value
+	value, err = strings.clone(clip.name, allocator); if err != nil { return {}, false }; result.name = value
+	value, err = strings.clone(clip.clip_path, allocator); if err != nil { return {}, false }; result.clip_path = value
 	copied = true
 	return result, true
 }
@@ -243,10 +255,10 @@ delete_import_hint :: proc(hint: ^Import_Hint, allocator := context.allocator) {
 	hint^ = {}
 }
 
-delete_exercise :: proc(exercise: ^Exercise, allocator := context.allocator) {
-	if exercise == nil { return }
-	delete(exercise.id, allocator); delete(exercise.source_id, allocator); delete(exercise.name, allocator); delete(exercise.clip_path, allocator)
-	exercise^ = {}
+delete_clip :: proc(clip: ^Clip, allocator := context.allocator) {
+	if clip == nil { return }
+	delete(clip.id, allocator); delete(clip.source_id, allocator); delete(clip.name, allocator); delete(clip.clip_path, allocator)
+	clip^ = {}
 }
 
 app_state_collections_clone :: proc(source: ^App_State) -> (App_State, bool) {
@@ -261,9 +273,9 @@ app_state_collections_clone :: proc(source: ^App_State) -> (App_State, bool) {
 	hints, hints_error := make([dynamic]Import_Hint, 0, len(source.hints))
 	if hints_error != nil {return {}, false}
 	result.hints = hints
-	exercises, exercises_error := make([dynamic]Exercise, 0, len(source.exercises))
-	if exercises_error != nil {return {}, false}
-	result.exercises = exercises
+	clips, clips_error := make([dynamic]Clip, 0, len(source.clips))
+	if clips_error != nil {return {}, false}
+	result.clips = clips
 
 	for value in source.sources {
 		copy, ok := clone_source_video(value)
@@ -275,10 +287,10 @@ app_state_collections_clone :: proc(source: ^App_State) -> (App_State, bool) {
 		if !ok {return {}, false}
 		append(&result.hints, copy)
 	}
-	for value in source.exercises {
-		copy, ok := clone_exercise(value)
+	for value in source.clips {
+		copy, ok := clone_clip(value)
 		if !ok {return {}, false}
-		append(&result.exercises, copy)
+		append(&result.clips, copy)
 	}
 	transcripts, transcripts_ok := transcript_generation_copy(source.transcripts.segments[:])
 	if !transcripts_ok {return {}, false}
@@ -291,12 +303,12 @@ app_state_collections_copy :: proc(
 	sources: []Source_Video,
 	segments: []Transcript_Segment,
 	hints: []Import_Hint,
-	exercises: []Exercise,
+	clips: []Clip,
 ) -> (App_State, bool) {
 	result: App_State
 	result.sources = make([dynamic]Source_Video, 0, len(sources))
 	result.hints = make([dynamic]Import_Hint, 0, len(hints))
-	result.exercises = make([dynamic]Exercise, 0, len(exercises))
+	result.clips = make([dynamic]Clip, 0, len(clips))
 	loaded := false
 	defer if !loaded {app_state_collections_destroy(&result)}
 	for source in sources {
@@ -309,10 +321,10 @@ app_state_collections_copy :: proc(
 		if !copied {return {}, false}
 		append(&result.hints, copy)
 	}
-	for exercise in exercises {
-		copy, copied := clone_exercise(exercise)
+	for clip in clips {
+		copy, copied := clone_clip(clip)
 		if !copied {return {}, false}
-		append(&result.exercises, copy)
+		append(&result.clips, copy)
 	}
 	transcripts, copied := transcript_generation_copy(segments)
 	if !copied {return {}, false}
@@ -327,15 +339,15 @@ app_state_collections_replace :: proc(destination, replacement: ^App_State) {
 	previous.sources = destination.sources
 	previous.transcripts = destination.transcripts
 	previous.hints = destination.hints
-	previous.exercises = destination.exercises
+	previous.clips = destination.clips
 	destination.sources = replacement.sources
 	destination.transcripts = replacement.transcripts
 	destination.hints = replacement.hints
-	destination.exercises = replacement.exercises
+	destination.clips = replacement.clips
 	replacement.sources = nil
 	replacement.transcripts = {}
 	replacement.hints = nil
-	replacement.exercises = nil
+	replacement.clips = nil
 	app_state_collections_destroy(&previous)
 }
 
@@ -343,14 +355,14 @@ app_state_collections_destroy :: proc(value: ^App_State) {
 	if value == nil {return}
 	for &source in value.sources {delete_source_video(&source)}
 	for &hint in value.hints {delete_import_hint(&hint)}
-	for &exercise in value.exercises {delete_exercise(&exercise)}
+	for &clip in value.clips {delete_clip(&clip)}
 	delete(value.sources)
 	delete(value.hints)
-	delete(value.exercises)
+	delete(value.clips)
 	transcript_generation_destroy(&value.transcripts)
 	value.sources = nil
 	value.hints = nil
-	value.exercises = nil
+	value.clips = nil
 }
 
 app_state_memory_destroy :: proc() {

@@ -237,7 +237,7 @@ on_cli_ipc_request :: proc "c" (self: Id, command: Sel, sender: Id) {
 	cli_ipc_work.result = cli_execute(cli_ipc_work.request)
 	if cli_command_mutates_library(cli_ipc_work.request.command) {
 		refresh_sources()
-		refresh_exercises()
+		refresh_clips()
 		ui.needs_redraw = true
 	}
 }

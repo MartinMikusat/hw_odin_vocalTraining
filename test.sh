@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-TEST_SUPPORT=$(mktemp -d "${TMPDIR:-/tmp}/vocal-training-tests.XXXXXX")
+TEST_SUPPORT=$(mktemp -d "${TMPDIR:-/tmp}/hw_videoClips-tests.XXXXXX")
 trap 'rm -rf "$TEST_SUPPORT"' EXIT
 
 "$ROOT/scripts/library-fixture.sh" validate "$ROOT/testdata/library.sqlite3"
@@ -15,12 +15,12 @@ xcrun clang \
   -c "$ROOT/src/pitch_capture.m" \
   -o "$PITCH_CAPTURE_OBJECT"
 
-VT_APP_SUPPORT_DIR="$TEST_SUPPORT" \
-VT_TEST_LIBRARY="$TEST_SUPPORT/library.sqlite3" \
-VT_HEADLESS_TEST=1 \
+HW_VIDEO_CLIPS_APP_SUPPORT_DIR="$TEST_SUPPORT" \
+HW_VIDEO_CLIPS_TEST_LIBRARY="$TEST_SUPPORT/library.sqlite3" \
+HW_VIDEO_CLIPS_HEADLESS_TEST=1 \
 odin test "$ROOT/src" \
   -define:ODIN_TEST_THREADS=1 \
-  -define:VT_DEV_TASK_SIMULATION=true \
+  -define:HW_VIDEO_CLIPS_DEV_TASK_SIMULATION=true \
   -collection:match_sorter="$ROOT/../hw_odin_matchSorter" \
   -collection:flash="$ROOT/../hw_odin_ui_flash" \
   -collection:command_palette="$ROOT/../hw_odin_ui_commandPalette" \

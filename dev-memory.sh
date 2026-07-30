@@ -11,4 +11,4 @@ case "$PROFILE" in
 esac
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-VT_MEMORY_PROFILE="$PROFILE" exec "$ROOT/dev.sh" debug
+HW_VIDEO_CLIPS_MEMORY_PROFILE="$PROFILE" exec "$ROOT/dev.sh" debug

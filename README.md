@@ -1,7 +1,7 @@
-# Vocal Training
+# hw_videoClips
 
-An Apple Silicon macOS application for turning sections of YouTube vocal
-lessons into reusable practice exercises.
+An Apple Silicon macOS application for turning source videos into reusable
+Vocal and Dancing clips.
 
 ## AI-assisted development disclosure
 
@@ -31,7 +31,8 @@ The application opens as a square, borderless window without a native shadow.
 Use the first three controls at the upper left to close, minimize, or zoom the
 window. Use the gear control beside them to open Settings. Drag the title strip
 to move the window. Drag a window edge or corner to resize it. The minimum
-window size is 1100 by 720 points.
+window size is 1100 by 720 points. The title shows the active workflow and
+workspace beside `hw_videoClips`.
 
 Use the gear control or `Command-,` to open the searchable two-column Settings
 modal. Select `Styling` to choose HW Light or HW Dark. Select `Shortcuts` to
@@ -39,9 +40,12 @@ configure the Flash leader. The application stores both selections in its
 local database.
 
 The application stores its SQLite library and downloaded media in
-`~/Library/Application Support/VocalTraining`. It migrates and removes the old
-`library.json` file after it verifies the new database. Only download media you
-are authorized to download.
+`~/Library/Application Support/hw_videoClips`. On first launch, it moves an
+existing `~/Library/Application Support/VocalTraining` directory to the new
+location. It retains both directories when both contain a database. Existing
+sources and clips migrate into the Vocal workflow. It also removes the old
+`library.json` file after it verifies the SQLite database. Only download media
+you are authorized to download.
 
 The application validates all required library rows before it enables writes.
 If the read fails, the application blocks normal controls and opens Library
@@ -61,10 +65,21 @@ requires explicit confirmation before it continues.
 
 ### Workflow
 
-Use the mode control in the title strip to separate the two workflows. **Create**
-shows source ingest, the timed transcript, range markers, exercise naming, and
-export controls. **Play** gives 20% of the content width to the exercise
-library, 30% to the practice monitor, and 50% to the live pitch monitor.
+The first title-strip control selects the independent **Vocal** or **Dancing**
+workflow. Each workflow owns its own Sources and Clips. The second control
+selects **Sources** or **Clips**. Sources shows ingest, the timed transcript,
+range markers, clip naming, and export controls. The application saves this
+workflow and workspace pair and restores it on the next launch.
+
+Vocal Clips gives 20% of the content width to the clip library, 30% to video,
+and 50% to the pitch monitor. Vocal source and clip playback share one saved
+speed.
+
+Dancing Clips gives 20% of the content width to the clip library, 60% to
+video, and 20% to Dance Tools. Each Dancing clip stores its own playback speed,
+horizontal mirror state, loop state, visual count-in, count-each-loop state,
+and count-in BPM. Speed changes use 0.1x steps. A new Dancing clip starts at
+1.0x, 120 BPM, with mirror, loop, and count-in disabled.
 
 Press **31 Start Pitch** to begin live microphone analysis. The first start asks
 macOS for microphone access. The app does not record or store microphone audio.
@@ -72,7 +87,7 @@ The chart keeps the newest 12 seconds of stable pitch and preserves the trace
 when tracking stops. Starting again clears the trace. An input-only Core Audio
 queue captures the microphone without connecting to the playback graph. When
 the default input is a Bluetooth headset, the app uses the Mac's built-in
-microphone to preserve high-quality headphone playback. Exercise playback and
+microphone to preserve high-quality headphone playback. Clip playback and
 pitch tracking can run together.
 
 The pitch settings select the A4 reference from 400 to 480 Hz, the displayed
@@ -81,20 +96,27 @@ stores these settings locally. Label and transposition settings change only the
 displayed note names. Select the pitch monitor **?** control for the complete
 setting rules and microphone behavior.
 
-In Play mode, select **Randomize** to choose from the complete exercise library
+In Clips, select **Randomize** to choose from the complete workflow clip library
 and start playback. An active search does not limit the random pool. When two
-or more exercises exist, Randomize does not select the active exercise.
-Exercises skipped by recent Randomize selections receive up to three times the
+or more clips exist, Randomize does not select the active clip.
+Clips skipped by recent Randomize selections receive up to three times the
 selection weight. Manual playback does not change this history. The application
 stores the history locally and does not include it in library exports.
 Select the **?** control inside Randomize to inspect the weighting rules and the
-ten exercises with the highest probability in the next draw.
+ten clips with the highest probability in the next draw.
 
-Select **Play Next** to play the next exercise in the filtered exercise list.
-The selection wraps to the first visible exercise after the last result.
+Select **Play Next** to play the next clip in the filtered clip list.
+The selection wraps to the first visible clip after the last result.
 Enable **Shuffle** to make Play Next use the Randomize weighting rules within
 the filtered results. Enable **Autoplay** to run Play Next when the current
-exercise finishes. Autoplay uses the current Shuffle state and current filter.
+clip finishes. Autoplay uses the current Shuffle state and current filter.
+
+Dancing **Mirror** flips only the decoded video texture horizontally. Text and
+controls retain their normal direction. **Count-in** cycles through Off, 4,
+and 8. The app draws the count over the video at the saved BPM and does not
+produce count audio. **Count Each Loop** repeats the visual count before each
+loop. Pause and resume do not start another count. **Loop** restarts the active
+clip and takes priority over Autoplay.
 
 Press **Add** in the Source Register to open the ingest dialog, then paste one
 or more YouTube URLs with one URL per line. URLs are normalized by video ID,
@@ -121,7 +143,7 @@ browser selector again.
 Select **Refetch / Select Quality** to replace its media, metadata, and
 captions. Refetch checks the source again and opens the same per-video quality
 selector before it downloads replacement media.
-The refetch operation also rebuilds each saved exercise from that source at the
+The refetch operation also rebuilds each saved clip from that source at the
 new resolution.
 During a download, the footer shows its completion, current stream size,
 transfer speed, and remaining time. Select **Stop** to terminate yt-dlp and
@@ -136,22 +158,22 @@ the refetch fails.
 Select a source, load its captions, and click a timed transcript row to seek.
 Use the transcript search field to rank fuzzy caption matches. Clear the field
 to restore the transcript's time order.
-Mark the start and end of a useful section, then commit the range as an
-exercise. Saved exercises appear in the exercise bank and play as standalone
+Mark the start and end of a useful section, then commit the range as a
+clip. Saved clips appear in the clip bank and play as standalone
 clips when selected. The Source Monitor and Practice Monitor use the same
 playback controls. The volume controls adjust playback in 10% steps and retain
-that level when another source or exercise is loaded during the session. The
+that level when another source or clip is loaded during the session. The
 transport can play, pause, stop at zero, change speed, change volume, and scrub
 across the loaded media. Source reset seeks to the imported URL timestamp.
-Exercise reset seeks to the start of the clip.
-The Create footer highlights each missing range endpoint. It enables and
+Clip reset seeks to the start of the clip.
+The Sources footer highlights each missing range endpoint. It enables and
 highlights **Commit** only after the range is at least one second long. The
 footer shows the calculated clip duration beside the range.
-Select an exercise, then select **Rename** to edit its saved name. The rename
+Select a clip, then select **Rename** to edit its saved name. The rename
 dialog keeps the original name visible above the new name field.
-Select **Metadata** to inspect the exercise identifier, source, range, duration,
+Select **Metadata** to inspect the clip identifier, source, range, duration,
 source URL, clip path, and clip availability. Select **View Source** in that
-dialog to switch to Create mode and load the exercise source.
+dialog to switch to Sources and load the clip source.
 If a source has multiple imported timestamps, the Reset control becomes a
 timestamp selector. Selecting a value seeks there and saves it as the source's
 active timestamp.
@@ -163,25 +185,31 @@ second. The second digit activates its action. Escape or an invalid sequence
 clears the selected section. Play and Space restart a completed video from the
 beginning.
 
-The Create actions are **11 Captions**, **12 Data**, **21 Play**,
+The Sources actions are **11 Captions**, **12 Data**, **21 Play**,
 **22 Pause**, **23 Preview**, **31 Mark In**, **32 Mark Out**, and
 **33 Commit**.
 
-The Play actions are **11 Play Next**, **12 Randomize**, **13 Rename**,
+The Vocal Clips actions are **11 Play Next**, **12 Randomize**, **13 Rename**,
 **14 Metadata**, **15 Data**, **21 Play**, **22 Pause**, **23 Shuffle**,
 **24 Autoplay**, and **31 Start Pitch** or **31 Stop Pitch**.
+
+The Dancing Clips actions replace Pitch with **31 Mirror**, **32 Loop**,
+**33 Count-in**, and **34 Count Each Loop**. Dance Tools exposes BPM minus and
+plus controls through pointer, Accessibility, Flash, and the shared control
+registry.
 Press **Left Arrow** or **Right Arrow** to scrub by one second. Hold **Shift**
 to scrub by 0.1 seconds, or hold **Command** to scrub by 10 seconds.
 
 Press **Control-K** to open the command palette from any application state.
-Type to search commands, sources, and exercises in one list. Use the arrow
+Type to search commands, sources, and clips in one list. Use the arrow
 keys to move, Return to select, and Escape to close the palette. Commands that
 do not apply to the current mode remain visible with their unavailable reason.
-Selecting a source switches to Create and loads it. Selecting an exercise
-switches to Play and starts it.
+Selecting a source switches to Sources and loads it. Selecting a clip
+switches to Clips and starts it. The command palette shows records from the
+active workflow.
 
-If an exercise clip file is missing, select that exercise to rebuild it from
-the saved source file and time range. The app updates the existing exercise
+If a clip file is missing, select that clip to rebuild it from
+the saved source file and time range. The app updates the existing clip
 record and starts playback after the rebuild. If the source file is also
 missing, refetch the source first.
 
@@ -204,8 +232,10 @@ deletes the previous word.
 
 Download and export diagnostics are stored as `yt-dlp.log` and `ffmpeg.log` in
 the application-support directory. Use the **Data** control to open the library
-data dialog. The dialog can open that directory in Finder, export portable
-library metadata, or import a previous export.
+data dialog. Press **01** to export both workflows, **02** to export the current
+workflow, **03** to import, **04** to open the directory in Finder, or **05** to
+close. Import reads the file scope and replaces only that scope. Its
+confirmation actions use **01 Replace and Recover** and **02 Cancel**.
 
 Select the footer notification to open the notification history. The modal
 shows the newest entries first and keeps the selected entry visible while new
@@ -217,31 +247,38 @@ when more tasks are active. The application keeps the newest 10,000 entries in
 its local SQLite database. Library export and import do not transfer or replace
 this local activity history.
 
-Library exports use the versioned `.vocaltraining.json` format. They contain
-source URLs, saved quality metadata, transcripts, timestamp hints, and exercise
-definitions. They do not contain downloaded videos or exercise clips. Import
-validates the complete file, then replaces the library records in one database
-transaction. Existing media files remain in place. The app recovers each
-source sequentially at its exact saved resolution and rebuilds its exercises.
+Library exports use the versioned `.hwvideoclips.json` format. They contain
+source URLs, saved quality metadata, transcripts, timestamp hints, and clip
+definitions, including Dancing clip settings. They do not contain downloaded
+videos or clips. Import validates the complete file, then replaces the selected
+scope in one database transaction. Existing media files remain in place. The
+app recovers each source sequentially at its exact saved resolution and
+rebuilds its clips. Legacy `.vocaltraining.json` files import into Vocal only.
 If that resolution is no longer available, the source remains missing for
 manual refetch.
 
 ### Command-line control
 
-The debug build creates `build/vocal-training`. Each command writes one JSON
+The debug build creates `build/hw_videoClips`. Each command writes one JSON
 result to standard output. Failed media commands include the diagnostic path.
 
 ```sh
-build/vocal-training source add --url 'https://youtu.be/VIDEO_ID?t=120'
-build/vocal-training source list
-build/vocal-training transcript get --source VIDEO_ID
-build/vocal-training clip create \
+build/hw_videoClips source add --url 'https://youtu.be/VIDEO_ID?t=120'
+build/hw_videoClips source list
+build/hw_videoClips source add --workflow dancing --url 'https://youtu.be/VIDEO_ID'
+build/hw_videoClips source list --workflow dancing
+build/hw_videoClips transcript get --source VIDEO_ID
+build/hw_videoClips clip create \
   --source VIDEO_ID \
   --from-segment VIDEO_ID-12 \
   --to-segment VIDEO_ID-18 \
   --name 'Descending scale'
-build/vocal-training clip list --source VIDEO_ID
+build/hw_videoClips clip list --source VIDEO_ID
 ```
+
+Source, transcript, and clip commands accept `--workflow vocal|dancing`.
+Vocal is the default. The command resolves video IDs within that workflow and
+writes the workflow name into source and clip JSON results.
 
 `source add` selects compatible media at or below 1080p. Use `--max-height N`
 to set another limit. The command downloads one URL at a time. If backup
@@ -249,7 +286,7 @@ verification fails, the command stops. Add `--allow-without-backup` to
 explicitly continue without a new restore point.
 
 `clip create` starts at the first segment start. It ends at the last segment
-start plus its duration. The command saves the MP4 as an exercise.
+start plus its duration. The command saves the MP4 as a clip.
 
 The GUI owns the library while it runs. CLI commands then use its private local
 socket. When the GUI is closed, the CLI locks and updates the library directly.
@@ -311,7 +348,7 @@ output device changes.
 
 The interface uses the bundled Iosevka Regular font and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface, including the compact
-`VOCAL TRAINING` title. Container text is shaped as a complete CoreText line,
+`hw_videoClips` title. Container text is shaped as a complete CoreText line,
 then positioned from its measured
 advance and ascent/descent metrics. Measurement, alignment, truncation, and
 drawing reuse that same shaped line, preserving kerning, ligatures, fallback
@@ -340,7 +377,7 @@ The application builds each visible interactive control once per frame. Each
 control record contains a stable functional name, rectangle, action, state,
 and capability flags. Pointer input, macOS accessibility, and Flash navigation
 consume the same records. Dynamic controls include a durable source, segment,
-or exercise identifier in their functional name. Static panels and labels stay
+or clip identifier in their functional name. Static panels and labels stay
 outside the control registry.
 
 The structural UI checker rebuilds and serializes the current control registry
@@ -365,7 +402,7 @@ executes the selected opaque identifier. One session arena owns each open
 entry snapshot. Query, result, and ranked-index buffers retain their capacity
 between edits and sessions.
 
-SQLite stores sources, transcript segments, hints, exercises, source metadata,
+SQLite stores sources, transcript segments, hints, clips, source metadata,
 library revisions, and entity changes. It also stores the newest 10,000
 structured notifications. The main thread commits records, revisions, and
 change rows in one transaction. `src/library_recovery.odin` owns verified
@@ -405,7 +442,7 @@ stores one contiguous segment span for each source. Search and transcript
 retrieval pass the active source slice directly to their consumers.
 Replacement installs the new generation before destroying the old one.
 
-Sources, import hints, exercises, and mutable UI strings remain individually
+Sources, import hints, clips, and mutable UI strings remain individually
 heap-owned because they change independently. Core Foundation, Objective-C,
 AVFoundation, and Metal objects retain explicit release calls; an arena reset
 never substitutes for framework reference counting.
@@ -439,7 +476,7 @@ and emits a matching dSYM:
 
 ```sh
 ./build.sh
-open build/VocalTraining.app
+open build/hw_videoClips.app
 ```
 
 Other build modes use separate output directories:
@@ -453,7 +490,7 @@ Other build modes use separate output directories:
 The legacy scripted import form remains available and returns JSON:
 
 ```sh
-build/VocalTraining.app/Contents/MacOS/VocalTraining --import 'https://youtu.be/VIDEO_ID?t=SECONDS'
+build/hw_videoClips.app/Contents/MacOS/hw_videoClips --import 'https://youtu.be/VIDEO_ID?t=SECONDS'
 ```
 
 ### Release TODO
@@ -536,7 +573,7 @@ The watcher samples resident memory every ten seconds. Two consecutive samples
 above 1 GB create a live diagnostic bundle in `build/memory-diagnostics/`.
 The bundle contains process, VM, footprint, heap, and stack data. It also
 contains the binary UUID and Git revision. The watcher keeps the app running
-and retains the newest 20 bundles. Set `VT_MEMORY_WARN_KB` to a lower positive
+and retains the newest 20 bundles. Set `HW_VIDEO_CLIPS_MEMORY_WARN_KB` to a lower positive
 value when testing this guard.
 
 ### Crash diagnosis

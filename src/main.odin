@@ -48,8 +48,14 @@ Source_Metadata_Status :: enum i32 {
 	Unavailable,
 }
 
+Workflow_Kind :: enum i32 {
+	Vocal,
+	Dancing,
+}
+
 Source_Video :: struct {
 	id: string,
+	workflow: Workflow_Kind,
 	video_id: string,
 	title: string,
 	url: string,
@@ -79,14 +85,21 @@ Import_Hint :: struct {
 	seconds: f64,
 }
 
-Exercise :: struct {
+Clip :: struct {
 	id: string,
 	source_id: string,
+	workflow: Workflow_Kind,
 	name: string,
 	start_seconds: f64,
 	end_seconds: f64,
 	clip_path: string,
 	last_randomized_sequence: i64 `json:"-"`,
+	dance_mirrored: bool,
+	dance_loop: bool,
+	dance_count_in_beats: int,
+	dance_count_each_loop: bool,
+	dance_count_in_bpm: int,
+	dance_playback_rate: f32,
 }
 
 App_State :: struct {
@@ -94,9 +107,9 @@ App_State :: struct {
 	url_input: Id,
 	status: Id,
 	player: Id,
-	exercise_name_input: Id,
+	clip_name_input: Id,
 	source_search_input: Id,
-	exercise_search_input: Id,
+	clip_search_input: Id,
 	delegate_target: Id,
 	active_source: int,
 	range_start: f64,
@@ -108,7 +121,7 @@ App_State :: struct {
 	sources: [dynamic]Source_Video,
 	transcripts: Transcript_Generation,
 	hints: [dynamic]Import_Hint,
-	exercises: [dynamic]Exercise,
+	clips: [dynamic]Clip,
 }
 
 state: App_State
@@ -150,7 +163,7 @@ Import_Phase :: enum {
 	Validating_Existing_Media,
 	Downloading,
 	Validating_Downloaded_Media,
-	Rebuilding_Exercises,
+	Rebuilding_Clips,
 }
 
 Import_Job :: struct {
@@ -158,9 +171,10 @@ Import_Job :: struct {
 	completion_target: Id,
 	arena: ^mem_virtual.Arena,
 	input: string,
+	workflow: Workflow_Kind,
 	sources: [dynamic]Source_Video,
 	hints: [dynamic]Import_Hint,
-	exercises: [dynamic]Exercise,
+	clips: [dynamic]Clip,
 	new_sources: [dynamic]Source_Video,
 	new_hints: [dynamic]Import_Hint,
 	qualities: [dynamic]Import_Quality,
@@ -179,8 +193,8 @@ Import_Job :: struct {
 	existing_sources: int,
 	updated_hints: int,
 	latest_updated_hint: f64,
-	refreshed_exercises: int,
-	failed_exercise_refreshes: int,
+	refreshed_clips: int,
+	failed_clip_refreshes: int,
 	missing_merged_media: int,
 	invalid_merged_media: int,
 	process_mutex: sync.Mutex,
@@ -214,7 +228,7 @@ Export_Job :: struct {
 	thread: ^thread.Thread,
 	completion_target: Id,
 	arena: ^mem_virtual.Arena,
-	exercise: Exercise,
+	clip: Clip,
 	source_path: string,
 	operation: Export_Operation,
 	notification_id: i64,
@@ -224,6 +238,7 @@ Export_Job :: struct {
 Library_Recovery_Entry :: struct {
 	video_id: string,
 	height:   int,
+	workflow: Workflow_Kind,
 }
 
 Library_Recovery :: struct {
@@ -237,11 +252,13 @@ Library_Recovery :: struct {
 
 library_recovery: ^Library_Recovery
 pending_library_import: App_State
+pending_library_import_scope: Portable_Library_Scope
 
 Source_Metadata_Job :: struct {
 	thread: ^thread.Thread,
 	completion_target: Id,
 	video_id: string,
+	workflow: Workflow_Kind,
 	media_path: string,
 	metadata: Source_Context_Metadata,
 	metadata_loaded: bool,
@@ -341,8 +358,8 @@ set_text :: proc(control: Id, text: string) {
 		_ = notification_post_info(text)
 		return
 	}
-	if control == state.exercise_name_input {
-		ui_set_string(&ui.exercise_name, text)
+	if control == state.clip_name_input {
+		ui_set_string(&ui.clip_name, text)
 		ui.needs_redraw = true
 		return
 	}
@@ -382,8 +399,8 @@ field_text :: proc(control: Id) -> string {
 	if control == nil { return "" }
 	if control == state.url_input { return ui.url_input }
 	if control == state.source_search_input { return ui.source_search }
-	if control == state.exercise_search_input { return ui.exercise_search }
-	if control == state.exercise_name_input { return ui.exercise_name }
+	if control == state.clip_search_input { return ui.clip_search }
+	if control == state.clip_name_input { return ui.clip_name }
 	value := msg_id(control, sel_registerName("stringValue"))
 	utf8 := msg_id(value, sel_registerName("UTF8String"))
 	if utf8 == nil { return "" }
@@ -450,12 +467,51 @@ shell_quote :: proc(s: string) -> string {
 	return fmt.tprintf("'%s'", escaped)
 }
 
+app_support_migration_conflict: bool
+
+default_app_support_dir :: proc(name: string) -> string {
+	home := getenv("HOME")
+	return fmt.tprintf("%s/Library/Application Support/%s", string(home), name)
+}
+
 app_support_dir :: proc() -> string {
-	if override := getenv("VT_APP_SUPPORT_DIR"); override != nil && len(string(override)) > 0 {
+	if override := getenv("HW_VIDEO_CLIPS_APP_SUPPORT_DIR"); override != nil && len(string(override)) > 0 {
 		return string(override)
 	}
-	home := getenv("HOME")
-	return fmt.tprintf("%s/Library/Application Support/VocalTraining", string(home))
+	return default_app_support_dir("hw_videoClips")
+}
+
+migrate_legacy_app_support_paths :: proc(
+	current,
+	legacy: string,
+) -> bool {
+	current_exists := os.exists(current)
+	legacy_exists := os.exists(legacy)
+	if !legacy_exists {return true}
+	if current_exists {
+		app_support_migration_conflict =
+			os.exists(fmt.tprintf("%s/library.sqlite3", current)) &&
+			os.exists(fmt.tprintf("%s/library.sqlite3", legacy))
+		return true
+	}
+	if os.rename(legacy, current) {return true}
+	fmt.eprintln(
+		"Unable to move the existing VocalTraining library to ",
+		current,
+		". The original library remains unchanged.",
+	)
+	return false
+}
+
+migrate_legacy_app_support_dir :: proc() -> bool {
+	if override := getenv("HW_VIDEO_CLIPS_APP_SUPPORT_DIR"); override != nil &&
+	   len(string(override)) > 0 {
+		return true
+	}
+	return migrate_legacy_app_support_paths(
+		default_app_support_dir("hw_videoClips"),
+		default_app_support_dir("VocalTraining"),
+	)
 }
 
 diagnostic_log_path :: proc(name: string) -> string {
@@ -470,7 +526,7 @@ download_progress_status :: proc(contents: string) -> (string, bool) {
 	latest := ""
 	remaining_lines := contents
 	for line in strings.split_lines_iterator(&remaining_lines) {
-		if strings.has_prefix(line, "VT_PROGRESS|") {latest = line}
+		if strings.has_prefix(line, "HW_VIDEO_CLIPS_PROGRESS|") {latest = line}
 	}
 	if len(latest) == 0 {return "", false}
 	fields: [5]string
@@ -527,8 +583,8 @@ import_progress_status :: proc(job: ^Import_Job, contents: string) -> string {
 		return fmt.tprintf("%sstarting media download", prefix)
 	case .Validating_Downloaded_Media:
 		return fmt.tprintf("%svalidating downloaded media", prefix)
-	case .Rebuilding_Exercises:
-		return fmt.tprintf("%srebuilding exercises", prefix)
+	case .Rebuilding_Clips:
+		return fmt.tprintf("%srebuilding clips", prefix)
 	}
 	return fmt.tprintf("%spreparing media", prefix)
 }
@@ -559,7 +615,7 @@ refresh_import_progress :: proc() {
 		_ = notification_update(
 			import_job.notification_id,
 			status,
-			"The application validates local media, downloads missing media, and rebuilds saved exercise clips.",
+			"The application validates local media, downloads missing media, and rebuilds saved clips.",
 			fields[:],
 			persist_now = phase_changed,
 		)
@@ -610,11 +666,30 @@ clip_export_command :: proc(source_path, clip_path: string, start_seconds, end_s
 	return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -c:v libx264 -c:a aac -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(diagnostic_log_path("ffmpeg")))
 }
 
+workflow_source_directory :: proc(workflow: Workflow_Kind) -> string {
+	if workflow == .Dancing {
+		return fmt.tprintf("%s/dancing/sources", app_support_dir())
+	}
+	return fmt.tprintf("%s/sources", app_support_dir())
+}
+
+workflow_clip_directory :: proc(workflow: Workflow_Kind) -> string {
+	if workflow == .Dancing {
+		return fmt.tprintf("%s/dancing/clips", app_support_dir())
+	}
+	return fmt.tprintf("%s/clips", app_support_dir())
+}
+
+source_id_for_workflow :: proc(workflow: Workflow_Kind, video_id: string) -> string {
+	if workflow == .Dancing {return fmt.tprintf("dancing-%s", video_id)}
+	return video_id
+}
+
 import_url :: proc(url: string) -> bool {
 	video_id, ok := parse_video_id(url)
 	if !ok { return false }
 	for source, index in state.sources {
-		if source.video_id == video_id {
+		if source.workflow == ui.workflow && source.video_id == video_id {
 			last_imported_source = index
 			if seconds, has_time := parse_timestamp(url); has_time {
 				duplicate := false
@@ -625,30 +700,45 @@ import_url :: proc(url: string) -> bool {
 			return true
 		}
 	}
-	dir := app_support_dir()
-	os.make_directory(dir)
-	os.make_directory(fmt.tprintf("%s/sources", dir))
-	output := fmt.tprintf("%s/sources/%s.%%(ext)s", dir, video_id)
+	source_directory := workflow_source_directory(ui.workflow)
+	os.make_directory(source_directory)
+	output := fmt.tprintf("%s/%s.%%(ext)s", source_directory, video_id)
 	command := youtube_download_command(url, output, diagnostic_log_path("yt-dlp"))
 	c_command := strings.clone_to_cstring(command)
 	defer delete(c_command)
 	run := transmute(proc "c" (cstring) -> int)system_address
 	result := run(c_command)
 	if result != 0 { return false }
-	media_path := fmt.tprintf("%s/sources/%s.mp4", dir, video_id)
+	media_path := fmt.tprintf("%s/%s.mp4", source_directory, video_id)
 	if !os.exists(media_path) {return false}
-	id_copy := strings.clone(video_id)
+	id_copy := strings.clone(source_id_for_workflow(ui.workflow, video_id))
 	url_copy := strings.clone(url)
-	append(&state.sources, Source_Video{id=id_copy, video_id=strings.clone(video_id), title=strings.clone(video_id), url=url_copy, media_path=strings.clone(media_path), media_available=true})
+	append(&state.sources, Source_Video{
+		id=id_copy,
+		workflow=ui.workflow,
+		video_id=strings.clone(video_id),
+		title=strings.clone(video_id),
+		url=url_copy,
+		media_path=strings.clone(media_path),
+		media_available=true,
+	})
 	last_imported_source = len(state.sources)-1
-	if metadata, loaded := load_download_metadata(video_id); loaded {
+	if metadata, loaded := load_download_metadata(video_id, ui.workflow); loaded {
 		delete(state.sources[len(state.sources)-1].title)
 		state.sources[len(state.sources)-1].title = strings.clone(metadata.title)
 		state.sources[len(state.sources)-1].duration = metadata.duration
 		delete(metadata.title)
 	}
 	if seconds, has_time := parse_timestamp(url); has_time {
-		append(&state.hints, Import_Hint{source_id=strings.clone(video_id), seconds=seconds})
+		append(
+			&state.hints,
+			Import_Hint{
+				source_id=strings.clone(
+					state.sources[len(state.sources)-1].id,
+				),
+				seconds=seconds,
+			},
+		)
 		state.pending_hint, state.has_pending_hint = seconds, true
 	}
 	load_youtube_transcript(&state.sources[len(state.sources)-1])
@@ -731,12 +821,12 @@ validate_startup_helpers :: proc() {
 	ffmpeg := check_helper_once("ffmpeg")
 	if yt_dlp.available && ffmpeg.available { return }
 
-	message := "Vocal Training checked its media helpers before starting."
+	message := "hw_videoClips checked its media helpers before starting."
 	if !yt_dlp.available {
 		message = fmt.tprintf("%s\n\n%s. YouTube import and refetch are unavailable.", message, yt_dlp.reason)
 	}
 	if !ffmpeg.available {
-		message = fmt.tprintf("%s\n\n%s. Import, refetch, preview, and exercise export are unavailable.", message, ffmpeg.reason)
+		message = fmt.tprintf("%s\n\n%s. Import, refetch, preview, and clip export are unavailable.", message, ffmpeg.reason)
 	}
 	message = fmt.tprintf("%s\n\nNo media task was started. Contact the person who provided this app.", message)
 	set_text(state.status, message)
@@ -763,17 +853,17 @@ current_seconds :: proc() -> (f64, bool) {
 	return f64(t.value)/f64(t.timescale), true
 }
 
-valid_exercise_range :: proc(start, end, source_duration: f64) -> bool {
+valid_clip_range :: proc(start, end, source_duration: f64) -> bool {
 	return start >= 0 &&
 	       end - start >= 1 &&
 	       (source_duration <= 0 || end <= source_duration)
 }
 
-active_exercise_range_is_valid :: proc() -> bool {
+active_clip_range_is_valid :: proc() -> bool {
 	if state.active_source < 0 || state.active_source >= len(state.sources) {return false}
 	return state.has_start &&
 	       state.has_end &&
-	       valid_exercise_range(
+	       valid_clip_range(
 			state.range_start,
 			state.range_end,
 			state.sources[state.active_source].duration,
@@ -787,39 +877,39 @@ source_index_for_id :: proc(sources: []Source_Video, source_id: string) -> int {
 	return -1
 }
 
-exercise_index_for_id :: proc(exercises: []Exercise, exercise_id: string) -> int {
-	for exercise, index in exercises {
-		if exercise.id == exercise_id {return index}
+clip_index_for_id :: proc(clips: []Clip, clip_id: string) -> int {
+	for clip, index in clips {
+		if clip.id == clip_id {return index}
 	}
 	return -1
 }
 
-source_index_for_exercise :: proc(
+source_index_for_clip :: proc(
 	sources: []Source_Video,
-	exercises: []Exercise,
-	exercise_index: int,
+	clips: []Clip,
+	clip_index: int,
 ) -> int {
-	if exercise_index < 0 || exercise_index >= len(exercises) {return -1}
-	return source_index_for_id(sources, exercises[exercise_index].source_id)
+	if clip_index < 0 || clip_index >= len(clips) {return -1}
+	return source_index_for_id(sources, clips[clip_index].source_id)
 }
 
-rename_exercise :: proc(index: int, name: string) -> bool {
-	if index < 0 || index >= len(state.exercises) {return false}
+rename_clip :: proc(index: int, name: string) -> bool {
+	if index < 0 || index >= len(state.clips) {return false}
 	trimmed := strings.trim_space(name)
 	if len(trimmed) == 0 {return false}
-	exercise := &state.exercises[index]
-	if exercise.name == trimmed {return true}
+	clip := &state.clips[index]
+	if clip.name == trimmed {return true}
 	replacement, err := strings.clone(trimmed)
 	if err != nil {return false}
-	original := exercise.name
-	exercise.name = replacement
+	original := clip.name
+	clip.name = replacement
 	if !save_library() {
-		exercise.name = original
+		clip.name = original
 		delete(replacement)
 		return false
 	}
 	delete(original)
-	refresh_exercises()
+	refresh_clips()
 	return true
 }
 
@@ -838,6 +928,7 @@ seek_video_seconds :: proc(seconds: f64) {
 
 seek_seconds :: proc(seconds: f64) {
 	if state.player == nil { return }
+	cancel_dance_count_in()
 	ui.playback_completion_pending = false
 	request_transcript_follow_to(seconds)
 	resume := msg_f32(state.player, sel_registerName("rate")) > 0
@@ -855,6 +946,7 @@ scrub_player_by :: proc(delta: f64) {
 
 start_loaded_playback_at :: proc(seconds: f64) {
 	if state.player == nil {return}
+	cancel_dance_count_in()
 	ui.playback_completion_pending = false
 	request_transcript_follow_to(seconds)
 	seek_video_seconds(seconds)
@@ -864,6 +956,89 @@ start_loaded_playback_at :: proc(seconds: f64) {
 	} else {
 		set_error_status("Unable to start audio playback")
 	}
+}
+
+cancel_dance_count_in :: proc() {
+	ui.count_in_active = false
+	ui.count_in_value = 0
+	ui.count_in_remaining = 0
+	ui.count_in_deadline_ms = 0
+	ui.count_in_for_loop = false
+}
+
+dance_count_in_interval_ms :: proc(bpm: int) -> i64 {
+	return max(i64(1), i64(60_000 / max(1, bpm)))
+}
+
+begin_dance_count_in :: proc(for_loop: bool) -> bool {
+	clip := active_dance_clip()
+	if state.player == nil ||
+	   clip == nil ||
+	   clip.dance_count_in_beats == 0 ||
+	   (for_loop && !clip.dance_count_each_loop) {
+		return false
+	}
+	cancel_dance_count_in()
+	msg_void(state.player, sel_registerName("pause"))
+	metal_audio_pause()
+	seek_video_seconds(0)
+	metal_audio_seek(0, false)
+	request_transcript_follow_to(0)
+	ui.playback_completion_pending = false
+	ui.count_in_active = true
+	ui.count_in_value = 1
+	ui.count_in_remaining = clip.dance_count_in_beats
+	ui.count_in_for_loop = for_loop
+	ui.count_in_deadline_ms =
+		numbered_action_time_ms() +
+		dance_count_in_interval_ms(clip.dance_count_in_bpm)
+	set_text(
+		state.status,
+		fmt.tprintf(
+			"Count-in %d of %d",
+			ui.count_in_value,
+			clip.dance_count_in_beats,
+		),
+	)
+	ui.needs_redraw = true
+	return true
+}
+
+start_active_clip_from_beginning :: proc(for_loop: bool) {
+	if begin_dance_count_in(for_loop) {return}
+	start_loaded_playback_at(0)
+}
+
+advance_dance_count_in :: proc(now_ms: i64) -> bool {
+	if !ui.count_in_active {return false}
+	clip := active_dance_clip()
+	if clip == nil || state.player == nil {
+		cancel_dance_count_in()
+		return true
+	}
+	interval := dance_count_in_interval_ms(clip.dance_count_in_bpm)
+	changed := false
+	for ui.count_in_active && now_ms >= ui.count_in_deadline_ms {
+		ui.count_in_remaining -= 1
+		changed = true
+		if ui.count_in_remaining <= 0 {
+			cancel_dance_count_in()
+			start_loaded_playback_at(0)
+			break
+		}
+		ui.count_in_value += 1
+		ui.count_in_deadline_ms += interval
+		set_text(
+			state.status,
+			fmt.tprintf(
+				"Count-in %d of %d",
+				ui.count_in_value,
+				clip.dance_count_in_beats,
+			),
+		)
+	}
+	if changed {ui.needs_redraw = true}
+	return changed
 }
 
 source_initial_seconds :: proc(source_index: int) -> f64 {
@@ -925,6 +1100,7 @@ select_source_hint :: proc(source_index: int, seconds: f64) -> bool {
 
 stop_player_playback :: proc() {
 	if state.player == nil {return}
+	cancel_dance_count_in()
 	ui.playback_completion_pending = false
 	msg_void(state.player, sel_registerName("pause"))
 	metal_audio_pause()
@@ -934,6 +1110,7 @@ stop_player_playback :: proc() {
 
 pause_player_playback :: proc() {
 	if state.player == nil {return}
+	cancel_dance_count_in()
 	ui.playback_completion_pending = false
 	msg_void(state.player, sel_registerName("pause"))
 	metal_audio_pause()
@@ -945,8 +1122,9 @@ resume_player_playback :: proc() -> bool {
 	seconds, ok := current_seconds()
 	if !ok {return false}
 	if playback_position_finished(seconds, ui.player_duration) {
-		start_loaded_playback_at(0)
-		return msg_f32(state.player, sel_registerName("rate")) > 0
+		start_active_clip_from_beginning(false)
+		return ui.count_in_active ||
+		       msg_f32(state.player, sel_registerName("rate")) > 0
 	}
 	metal_audio_seek(seconds, false)
 	if !metal_audio_play() {return false}
@@ -959,20 +1137,20 @@ playback_position_finished :: proc(seconds, duration: f64) -> bool {
 	return duration > 0 && seconds >= max(0, duration - 0.05)
 }
 
-exercise_autoplay_should_advance :: proc(
+clip_autoplay_should_advance :: proc(
 	enabled,
 	completion_pending,
 	source_playback: bool,
 	mode: UI_Mode,
-	active_exercise,
-	exercise_count: int,
+	active_clip,
+	clip_count: int,
 ) -> bool {
 	return enabled &&
 	       completion_pending &&
 	       !source_playback &&
 	       mode == .Play &&
-	       active_exercise >= 0 &&
-	       active_exercise < exercise_count
+	       active_clip >= 0 &&
+	       active_clip < clip_count
 }
 
 reset_player_playback :: proc() {
@@ -987,6 +1165,7 @@ reset_player_playback :: proc() {
 
 load_source_player :: proc(index: int) -> bool {
 	if index < 0 || index >= len(state.sources) { return false }
+	if state.sources[index].workflow != ui.workflow {return false}
 	ui.source_hint_menu_open = false
 	source := &state.sources[index]
 	state.active_source = index
@@ -997,11 +1176,13 @@ load_source_player :: proc(index: int) -> bool {
 		return false
 	}
 	path := source.media_path
+	ui.playback_rate =
+		source.workflow == .Vocal ? ui.vocal_playback_rate : 1
 	if !metal_player_load(path) {metal_player_clear(); return false}
 	ui.player_duration = source.duration
 	set_source_playback_active(true)
 	state.has_start, state.has_end = false, false
-	set_text(state.exercise_name_input, "")
+	set_text(state.clip_name_input, "")
 	if state.has_pending_hint {
 		seek_seconds(state.pending_hint)
 		state.has_pending_hint = false
@@ -1021,7 +1202,7 @@ refresh_sources :: proc() {
 	ui.needs_redraw = true
 }
 
-refresh_exercises :: proc() {
+refresh_clips :: proc() {
 	ui.needs_redraw = true
 }
 
@@ -1044,11 +1225,11 @@ on_seek_transcript :: proc "c" (self: Id, command: Sel, sender: Id) {
 	seek_seconds(f64(tag)/1000)
 }
 
-export_exercise :: proc(exercise: ^Exercise, source_path: string, allocator := context.allocator) -> bool {
-	dir := app_support_dir()
-	os.make_directory(fmt.tprintf("%s/clips", dir))
-	exercise.clip_path = fmt.aprintf("%s/clips/%s.mp4", dir, exercise.id, allocator=allocator)
-	command := clip_export_command(source_path, exercise.clip_path, exercise.start_seconds, exercise.end_seconds)
+export_clip :: proc(clip: ^Clip, source_path: string, allocator := context.allocator) -> bool {
+	dir := workflow_clip_directory(clip.workflow)
+	os.make_directory(dir)
+	clip.clip_path = fmt.aprintf("%s/%s.mp4", dir, clip.id, allocator=allocator)
+	command := clip_export_command(source_path, clip.clip_path, clip.start_seconds, clip.end_seconds)
 	c_command := strings.clone_to_cstring(command)
 	defer delete(c_command)
 	run := transmute(proc "c" (cstring) -> int)system_address
@@ -1063,7 +1244,11 @@ import_job_destroy :: proc(job: ^Import_Job) {
 	free(job)
 }
 
-import_job_create :: proc(input: string, replace_video_id := "") -> ^Import_Job {
+import_job_create :: proc(
+	input: string,
+	replace_video_id := "",
+	workflow := ui.workflow,
+) -> ^Import_Job {
 	arena, ok := growing_arena_create()
 	if !ok { return nil }
 	job := new(Import_Job)
@@ -1071,10 +1256,11 @@ import_job_create :: proc(input: string, replace_video_id := "") -> ^Import_Job 
 	job.completion_target = state.delegate_target
 	allocator := mem_virtual.arena_allocator(arena)
 	job.input = strings.clone(input, allocator)
+	job.workflow = workflow
 	job.replace_video_id = strings.clone(replace_video_id, allocator)
 	job.sources = make([dynamic]Source_Video, 0, len(state.sources), allocator)
 	job.hints = make([dynamic]Import_Hint, 0, len(state.hints), allocator)
-	job.exercises = make([dynamic]Exercise, 0, len(state.exercises), allocator)
+	job.clips = make([dynamic]Clip, 0, len(state.clips), allocator)
 	job.new_sources = make([dynamic]Source_Video, allocator)
 	job.new_hints = make([dynamic]Import_Hint, allocator)
 	job.qualities = make([dynamic]Import_Quality, allocator)
@@ -1102,10 +1288,10 @@ import_job_create :: proc(input: string, replace_video_id := "") -> ^Import_Job 
 		if !copied { import_job_destroy(job); return nil }
 		append(&job.hints, copy)
 	}
-	for exercise in state.exercises {
-		copy, copied := clone_exercise(exercise, allocator)
+	for clip in state.clips {
+		copy, copied := clone_clip(clip, allocator)
 		if !copied { import_job_destroy(job); return nil }
-		append(&job.exercises, copy)
+		append(&job.clips, copy)
 	}
 	job.snapshot_transcripts, ok = transcript_generation_copy(state.transcripts.segments[:])
 	if !ok { import_job_destroy(job); return nil }
@@ -1113,8 +1299,16 @@ import_job_create :: proc(input: string, replace_video_id := "") -> ^Import_Job 
 }
 
 import_job_find_source :: proc(job: ^Import_Job, video_id: string) -> ^Source_Video {
-	for &source in job.sources { if source.video_id == video_id { return &source } }
-	for &source in job.new_sources { if source.video_id == video_id { return &source } }
+	for &source in job.sources {
+		if source.workflow == job.workflow && source.video_id == video_id {
+			return &source
+		}
+	}
+	for &source in job.new_sources {
+		if source.workflow == job.workflow && source.video_id == video_id {
+			return &source
+		}
+	}
 	return nil
 }
 
@@ -1307,7 +1501,7 @@ import_download_command :: proc(
 		"mp4",
 		"--newline",
 		"--progress-template",
-		"download:VT_PROGRESS|%(progress._percent_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+		"download:HW_VIDEO_CLIPS_PROGRESS|%(progress._percent_str)s|%(progress._total_bytes_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
 		"-o",
 		output,
 		url,
@@ -1315,25 +1509,25 @@ import_download_command :: proc(
 	return command
 }
 
-import_job_rebuild_exercises :: proc(job: ^Import_Job, source: ^Source_Video) {
-	import_job_set_phase(job, .Rebuilding_Exercises)
+import_job_rebuild_clips :: proc(job: ^Import_Job, source: ^Source_Video) {
+	import_job_set_phase(job, .Rebuilding_Clips)
 	run := transmute(proc "c" (cstring) -> int)system_address
-	os.make_directory(fmt.tprintf("%s/clips", app_support_dir()))
-	for exercise in job.exercises {
-		if exercise.source_id != source.id || len(exercise.clip_path) == 0 {continue}
+	os.make_directory(workflow_clip_directory(source.workflow))
+	for clip in job.clips {
+		if clip.source_id != source.id || len(clip.clip_path) == 0 {continue}
 		command := clip_export_command(
 			source.media_path,
-			exercise.clip_path,
-			exercise.start_seconds,
-			exercise.end_seconds,
+			clip.clip_path,
+			clip.start_seconds,
+			clip.end_seconds,
 		)
 		c_command := strings.clone_to_cstring(command)
 		result := run(c_command)
 		delete(c_command)
 		if result == 0 {
-			job.refreshed_exercises += 1
+			job.refreshed_clips += 1
 		} else {
-			job.failed_exercise_refreshes += 1
+			job.failed_clip_refreshes += 1
 		}
 	}
 }
@@ -1357,7 +1551,7 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 		if job.reuse_existing_media && os.exists(source.media_path) {
 			import_job_set_phase(job, .Validating_Existing_Media)
 			if media_file_validate(source.media_path) {
-				import_job_rebuild_exercises(job, source)
+				import_job_rebuild_clips(job, source)
 				return true
 			}
 		}
@@ -1366,10 +1560,8 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 		}
 	}
 
-	dir := app_support_dir()
-	os.make_directory(dir)
-	os.make_directory(fmt.tprintf("%s/sources", dir))
-	source_directory := fmt.tprintf("%s/sources", dir)
+	source_directory := workflow_source_directory(job.workflow)
+	os.make_directory(source_directory)
 	staged_source_cleanup(source_directory, video_id)
 	output := fmt.tprintf("%s/%s.download.%%(ext)s", source_directory, video_id)
 	selected_height, exact_height, auth_browser :=
@@ -1391,24 +1583,29 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 		staged_source_cleanup(source_directory, video_id)
 		return false
 	}
-	media_path := fmt.tprintf("%s/sources/%s.mp4", dir, video_id)
+	media_path := fmt.tprintf("%s/%s.mp4", source_directory, video_id)
 	if !os.exists(media_path) {
 		job.missing_merged_media += 1
 		return false
 	}
 
 	existing := import_job_find_source(job, video_id)
-	source_id := video_id
+	source_id := source_id_for_workflow(job.workflow, video_id)
 	if existing != nil { source_id = existing.id }
 	source := Source_Video{
 		id=strings.clone(source_id, allocator),
+		workflow=job.workflow,
 		video_id=strings.clone(video_id, allocator),
 		title=strings.clone(video_id, allocator),
 		url=strings.clone(url, allocator),
 		media_path=strings.clone(media_path, allocator),
 		media_available=true,
 	}
-	if metadata, loaded := load_download_metadata(video_id, allocator); loaded {
+	if metadata, loaded := load_download_metadata(
+		video_id,
+		job.workflow,
+		allocator,
+	); loaded {
 		delete(source.title, allocator)
 		source.title = metadata.title
 		source.duration = metadata.duration
@@ -1443,7 +1640,7 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 		job.has_transcript_update = true
 	}
 	if existing != nil {
-		import_job_rebuild_exercises(job, &source)
+		import_job_rebuild_clips(job, &source)
 	}
 	return true
 }
@@ -1469,7 +1666,10 @@ import_job_apply :: proc(job: ^Import_Job) -> bool {
 	if job.has_source_update {
 		updated := false
 		for &source in candidate.sources {
-			if source.video_id != job.updated_source.video_id {continue}
+			if source.workflow != job.updated_source.workflow ||
+			   source.video_id != job.updated_source.video_id {
+				continue
+			}
 			copy, copied := clone_source_video(job.updated_source)
 			if !copied {return false}
 			delete_source_video(&source)
@@ -1505,7 +1705,11 @@ import_job_apply :: proc(job: ^Import_Job) -> bool {
 		return false
 	}
 	for source, index in state.sources {
-		if source.video_id == job.last_video_id {last_imported_source = index; break}
+		if source.workflow == job.workflow &&
+		   source.video_id == job.last_video_id {
+			last_imported_source = index
+			break
+		}
 	}
 	if job.has_pending_hint {state.pending_hint, state.has_pending_hint = job.pending_hint, true}
 	return true
@@ -1524,9 +1728,9 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		if !job.cancelled && job.accepted > 0 {
 			success = import_job_apply(job) &&
 			          job.failed == 0 &&
-			          job.failed_exercise_refreshes == 0
+			          job.failed_clip_refreshes == 0
 			refresh_sources()
-			refresh_exercises()
+			refresh_clips()
 		}
 		cancelled := job.cancelled
 		if library_recovery == nil {
@@ -1549,6 +1753,7 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 				if source_index := source_index_for_video_id(
 					state.sources[:],
 					job.replace_video_id,
+					job.workflow,
 				); source_index >= 0 {
 					state.sources[source_index].media_available = false
 				}
@@ -1627,13 +1832,13 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			)
 		}
 	} else if job.has_source_update {
-		if job.failed_exercise_refreshes > 0 {
+		if job.failed_clip_refreshes > 0 {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
 				fmt.tprintf(
-					"Refetched source; %d exercise rebuild(s) failed",
-					job.failed_exercise_refreshes,
+					"Refetched source; %d clip rebuild(s) failed",
+					job.failed_clip_refreshes,
 				),
 				fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("ffmpeg")),
 			)
@@ -1641,7 +1846,7 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			_ = notification_finish(
 				job.notification_id,
 				.Success,
-				fmt.tprintf("Refetched source and rebuilt %d exercise(s)", job.refreshed_exercises),
+				fmt.tprintf("Refetched source and rebuilt %d clip(s)", job.refreshed_clips),
 			)
 		}
 	} else if len(job.new_sources) > 0 {
@@ -1686,21 +1891,33 @@ source_metadata_worker :: proc(t: ^thread.Thread) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	job := cast(^Source_Metadata_Job)t.data
-	job.metadata, job.metadata_loaded = load_source_context_metadata(job.video_id)
+	job.metadata, job.metadata_loaded = load_source_context_metadata(
+		job.video_id,
+		job.workflow,
+	)
 	if file_info, stat_error := os.stat(job.media_path, context.temp_allocator); stat_error == nil {
 		job.metadata.filesize_approx = file_info.size
 	}
 	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("sourceMetadataFinished:"), nil, false)
 }
 
-request_source_metadata :: proc(video_id, media_path: string) {
+request_source_metadata :: proc(
+	video_id,
+	media_path: string,
+	workflow: Workflow_Kind,
+) {
 	if source_metadata_job != nil {return}
 	for source in state.sources {
-		if source.video_id == video_id && source.metadata_status != .Missing {return}
+		if source.workflow == workflow &&
+		   source.video_id == video_id &&
+		   source.metadata_status != .Missing {
+			return
+		}
 	}
 	job := new(Source_Metadata_Job)
 	job.completion_target = state.delegate_target
 	job.video_id = strings.clone(video_id)
+	job.workflow = workflow
 	job.media_path = strings.clone(media_path)
 	worker := thread.create(source_metadata_worker)
 	if worker == nil {
@@ -1718,13 +1935,21 @@ request_next_missing_source_metadata :: proc() {
 	if ui.source_details_open && ui.source_details_index >= 0 && ui.source_details_index < len(state.sources) {
 		source := &state.sources[ui.source_details_index]
 		if source.metadata_status == .Missing {
-			request_source_metadata(source.video_id, source.media_path)
+			request_source_metadata(
+				source.video_id,
+				source.media_path,
+				source.workflow,
+			)
 			return
 		}
 	}
 	for source in state.sources {
 		if source.metadata_status == .Missing {
-			request_source_metadata(source.video_id, source.media_path)
+			request_source_metadata(
+				source.video_id,
+				source.media_path,
+				source.workflow,
+			)
 			return
 		}
 	}
@@ -1740,7 +1965,11 @@ on_source_metadata_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	job.thread = nil
 	source_metadata_job = nil
 	for &source in state.sources {
-		if source.video_id != job.video_id || source.metadata_status != .Missing {continue}
+		if source.workflow != job.workflow ||
+		   source.video_id != job.video_id ||
+		   source.metadata_status != .Missing {
+			continue
+		}
 		delete_source_context_metadata(&source.metadata)
 		source.metadata = job.metadata
 		source.metadata_status = job.metadata_loaded ? .Available : .Unavailable
@@ -1799,9 +2028,15 @@ library_recovery_finish :: proc() {
 	}
 }
 
-source_index_for_video_id :: proc(sources: []Source_Video, video_id: string) -> int {
+source_index_for_video_id :: proc(
+	sources: []Source_Video,
+	video_id: string,
+	workflow := Workflow_Kind.Vocal,
+) -> int {
 	for source, index in sources {
-		if source.video_id == video_id {return index}
+		if source.workflow == workflow && source.video_id == video_id {
+			return index
+		}
 	}
 	return -1
 }
@@ -1812,7 +2047,11 @@ library_recovery_start_next :: proc() {
 		entry_index := library_recovery.next
 		entry := library_recovery.entries[entry_index]
 		library_recovery.next += 1
-		source_index := source_index_for_video_id(state.sources[:], entry.video_id)
+		source_index := source_index_for_video_id(
+			state.sources[:],
+			entry.video_id,
+			entry.workflow,
+		)
 		if source_index < 0 {
 			library_recovery.failed += 1
 			continue
@@ -1823,7 +2062,7 @@ library_recovery_start_next :: proc() {
 			library_recovery.failed += 1
 			continue
 		}
-		job := import_job_create(source.url, source.video_id)
+		job := import_job_create(source.url, source.video_id, source.workflow)
 		if job == nil {
 			library_recovery.failed += 1
 			continue
@@ -1889,7 +2128,7 @@ library_recovery_start :: proc() -> bool {
 	recovery := new(Library_Recovery)
 	recovery.notification_id = notification_begin(
 		"Library imported; preparing source recovery",
-		"The imported library records are installed. Media validation and exercise recovery will now run sequentially.",
+		"The imported library records are installed. Media validation and clip recovery will now run sequentially.",
 	)
 	recovery.entries = make(
 		[dynamic]Library_Recovery_Entry,
@@ -1902,6 +2141,7 @@ library_recovery_start :: proc() -> bool {
 			Library_Recovery_Entry {
 				video_id = strings.clone(source.video_id),
 				height = source.metadata.height,
+				workflow = source.workflow,
 			},
 		)
 	}
@@ -1982,7 +2222,7 @@ refetch_source :: proc(
 	source := &state.sources[source_index]
 	allow_without_backup := major_change_backup_override
 	major_change_backup_override = false
-	job := import_job_create(source.url, source.video_id)
+	job := import_job_create(source.url, source.video_id, source.workflow)
 	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
 	job.allow_without_backup = allow_without_backup
 	if maximum_height > 0 {
@@ -2119,13 +2359,13 @@ on_set_end :: proc "c" (self: Id, command: Sel, sender: Id) {
 	} else { set_text(state.status, "No active source player") }
 }
 
-reset_exercise_output :: proc() {
+reset_clip_output :: proc() {
 	state.range_start = 0
 	state.range_end = 0
 	state.has_start = false
 	state.has_end = false
-	ui_set_string(&ui.exercise_name, "")
-	if ui.focus == .Exercise_Name {
+	ui_set_string(&ui.clip_name, "")
+	if ui.focus == .Clip_Name {
 		clear_marked_text()
 		collapse_text_selection(0)
 		ui.scroll_x = 0
@@ -2138,31 +2378,40 @@ on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if export_job != nil { set_text(state.status, "A clip export is already running"); return }
 	if !require_helper("ffmpeg") { return }
-	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_exercise_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
+	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_clip_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
 		set_text(state.status, "Select a source and mark a valid start/end range")
 		return
 	}
 	source := &state.sources[state.active_source]
 	number := 1
-	for exercise in state.exercises { if exercise.source_id == source.id { number += 1 } }
-	id := fmt.tprintf("%s-%d", source.video_id, number)
-	name := fmt.tprintf("%s Exercise %d", source.title, number)
-	entered := strings.trim_space(field_text(state.exercise_name_input))
+	for clip in state.clips { if clip.source_id == source.id { number += 1 } }
+	id := fmt.tprintf("%s-%d", source.id, number)
+	name := fmt.tprintf("%s Clip %d", source.title, number)
+	entered := strings.trim_space(field_text(state.clip_name_input))
 	if len(entered) > 0 { name = entered }
 	job := export_job_create(
-		Exercise{id=id, source_id=source.id, name=name, start_seconds=state.range_start, end_seconds=state.range_end},
+		Clip{
+			id=id,
+			source_id=source.id,
+			workflow=source.workflow,
+			name=name,
+			start_seconds=state.range_start,
+			end_seconds=state.range_end,
+			dance_count_in_bpm=120,
+			dance_playback_rate=1,
+		},
 		source.media_path,
 		.Save,
 	)
 	if job == nil { set_text(state.status, "Unable to allocate export job"); return }
 	fields := [3]Notification_Field{
-		{label="Operation", value="Save exercise"},
+		{label="Operation", value="Save clip"},
 		{label="Source", value=source.title},
 		{label="Range", value=fmt.tprintf("%s – %s", format_timestamp(state.range_start), format_timestamp(state.range_end))},
 	}
 	job.notification_id = notification_begin(
-		"Exporting exercise clip...",
-		"FFmpeg is encoding the selected source range as a standalone exercise clip.",
+		"Exporting clip...",
+		"FFmpeg is encoding the selected source range as a standalone clip.",
 		fields[:],
 	)
 	export_job = job
@@ -2206,13 +2455,22 @@ on_preview :: proc "c" (self: Id, command: Sel, sender: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if export_job != nil { set_text(state.status, "A clip export is already running"); return }
 	if !require_helper("ffmpeg") { return }
-	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_exercise_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
+	if state.active_source < 0 || !state.has_start || !state.has_end || !valid_clip_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
 		set_text(state.status, "Mark a valid start and end before previewing")
 		return
 	}
 	source := &state.sources[state.active_source]
 	job := export_job_create(
-		Exercise{id="preview", source_id=source.id, name="Range Preview", start_seconds=state.range_start, end_seconds=state.range_end},
+		Clip{
+			id="preview",
+			source_id=source.id,
+			workflow=source.workflow,
+			name="Range Preview",
+			start_seconds=state.range_start,
+			end_seconds=state.range_end,
+			dance_count_in_bpm=120,
+			dance_playback_rate=1,
+		},
 		source.media_path,
 		.Preview,
 	)
@@ -2239,7 +2497,7 @@ export_job_destroy :: proc(job: ^Export_Job) {
 }
 
 export_job_create :: proc(
-	exercise: Exercise,
+	clip: Clip,
 	source_path: string,
 	operation: Export_Operation,
 ) -> ^Export_Job {
@@ -2249,9 +2507,9 @@ export_job_create :: proc(
 	job.arena = arena
 	job.completion_target = state.delegate_target
 	allocator := mem_virtual.arena_allocator(arena)
-	copy, copied := clone_exercise(exercise, allocator)
+	copy, copied := clone_clip(clip, allocator)
 	if !copied { export_job_destroy(job); return nil }
-	job.exercise = copy
+	job.clip = copy
 	job.source_path = strings.clone(source_path, allocator)
 	job.operation = operation
 	worker := thread.create(export_worker)
@@ -2264,20 +2522,20 @@ export_job_create :: proc(
 export_worker :: proc(t: ^thread.Thread) {
 	context = runtime.default_context()
 	job := cast(^Export_Job)t.data
-	job.success = export_exercise(&job.exercise, job.source_path, mem_virtual.arena_allocator(job.arena))
+	job.success = export_clip(&job.clip, job.source_path, mem_virtual.arena_allocator(job.arena))
 	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("exportFinished:"), nil, false)
 }
 
-repair_exercise_apply :: proc(value: Exercise) -> (int, bool) {
-	index := exercise_index_for_id(state.exercises[:], value.id)
+repair_clip_apply :: proc(value: Clip) -> (int, bool) {
+	index := clip_index_for_id(state.clips[:], value.id)
 	if index < 0 {return -1, false}
 	candidate, candidate_copied := app_state_collections_clone(&state)
 	if !candidate_copied {return -1, false}
 	defer app_state_collections_destroy(&candidate)
-	repaired, repaired_copied := clone_exercise(value)
+	repaired, repaired_copied := clone_clip(value)
 	if !repaired_copied {return -1, false}
-	delete_exercise(&candidate.exercises[index])
-	candidate.exercises[index] = repaired
+	delete_clip(&candidate.clips[index])
+	candidate.clips[index] = repaired
 	if !commit_library_state(&candidate) {return -1, false}
 	return index, true
 }
@@ -2304,7 +2562,7 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		return
 	}
 	if job.operation == .Preview {
-		if !metal_player_load(job.exercise.clip_path) {
+		if !metal_player_load(job.clip.clip_path) {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
@@ -2312,7 +2570,7 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			)
 			return
 		}
-		ui.player_duration = job.exercise.end_seconds - job.exercise.start_seconds
+		ui.player_duration = job.clip.end_seconds - job.clip.start_seconds
 		set_source_playback_active(false)
 		start_loaded_playback_at(0)
 		_ = notification_finish(
@@ -2320,21 +2578,21 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			.Success,
 			fmt.tprintf(
 				"Previewing %s",
-				format_timestamp(job.exercise.end_seconds-job.exercise.start_seconds),
+				format_timestamp(job.clip.end_seconds-job.clip.start_seconds),
 			),
 		)
 		return
 	}
 	if job.operation == .Repair {
-		if exercise_index_for_id(state.exercises[:], job.exercise.id) < 0 {
+		if clip_index_for_id(state.clips[:], job.clip.id) < 0 {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
-				"The rebuilt exercise is no longer in the library",
+				"The rebuilt clip is no longer in the library",
 			)
 			return
 		}
-		index, repaired := repair_exercise_apply(job.exercise)
+		index, repaired := repair_clip_apply(job.clip)
 		if !repaired {
 			_ = notification_finish(
 				job.notification_id,
@@ -2343,9 +2601,9 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			)
 			return
 		}
-		exercise := &state.exercises[index]
-		refresh_exercises()
-		if !metal_player_load(exercise.clip_path) {
+		clip := &state.clips[index]
+		refresh_clips()
+		if !metal_player_load(clip.clip_path) {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
@@ -2353,31 +2611,31 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			)
 			return
 		}
-		ui.player_duration = exercise.end_seconds - exercise.start_seconds
+		ui.player_duration = clip.end_seconds - clip.start_seconds
 		set_source_playback_active(false)
-		start_loaded_playback_at(0)
-		ui.active_exercise = index
+		ui.active_clip = index
+		start_active_clip_from_beginning(false)
 		_ = notification_finish(
 			job.notification_id,
 			.Success,
-			fmt.tprintf("Rebuilt and playing %s", exercise.name),
+			fmt.tprintf("Rebuilt and playing %s", clip.name),
 		)
 		return
 	}
-	exercise, copied := clone_exercise(job.exercise)
+	clip, copied := clone_clip(job.clip)
 	if !copied {
 		_ = notification_finish(
 			job.notification_id,
 			.Error,
-			"Unable to store exported exercise",
+			"Unable to store exported clip",
 		)
 		return
 	}
-	append(&state.exercises, exercise)
+	append(&state.clips, clip)
 	if !save_library() {
-		stored := pop(&state.exercises)
-		delete_exercise(&stored)
-		_ = os.remove(job.exercise.clip_path)
+		stored := pop(&state.clips)
+		delete_clip(&stored)
+		_ = os.remove(job.clip.clip_path)
 		_ = notification_finish(
 			job.notification_id,
 			.Error,
@@ -2385,15 +2643,15 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		)
 		return
 	}
-	reset_exercise_output()
-	refresh_exercises()
+	reset_clip_output()
+	refresh_clips()
 	_ = notification_finish(
 		job.notification_id,
 		.Success,
 		fmt.tprintf(
 			"Saved %s (%s)",
-			job.exercise.name,
-			format_timestamp(job.exercise.end_seconds-job.exercise.start_seconds),
+			job.clip.name,
+			format_timestamp(job.clip.end_seconds-job.clip.start_seconds),
 		),
 	)
 }
@@ -2404,8 +2662,9 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	index := ui_event_tag
 	if sender != nil { index = int(msg_uint(sender, sel_registerName("tag"))) }
 	if index < 0 || index >= len(state.sources) { return }
+	if state.sources[index].workflow != ui.workflow {return}
 	if load_source_player(index) {
-		ui.active_exercise = -1
+		ui.active_clip = -1
 		set_text(state.status, fmt.tprintf("Loaded %s", state.sources[index].title))
 	} else {
 		source := &state.sources[index]
@@ -2417,41 +2676,47 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	}
 }
 
-play_exercise :: proc(index: int) -> bool {
-	if index < 0 || index >= len(state.exercises) {return false}
-	exercise := &state.exercises[index]
-	if !os.exists(exercise.clip_path) {
+play_clip :: proc(index: int) -> bool {
+	if index < 0 || index >= len(state.clips) {return false}
+	clip := &state.clips[index]
+	if clip.workflow != ui.workflow {return false}
+	if clip.workflow == .Vocal {
+		ui.playback_rate = ui.vocal_playback_rate
+	} else {
+		ui.playback_rate = clamp_playback_rate(clip.dance_playback_rate)
+	}
+	if !os.exists(clip.clip_path) {
 		if export_job != nil {
 			set_text(state.status, "Wait for the active clip export to finish")
 			return false
 		}
-		source_index := source_index_for_id(state.sources[:], exercise.source_id)
+		source_index := source_index_for_id(state.sources[:], clip.source_id)
 		if source_index < 0 {
 			set_text(state.status, "The original source is no longer in the library")
 			return false
 		}
 		source := &state.sources[source_index]
 		if !source.media_available || !os.exists(source.media_path) {
-			set_text(state.status, "The original source file is missing. Refetch the source before rebuilding this exercise.")
+			set_text(state.status, "The original source file is missing. Refetch the source before rebuilding this clip.")
 			return false
 		}
-		if !valid_exercise_range(exercise.start_seconds, exercise.end_seconds, source.duration) {
-			set_text(state.status, "The saved exercise range is not valid for its source")
+		if !valid_clip_range(clip.start_seconds, clip.end_seconds, source.duration) {
+			set_text(state.status, "The saved clip range is not valid for its source")
 			return false
 		}
 		if !require_helper("ffmpeg") {return false}
-		job := export_job_create(exercise^, source.media_path, .Repair)
+		job := export_job_create(clip^, source.media_path, .Repair)
 		if job == nil {
-			set_text(state.status, "Unable to allocate the exercise rebuild job")
+			set_text(state.status, "Unable to allocate the clip rebuild job")
 			return false
 		}
 		fields := [2]Notification_Field{
-			{label="Operation", value="Rebuild exercise"},
-			{label="Exercise", value=exercise.name},
+			{label="Operation", value="Rebuild clip"},
+			{label="Clip", value=clip.name},
 		}
 		job.notification_id = notification_begin(
-			fmt.tprintf("Rebuilding missing clip for %s...", exercise.name),
-			"FFmpeg is recreating the saved exercise from its original source range.",
+			fmt.tprintf("Rebuilding missing clip for %s...", clip.name),
+			"FFmpeg is recreating the saved clip from its original source range.",
 			fields[:],
 		)
 		export_job = job
@@ -2459,90 +2724,95 @@ play_exercise :: proc(index: int) -> bool {
 		thread.start(job.thread)
 		return true
 	}
-	if !metal_player_load(exercise.clip_path) {
-		set_text(state.status, "Unable to load the selected exercise")
+	if !metal_player_load(clip.clip_path) {
+		set_text(state.status, "Unable to load the selected clip")
 		return false
 	}
-	ui.player_duration = exercise.end_seconds - exercise.start_seconds
+	ui.player_duration = clip.end_seconds - clip.start_seconds
 	set_source_playback_active(false)
-	start_loaded_playback_at(0)
-	ui.active_exercise = index
-	set_text(state.status, fmt.tprintf("Playing %s", exercise.name))
+	ui.active_clip = index
+	start_active_clip_from_beginning(false)
+	set_text(state.status, fmt.tprintf("Playing %s", clip.name))
 	return true
 }
 
-on_play_exercise :: proc "c" (self: Id, command: Sel, sender: Id) {
+on_play_clip :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	index := ui_event_tag
 	if sender != nil {index = int(msg_uint(sender, sel_registerName("tag")))}
-	_ = play_exercise(index)
+	_ = play_clip(index)
 }
 
-RANDOM_EXERCISE_BASE_WEIGHT :: 2
-RANDOM_EXERCISE_SKIPPED_CAP :: i64(4)
-RANDOM_EXERCISE_HELP_LIMIT  :: 10
+RANDOM_CLIP_BASE_WEIGHT :: 2
+RANDOM_CLIP_SKIPPED_CAP :: i64(4)
+RANDOM_CLIP_HELP_LIMIT  :: 10
 
-Random_Exercise_Candidate :: struct {
-	exercise_index: int,
+Random_Clip_Candidate :: struct {
+	clip_index: int,
 	weight:         int,
 }
 
-random_exercise_latest_sequence :: proc(exercises: []Exercise) -> i64 {
+random_clip_latest_sequence :: proc(clips: []Clip) -> i64 {
 	latest: i64
-	for exercise in exercises {
-		latest = max(latest, exercise.last_randomized_sequence)
+	for clip in clips {
+		if clip.workflow != ui.workflow {continue}
+		latest = max(latest, clip.last_randomized_sequence)
 	}
 	return latest
 }
 
-random_exercise_weight :: proc(last_sequence, latest_sequence: i64) -> int {
+random_clip_weight :: proc(last_sequence, latest_sequence: i64) -> int {
 	if last_sequence <= 0 {return 6}
 	skipped := min(
 		max(i64(0), latest_sequence - last_sequence),
-		RANDOM_EXERCISE_SKIPPED_CAP,
+		RANDOM_CLIP_SKIPPED_CAP,
 	)
-	return RANDOM_EXERCISE_BASE_WEIGHT + int(skipped)
+	return RANDOM_CLIP_BASE_WEIGHT + int(skipped)
 }
 
-random_exercise_total_weight :: proc(
-	exercises: []Exercise,
-	active_exercise: int,
+random_clip_total_weight :: proc(
+	clips: []Clip,
+	active_clip: int,
 ) -> int {
-	latest := random_exercise_latest_sequence(exercises)
+	latest := random_clip_latest_sequence(clips)
 	exclude_active :=
-		len(exercises) > 1 &&
-		active_exercise >= 0 &&
-		active_exercise < len(exercises)
+		filtered_clip_count_for(clips, "") > 1 &&
+		active_clip >= 0 &&
+		active_clip < len(clips) &&
+		clips[active_clip].workflow == ui.workflow
 	total := 0
-	for exercise, index in exercises {
-		if exclude_active && index == active_exercise {continue}
-		total += random_exercise_weight(
-			exercise.last_randomized_sequence,
+	for clip, index in clips {
+		if clip.workflow != ui.workflow {continue}
+		if exclude_active && index == active_clip {continue}
+		total += random_clip_weight(
+			clip.last_randomized_sequence,
 			latest,
 		)
 	}
 	return total
 }
 
-random_exercise_ranked_candidates :: proc(
-	exercises: []Exercise,
-	active_exercise: int,
-	output: []Random_Exercise_Candidate,
+random_clip_ranked_candidates :: proc(
+	clips: []Clip,
+	active_clip: int,
+	output: []Random_Clip_Candidate,
 ) -> (count, total_weight: int) {
-	total_weight = random_exercise_total_weight(exercises, active_exercise)
+	total_weight = random_clip_total_weight(clips, active_clip)
 	if len(output) == 0 || total_weight <= 0 {return}
-	latest := random_exercise_latest_sequence(exercises)
+	latest := random_clip_latest_sequence(clips)
 	exclude_active :=
-		len(exercises) > 1 &&
-		active_exercise >= 0 &&
-		active_exercise < len(exercises)
-	for exercise, exercise_index in exercises {
-		if exclude_active && exercise_index == active_exercise {continue}
-		candidate := Random_Exercise_Candidate{
-			exercise_index = exercise_index,
-			weight = random_exercise_weight(
-				exercise.last_randomized_sequence,
+		filtered_clip_count_for(clips, "") > 1 &&
+		active_clip >= 0 &&
+		active_clip < len(clips) &&
+		clips[active_clip].workflow == ui.workflow
+	for clip, clip_index in clips {
+		if clip.workflow != ui.workflow {continue}
+		if exclude_active && clip_index == active_clip {continue}
+		candidate := Random_Clip_Candidate{
+			clip_index = clip_index,
+			weight = random_clip_weight(
+				clip.last_randomized_sequence,
 				latest,
 			),
 		}
@@ -2564,22 +2834,24 @@ random_exercise_ranked_candidates :: proc(
 	return
 }
 
-random_exercise_index_for_weighted_roll :: proc(
-	exercises: []Exercise,
-	active_exercise, roll: int,
+random_clip_index_for_weighted_roll :: proc(
+	clips: []Clip,
+	active_clip, roll: int,
 ) -> int {
-	total := random_exercise_total_weight(exercises, active_exercise)
+	total := random_clip_total_weight(clips, active_clip)
 	if total <= 0 {return -1}
 	remaining := roll % total
-	latest := random_exercise_latest_sequence(exercises)
+	latest := random_clip_latest_sequence(clips)
 	exclude_active :=
-		len(exercises) > 1 &&
-		active_exercise >= 0 &&
-		active_exercise < len(exercises)
-	for exercise, index in exercises {
-		if exclude_active && index == active_exercise {continue}
-		weight := random_exercise_weight(
-			exercise.last_randomized_sequence,
+		filtered_clip_count_for(clips, "") > 1 &&
+		active_clip >= 0 &&
+		active_clip < len(clips) &&
+		clips[active_clip].workflow == ui.workflow
+	for clip, index in clips {
+		if clip.workflow != ui.workflow {continue}
+		if exclude_active && index == active_clip {continue}
+		weight := random_clip_weight(
+			clip.last_randomized_sequence,
 			latest,
 		)
 		if remaining < weight {return index}
@@ -2588,133 +2860,134 @@ random_exercise_index_for_weighted_roll :: proc(
 	return -1
 }
 
-record_randomized_exercise :: proc(index: int) -> bool {
-	if index < 0 || index >= len(state.exercises) {return false}
-	next_sequence := random_exercise_latest_sequence(state.exercises[:]) + 1
+record_randomized_clip :: proc(index: int) -> bool {
+	if index < 0 || index >= len(state.clips) {return false}
+	next_sequence := random_clip_latest_sequence(state.clips[:]) + 1
 	if library_legacy_fallback {
-		state.exercises[index].last_randomized_sequence = next_sequence
+		state.clips[index].last_randomized_sequence = next_sequence
 		return true
 	}
-	if !database_exercise_randomization_save(
+	if !database_clip_randomization_save(
 		library_database,
-		state.exercises[index].id,
+		state.clips[index].id,
 		next_sequence,
 	) {
 		return false
 	}
-	state.exercises[index].last_randomized_sequence = next_sequence
+	state.clips[index].last_randomized_sequence = next_sequence
 	return true
 }
 
-randomize_exercise :: proc() -> bool {
-	total_weight := random_exercise_total_weight(
-		state.exercises[:],
-		ui.active_exercise,
+randomize_clip :: proc() -> bool {
+	total_weight := random_clip_total_weight(
+		state.clips[:],
+		ui.active_clip,
 	)
 	if total_weight <= 0 {
-		set_text(state.status, "No exercises are available")
+		set_text(state.status, "No clips are available")
 		return false
 	}
-	index := random_exercise_index_for_weighted_roll(
-		state.exercises[:],
-		ui.active_exercise,
+	index := random_clip_index_for_weighted_roll(
+		state.clips[:],
+		ui.active_clip,
 		rand.int_max(total_weight),
 	)
-	if !play_exercise(index) {return false}
-	if !record_randomized_exercise(index) {
+	if !play_clip(index) {return false}
+	if !record_randomized_clip(index) {
 		set_error_status(
-			"Exercise playback started, but Randomize history could not be saved",
+			"Clip playback started, but Randomize history could not be saved",
 		)
 	}
 	return true
 }
 
-exercise_matches_filter :: proc(exercise: Exercise, filter: string) -> bool {
-	return len(filter) == 0 || strings.contains(exercise.name, filter)
+clip_matches_filter :: proc(clip: Clip, filter: string) -> bool {
+	return clip.workflow == ui.workflow &&
+	       (len(filter) == 0 || strings.contains(clip.name, filter))
 }
 
-filtered_exercise_count_for :: proc(
-	exercises: []Exercise,
+filtered_clip_count_for :: proc(
+	clips: []Clip,
 	filter: string,
 ) -> int {
 	count := 0
-	for exercise in exercises {
-		if exercise_matches_filter(exercise, filter) {count += 1}
+	for clip in clips {
+		if clip_matches_filter(clip, filter) {count += 1}
 	}
 	return count
 }
 
-next_filtered_exercise_index :: proc(
-	exercises: []Exercise,
-	active_exercise: int,
+next_filtered_clip_index :: proc(
+	clips: []Clip,
+	active_clip: int,
 	filter: string,
 ) -> int {
-	if len(exercises) == 0 {return -1}
+	if len(clips) == 0 {return -1}
 	start := -1
-	if active_exercise >= 0 &&
-	   active_exercise < len(exercises) &&
-	   exercise_matches_filter(exercises[active_exercise], filter) {
-		start = active_exercise
+	if active_clip >= 0 &&
+	   active_clip < len(clips) &&
+	   clip_matches_filter(clips[active_clip], filter) {
+		start = active_clip
 	}
-	for offset in 1 ..= len(exercises) {
-		index := (start + offset) % len(exercises)
-		if exercise_matches_filter(exercises[index], filter) {
+	for offset in 1 ..= len(clips) {
+		index := (start + offset) % len(clips)
+		if clip_matches_filter(clips[index], filter) {
 			return index
 		}
 	}
 	return -1
 }
 
-filtered_random_exercise_total_weight :: proc(
-	exercises: []Exercise,
-	active_exercise: int,
+filtered_random_clip_total_weight :: proc(
+	clips: []Clip,
+	active_clip: int,
 	filter: string,
 ) -> int {
-	eligible_count := filtered_exercise_count_for(exercises, filter)
+	eligible_count := filtered_clip_count_for(clips, filter)
 	if eligible_count == 0 {return 0}
-	latest := random_exercise_latest_sequence(exercises)
+	latest := random_clip_latest_sequence(clips)
 	exclude_active :=
 		eligible_count > 1 &&
-		active_exercise >= 0 &&
-		active_exercise < len(exercises) &&
-		exercise_matches_filter(exercises[active_exercise], filter)
+		active_clip >= 0 &&
+		active_clip < len(clips) &&
+		clip_matches_filter(clips[active_clip], filter)
 	total := 0
-	for exercise, index in exercises {
-		if !exercise_matches_filter(exercise, filter) {continue}
-		if exclude_active && index == active_exercise {continue}
-		total += random_exercise_weight(
-			exercise.last_randomized_sequence,
+	for clip, index in clips {
+		if !clip_matches_filter(clip, filter) {continue}
+		if exclude_active && index == active_clip {continue}
+		total += random_clip_weight(
+			clip.last_randomized_sequence,
 			latest,
 		)
 	}
 	return total
 }
 
-filtered_random_exercise_index_for_weighted_roll :: proc(
-	exercises: []Exercise,
-	active_exercise: int,
+filtered_random_clip_index_for_weighted_roll :: proc(
+	clips: []Clip,
+	active_clip: int,
 	filter: string,
 	roll: int,
 ) -> int {
-	total := filtered_random_exercise_total_weight(
-		exercises,
-		active_exercise,
+	total := filtered_random_clip_total_weight(
+		clips,
+		active_clip,
 		filter,
 	)
 	if total <= 0 {return -1}
 	remaining := roll % total
-	latest := random_exercise_latest_sequence(exercises)
-	eligible_count := filtered_exercise_count_for(exercises, filter)
+	latest := random_clip_latest_sequence(clips)
+	eligible_count := filtered_clip_count_for(clips, filter)
 	exclude_active :=
 		eligible_count > 1 &&
-		active_exercise >= 0 &&
-		active_exercise < len(exercises) &&
-		exercise_matches_filter(exercises[active_exercise], filter)
-	for exercise, index in exercises {
-		if !exercise_matches_filter(exercise, filter) {continue}
-		if exclude_active && index == active_exercise {continue}
-		weight := random_exercise_weight(
-			exercise.last_randomized_sequence,
+		active_clip >= 0 &&
+		active_clip < len(clips) &&
+		clip_matches_filter(clips[active_clip], filter)
+	for clip, index in clips {
+		if !clip_matches_filter(clip, filter) {continue}
+		if exclude_active && index == active_clip {continue}
+		weight := random_clip_weight(
+			clip.last_randomized_sequence,
 			latest,
 		)
 		if remaining < weight {return index}
@@ -2723,37 +2996,37 @@ filtered_random_exercise_index_for_weighted_roll :: proc(
 	return -1
 }
 
-play_next_exercise :: proc() -> bool {
+play_next_clip :: proc() -> bool {
 	index := -1
-	if ui.exercise_shuffle {
-		total_weight := filtered_random_exercise_total_weight(
-			state.exercises[:],
-			ui.active_exercise,
-			ui.exercise_search,
+	if ui.clip_shuffle {
+		total_weight := filtered_random_clip_total_weight(
+			state.clips[:],
+			ui.active_clip,
+			ui.clip_search,
 		)
 		if total_weight > 0 {
-			index = filtered_random_exercise_index_for_weighted_roll(
-				state.exercises[:],
-				ui.active_exercise,
-				ui.exercise_search,
+			index = filtered_random_clip_index_for_weighted_roll(
+				state.clips[:],
+				ui.active_clip,
+				ui.clip_search,
 				rand.int_max(total_weight),
 			)
 		}
 	} else {
-		index = next_filtered_exercise_index(
-			state.exercises[:],
-			ui.active_exercise,
-			ui.exercise_search,
+		index = next_filtered_clip_index(
+			state.clips[:],
+			ui.active_clip,
+			ui.clip_search,
 		)
 	}
 	if index < 0 {
-		set_text(state.status, "No exercises match the current filter")
+		set_text(state.status, "No clips match the current filter")
 		return false
 	}
-	if !play_exercise(index) {return false}
-	if ui.exercise_shuffle && !record_randomized_exercise(index) {
+	if !play_clip(index) {return false}
+	if ui.clip_shuffle && !record_randomized_clip(index) {
 		set_error_status(
-			"Exercise playback started, but Shuffle history could not be saved",
+			"Clip playback started, but Shuffle history could not be saved",
 		)
 	}
 	return true
@@ -2763,7 +3036,7 @@ on_filter_lists :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	refresh_sources()
-	refresh_exercises()
+	refresh_clips()
 }
 
 should_terminate_after_window_close :: proc "c" (self: Id, command: Sel, sender: Id) -> bool {
@@ -2787,7 +3060,10 @@ library_transfer_busy :: proc() -> bool {
 	       library_recovery != nil
 }
 
-library_panel_path :: proc(save: bool) -> (string, bool) {
+library_panel_path :: proc(
+	save: bool,
+	scope := Portable_Library_Scope.All,
+) -> (string, bool) {
 	panel_class := save ? objc_getClass("NSSavePanel") : objc_getClass("NSOpenPanel")
 	panel_selector := save ? sel_registerName("savePanel") : sel_registerName("openPanel")
 	panel := msg_id(panel_class, panel_selector)
@@ -2800,10 +3076,16 @@ library_panel_path :: proc(save: bool) -> (string, bool) {
 	msg_void_id(panel, sel_registerName("setAllowedFileTypes:"), extensions)
 	msg_void_bool(panel, sel_registerName("setCanCreateDirectories:"), true)
 	if save {
+		name := "hw_videoClips Library.hwvideoclips.json"
+		if scope == .Vocal {
+			name = "hw_videoClips Vocal Library.hwvideoclips.json"
+		} else if scope == .Dancing {
+			name = "hw_videoClips Dancing Library.hwvideoclips.json"
+		}
 		msg_void_id(
 			panel,
 			sel_registerName("setNameFieldStringValue:"),
-			nsstring("Vocal Training Library.vocaltraining.json"),
+			nsstring(name),
 		)
 	} else {
 		msg_void_bool(panel, sel_registerName("setCanChooseFiles:"), true)
@@ -2819,15 +3101,18 @@ library_panel_path :: proc(save: bool) -> (string, bool) {
 	return path, clone_error == nil
 }
 
-export_library_with_panel :: proc() {
+export_library_with_panel :: proc(
+	scope := Portable_Library_Scope.All,
+) {
 	if library_transfer_busy() {
 		set_error_status("Wait for the active media or metadata operation")
 		return
 	}
-	path, selected := library_panel_path(true)
+	path, selected := library_panel_path(true, scope)
 	if !selected {return}
 	defer delete(path)
-	if export_error := portable_library_export(path); export_error != .None {
+	if export_error := portable_library_export(path, scope);
+	   export_error != .None {
 		set_error_status(portable_library_error_text(export_error))
 		return
 	}
@@ -2843,13 +3128,14 @@ prepare_library_import_with_panel :: proc() {
 	path, selected := library_panel_path(false)
 	if !selected {return}
 	defer delete(path)
-	imported, import_error := portable_library_read(path)
+	imported, scope, import_error := portable_library_read_scoped(path)
 	if import_error != .None {
 		set_error_status(portable_library_error_text(import_error))
 		return
 	}
 	app_state_collections_destroy(&pending_library_import)
 	pending_library_import = imported
+	pending_library_import_scope = scope
 	ui.library_import_confirm_open = true
 	ui.library_import_pending = true
 	ui.needs_redraw = true
@@ -2866,6 +3152,7 @@ confirm_library_import :: proc() {
 	metal_player_clear()
 	if install_error := portable_library_install(
 		&pending_library_import,
+		pending_library_import_scope,
 		allow_without_backup,
 	);
 	   install_error != .None {
@@ -2875,16 +3162,16 @@ confirm_library_import :: proc() {
 	state.active_source = -1
 	state.has_start = false
 	state.has_end = false
-	ui.active_exercise = -1
+	ui.active_clip = -1
 	ui.source_scroll = 0
 	ui.transcript_scroll = 0
-	ui.exercise_scroll = 0
+	ui.clip_scroll = 0
 	ui.data_modal_open = false
 	ui.library_import_confirm_open = false
 	ui.library_import_pending = false
 	ui.source_playback_active = false
 	refresh_sources()
-	refresh_exercises()
+	refresh_clips()
 	_ = library_recovery_start()
 }
 
@@ -2929,7 +3216,7 @@ jobs_shutdown :: proc() {
 	}
 }
 
-vocal_process_main :: proc(args := os.args) {
+video_clips_process_main :: proc(args := os.args) {
 	if !memory_init() { fmt.eprintln("Unable to initialize memory arenas"); return }
 	defer memory_destroy()
 	defer helper_statuses_destroy()
@@ -2951,6 +3238,7 @@ vocal_process_main :: proc(args := os.args) {
 	defer database_close()
 	defer jobs_shutdown()
 	defer cli_ipc_server_stop()
+	if !migrate_legacy_app_support_dir() {return}
 	configure_helper_path()
 	objc_handle := os.dlopen("/usr/lib/libobjc.A.dylib", os.RTLD_NOW)
 	send_address = os.dlsym(objc_handle, "objc_msgSend")
@@ -2995,12 +3283,27 @@ vocal_process_main :: proc(args := os.args) {
 		os.exit(int(result.exit_code))
 	}
 	if !cli_library_try_acquire() {
-		fmt.eprintln("Vocal Training is already running or the library is busy")
+		fmt.eprintln("hw_videoClips is already running or the library is busy")
 		return
 	}
 	load_result := load_library()
 	ui.dark_theme = database_interface_theme_load(library_database)
+	ui.vocal_playback_rate = database_vocal_playback_rate_load(
+		library_database,
+	)
+	active_view := database_active_view_load(library_database)
+	ui.workflow = active_view.workflow
+	ui.mode = active_view.mode
+	ui.playback_rate =
+		ui.workflow == .Vocal ? ui.vocal_playback_rate : 1
 	notification_history_initialize()
+	if app_support_migration_conflict {
+		_ = notification_post(
+			.Info,
+			"Legacy VocalTraining library retained",
+			"Both Application Support directories contain libraries. hw_videoClips opened its own library and did not merge or remove the legacy data.",
+		)
+	}
 	if load_result.mode != .Ready {
 		_ = notification_post(
 			.Error,
@@ -3021,5 +3324,5 @@ vocal_process_main :: proc(args := os.args) {
 }
 
 main :: proc() {
-	vocal_process_main()
+	video_clips_process_main()
 }

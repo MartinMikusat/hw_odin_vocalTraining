@@ -5,41 +5,41 @@ import "core:fmt"
 import "core:strings"
 import "core:unicode/utf8"
 
-Vocal_Shortcut_Modifier :: enum {
+Video_Clips_Shortcut_Modifier :: enum {
 	Control,
 	Option,
 	Shift,
 	Command,
 }
 
-Vocal_Shortcut_Modifiers :: bit_set[Vocal_Shortcut_Modifier]
+Video_Clips_Shortcut_Modifiers :: bit_set[Video_Clips_Shortcut_Modifier]
 
-Vocal_Shortcut_Key_Kind :: enum {
+Video_Clips_Shortcut_Key_Kind :: enum {
 	Character,
 	Named,
 }
 
-Vocal_Shortcut :: struct {
-	kind: Vocal_Shortcut_Key_Kind,
+Video_Clips_Shortcut :: struct {
+	kind: Video_Clips_Shortcut_Key_Kind,
 	key: string,
-	modifiers: Vocal_Shortcut_Modifiers,
+	modifiers: Video_Clips_Shortcut_Modifiers,
 }
 
-Vocal_Shortcut_Wire :: struct {
+Video_Clips_Shortcut_Wire :: struct {
 	version: int,
 	kind: string,
 	key: string,
 	modifiers: []string,
 }
 
-vocal_shortcut_default :: proc() -> Vocal_Shortcut {
+video_clips_shortcut_default :: proc() -> Video_Clips_Shortcut {
 	return {kind = .Character, key = "/"}
 }
 
-vocal_shortcut_clone :: proc(
-	value: Vocal_Shortcut,
+video_clips_shortcut_clone :: proc(
+	value: Video_Clips_Shortcut,
 	allocator := context.allocator,
-) -> Vocal_Shortcut {
+) -> Video_Clips_Shortcut {
 	return {
 		kind = value.kind,
 		key = strings.clone(value.key, allocator),
@@ -47,18 +47,18 @@ vocal_shortcut_clone :: proc(
 	}
 }
 
-vocal_shortcut_destroy :: proc(value: ^Vocal_Shortcut) {
+video_clips_shortcut_destroy :: proc(value: ^Video_Clips_Shortcut) {
 	if value == nil {return}
 	delete(value.key)
 	value^ = {}
 }
 
-vocal_shortcut_equal :: proc(a, b: Vocal_Shortcut) -> bool {
+video_clips_shortcut_equal :: proc(a, b: Video_Clips_Shortcut) -> bool {
 	return a.kind == b.kind && a.key == b.key && a.modifiers == b.modifiers
 }
 
-vocal_shortcut_modifiers_from_event :: proc(flags: uint) -> Vocal_Shortcut_Modifiers {
-	result: Vocal_Shortcut_Modifiers
+video_clips_shortcut_modifiers_from_event :: proc(flags: uint) -> Video_Clips_Shortcut_Modifiers {
+	result: Video_Clips_Shortcut_Modifiers
 	if flags & NSEventModifierFlagControl != 0 {result += {.Control}}
 	if flags & NSEventModifierFlagOption != 0 {result += {.Option}}
 	if flags & NSEventModifierFlagShift != 0 {result += {.Shift}}
@@ -66,7 +66,7 @@ vocal_shortcut_modifiers_from_event :: proc(flags: uint) -> Vocal_Shortcut_Modif
 	return result
 }
 
-vocal_shortcut_named_key :: proc(key_code: uint) -> (string, bool) {
+video_clips_shortcut_named_key :: proc(key_code: uint) -> (string, bool) {
 	switch key_code {
 	case 123: return "left", true
 	case 124: return "right", true
@@ -100,20 +100,20 @@ vocal_shortcut_named_key :: proc(key_code: uint) -> (string, bool) {
 	return "", false
 }
 
-vocal_shortcut_control_key :: proc(key_code: uint) -> bool {
+video_clips_shortcut_control_key :: proc(key_code: uint) -> bool {
 	return key_code == 53 || key_code == 36 || key_code == 76 ||
 	       key_code == 48 || key_code == 51 || key_code == 117
 }
 
-vocal_shortcut_from_event :: proc(
+video_clips_shortcut_from_event :: proc(
 	key_code: uint,
 	text: string,
 	flags: uint,
 	allocator := context.allocator,
-) -> (Vocal_Shortcut, bool) {
-	if vocal_shortcut_control_key(key_code) {return {}, false}
-	modifiers := vocal_shortcut_modifiers_from_event(flags)
-	if named, found := vocal_shortcut_named_key(key_code); found {
+) -> (Video_Clips_Shortcut, bool) {
+	if video_clips_shortcut_control_key(key_code) {return {}, false}
+	modifiers := video_clips_shortcut_modifiers_from_event(flags)
+	if named, found := video_clips_shortcut_named_key(key_code); found {
 		return {
 			kind = .Named,
 			key = strings.clone(named, allocator),
@@ -139,23 +139,23 @@ vocal_shortcut_from_event :: proc(
 	}, true
 }
 
-vocal_shortcut_matches_event :: proc(
-	shortcut: Vocal_Shortcut,
+video_clips_shortcut_matches_event :: proc(
+	shortcut: Video_Clips_Shortcut,
 	key_code: uint,
 	text: string,
 	flags: uint,
 ) -> bool {
-	candidate, valid := vocal_shortcut_from_event(
+	candidate, valid := video_clips_shortcut_from_event(
 		key_code,
 		text,
 		flags,
 		context.temp_allocator,
 	)
-	return valid && vocal_shortcut_equal(shortcut, candidate)
+	return valid && video_clips_shortcut_equal(shortcut, candidate)
 }
 
-vocal_shortcut_display_key :: proc(
-	value: Vocal_Shortcut,
+video_clips_shortcut_display_key :: proc(
+	value: Video_Clips_Shortcut,
 	allocator := context.temp_allocator,
 ) -> string {
 	if value.kind == .Character {
@@ -176,8 +176,8 @@ vocal_shortcut_display_key :: proc(
 	}
 }
 
-vocal_shortcut_display :: proc(
-	value: Vocal_Shortcut,
+video_clips_shortcut_display :: proc(
+	value: Video_Clips_Shortcut,
 	allocator := context.temp_allocator,
 ) -> string {
 	builder: strings.Builder
@@ -186,60 +186,60 @@ vocal_shortcut_display :: proc(
 	if .Option in value.modifiers {strings.write_string(&builder, "⌥")}
 	if .Shift in value.modifiers {strings.write_string(&builder, "⇧")}
 	if .Command in value.modifiers {strings.write_string(&builder, "⌘")}
-	strings.write_string(&builder, vocal_shortcut_display_key(value))
+	strings.write_string(&builder, video_clips_shortcut_display_key(value))
 	return strings.to_string(builder)
 }
 
-vocal_shortcut_character :: proc(
+video_clips_shortcut_character :: proc(
 	key: string,
-	modifiers: Vocal_Shortcut_Modifiers = {},
-) -> Vocal_Shortcut {
+	modifiers: Video_Clips_Shortcut_Modifiers = {},
+) -> Video_Clips_Shortcut {
 	return {kind = .Character, key = key, modifiers = modifiers}
 }
 
-vocal_shortcut_named :: proc(
+video_clips_shortcut_named :: proc(
 	key: string,
-	modifiers: Vocal_Shortcut_Modifiers = {},
-) -> Vocal_Shortcut {
+	modifiers: Video_Clips_Shortcut_Modifiers = {},
+) -> Video_Clips_Shortcut {
 	return {kind = .Named, key = key, modifiers = modifiers}
 }
 
-vocal_shortcut_collision :: proc(value: Vocal_Shortcut) -> (string, bool) {
+video_clips_shortcut_collision :: proc(value: Video_Clips_Shortcut) -> (string, bool) {
 	collisions := []struct {
-		shortcut: Vocal_Shortcut,
+		shortcut: Video_Clips_Shortcut,
 		owner: string,
 	}{
-		{vocal_shortcut_character("k", {.Control}), "Command palette"},
-		{vocal_shortcut_character(",", {.Command}), "Open Settings"},
-		{vocal_shortcut_character(" "), "Play or pause"},
-		{vocal_shortcut_named("left"), "Scrub backward"},
-		{vocal_shortcut_named("right"), "Scrub forward"},
-		{vocal_shortcut_named("left", {.Shift}), "Fine scrub backward"},
-		{vocal_shortcut_named("right", {.Shift}), "Fine scrub forward"},
-		{vocal_shortcut_named("left", {.Command}), "Scrub backward ten seconds"},
-		{vocal_shortcut_named("right", {.Command}), "Scrub forward ten seconds"},
-		{vocal_shortcut_character("q", {.Command}), "Quit application"},
-		{vocal_shortcut_character("w", {.Command}), "Close window"},
-		{vocal_shortcut_character("m", {.Command}), "Minimize window"},
-		{vocal_shortcut_character("h", {.Command}), "Hide application"},
-		{vocal_shortcut_character("h", {.Option, .Command}), "Hide other applications"},
-		{vocal_shortcut_character(" ", {.Command}), "Spotlight"},
-		{vocal_shortcut_character(" ", {.Option, .Command}), "Finder search"},
-		{vocal_shortcut_character("3", {.Shift, .Command}), "Screenshot"},
-		{vocal_shortcut_character("4", {.Shift, .Command}), "Screenshot selection"},
-		{vocal_shortcut_character("5", {.Shift, .Command}), "Screenshot controls"},
-		{vocal_shortcut_character("q", {.Shift, .Command}), "Log out"},
-		{vocal_shortcut_character("q", {.Control, .Command}), "Lock screen"},
-		{vocal_shortcut_character("d", {.Option, .Command}), "Show or hide the Dock"},
-		{vocal_shortcut_named("up", {.Control}), "Mission Control"},
-		{vocal_shortcut_named("down", {.Control}), "Application windows"},
-		{vocal_shortcut_named("left", {.Control}), "Previous desktop"},
-		{vocal_shortcut_named("right", {.Control}), "Next desktop"},
+		{video_clips_shortcut_character("k", {.Control}), "Command palette"},
+		{video_clips_shortcut_character(",", {.Command}), "Open Settings"},
+		{video_clips_shortcut_character(" "), "Play or pause"},
+		{video_clips_shortcut_named("left"), "Scrub backward"},
+		{video_clips_shortcut_named("right"), "Scrub forward"},
+		{video_clips_shortcut_named("left", {.Shift}), "Fine scrub backward"},
+		{video_clips_shortcut_named("right", {.Shift}), "Fine scrub forward"},
+		{video_clips_shortcut_named("left", {.Command}), "Scrub backward ten seconds"},
+		{video_clips_shortcut_named("right", {.Command}), "Scrub forward ten seconds"},
+		{video_clips_shortcut_character("q", {.Command}), "Quit application"},
+		{video_clips_shortcut_character("w", {.Command}), "Close window"},
+		{video_clips_shortcut_character("m", {.Command}), "Minimize window"},
+		{video_clips_shortcut_character("h", {.Command}), "Hide application"},
+		{video_clips_shortcut_character("h", {.Option, .Command}), "Hide other applications"},
+		{video_clips_shortcut_character(" ", {.Command}), "Spotlight"},
+		{video_clips_shortcut_character(" ", {.Option, .Command}), "Finder search"},
+		{video_clips_shortcut_character("3", {.Shift, .Command}), "Screenshot"},
+		{video_clips_shortcut_character("4", {.Shift, .Command}), "Screenshot selection"},
+		{video_clips_shortcut_character("5", {.Shift, .Command}), "Screenshot controls"},
+		{video_clips_shortcut_character("q", {.Shift, .Command}), "Log out"},
+		{video_clips_shortcut_character("q", {.Control, .Command}), "Lock screen"},
+		{video_clips_shortcut_character("d", {.Option, .Command}), "Show or hide the Dock"},
+		{video_clips_shortcut_named("up", {.Control}), "Mission Control"},
+		{video_clips_shortcut_named("down", {.Control}), "Application windows"},
+		{video_clips_shortcut_named("left", {.Control}), "Previous desktop"},
+		{video_clips_shortcut_named("right", {.Control}), "Next desktop"},
 	}
 	for index in 0..<3 {
 		key := [1]u8{u8('1'+index)}
-		candidate := vocal_shortcut_character(string(key[:]))
-		if vocal_shortcut_equal(value, candidate) {
+		candidate := video_clips_shortcut_character(string(key[:]))
+		if video_clips_shortcut_equal(value, candidate) {
 			return fmt.aprintf(
 				"Numbered action section %s",
 				string(key[:]),
@@ -248,15 +248,15 @@ vocal_shortcut_collision :: proc(value: Vocal_Shortcut) -> (string, bool) {
 		}
 	}
 	for collision in collisions {
-		if vocal_shortcut_equal(value, collision.shortcut) {
+		if video_clips_shortcut_equal(value, collision.shortcut) {
 			return collision.owner, true
 		}
 	}
 	return "", false
 }
 
-vocal_shortcut_serialize :: proc(
-	value: Vocal_Shortcut,
+video_clips_shortcut_serialize :: proc(
+	value: Video_Clips_Shortcut,
 	allocator := context.allocator,
 ) -> (string, bool) {
 	modifiers := make([dynamic]string, context.temp_allocator)
@@ -267,7 +267,7 @@ vocal_shortcut_serialize :: proc(
 	kind := "character"
 	if value.kind == .Named {kind = "named"}
 	bytes, marshal_error := json.marshal(
-		Vocal_Shortcut_Wire{
+		Video_Clips_Shortcut_Wire{
 			version = 1,
 			kind = kind,
 			key = value.key,
@@ -279,11 +279,11 @@ vocal_shortcut_serialize :: proc(
 	return string(bytes), true
 }
 
-vocal_shortcut_deserialize :: proc(
+video_clips_shortcut_deserialize :: proc(
 	value: string,
 	allocator := context.allocator,
-) -> (Vocal_Shortcut, bool) {
-	wire: Vocal_Shortcut_Wire
+) -> (Video_Clips_Shortcut, bool) {
+	wire: Video_Clips_Shortcut_Wire
 	if error := json.unmarshal(transmute([]u8)value, &wire); error != nil {
 		return {}, false
 	}
@@ -294,7 +294,7 @@ vocal_shortcut_deserialize :: proc(
 		delete(wire.modifiers)
 	}
 	if wire.version != 1 || len(wire.key) == 0 {return {}, false}
-	kind: Vocal_Shortcut_Key_Kind
+	kind: Video_Clips_Shortcut_Key_Kind
 	switch wire.kind {
 	case "character":
 		kind = .Character
@@ -303,7 +303,7 @@ vocal_shortcut_deserialize :: proc(
 		kind = .Named
 		valid := false
 		for code := uint(0); code <= 126; code += 1 {
-			if named, found := vocal_shortcut_named_key(code);
+			if named, found := video_clips_shortcut_named_key(code);
 			   found && named == wire.key {
 				valid = true
 				break
@@ -313,7 +313,7 @@ vocal_shortcut_deserialize :: proc(
 	case:
 		return {}, false
 	}
-	modifiers: Vocal_Shortcut_Modifiers
+	modifiers: Video_Clips_Shortcut_Modifiers
 	for modifier in wire.modifiers {
 		switch modifier {
 		case "control": modifiers += {.Control}
@@ -323,14 +323,14 @@ vocal_shortcut_deserialize :: proc(
 		case: return {}, false
 		}
 	}
-	result := Vocal_Shortcut{
+	result := Video_Clips_Shortcut{
 		kind = kind,
 		key = strings.clone(wire.key, allocator),
 		modifiers = modifiers,
 	}
-	if owner, collides := vocal_shortcut_collision(result); collides {
+	if owner, collides := video_clips_shortcut_collision(result); collides {
 		_ = owner
-		vocal_shortcut_destroy(&result)
+		video_clips_shortcut_destroy(&result)
 		return {}, false
 	}
 	return result, true

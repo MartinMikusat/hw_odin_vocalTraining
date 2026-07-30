@@ -132,12 +132,12 @@ pitch_play_layout_uses_twenty_thirty_fifty_partition_test :: proc(
 		ui.width, ui.height, ui.mode = old_width, old_height, old_mode
 	}
 	ui.width, ui.height, ui.mode = 1100, 720, .Play
-	_, _, _, _, player, _, _, exercise, _, pitch, _ := layout_rects()
+	_, _, _, _, player, _, _, clip, _, pitch, _ := layout_rects()
 	available := ui.width - 36 - 20
-	testing.expect(t, math.abs(exercise.w - available * 0.20) < 0.001)
+	testing.expect(t, math.abs(clip.w - available * 0.20) < 0.001)
 	testing.expect(t, math.abs(player.w - available * 0.30) < 0.001)
 	testing.expect(t, math.abs(pitch.w - available * 0.50) < 0.001)
-	testing.expect(t, exercise.x + exercise.w < player.x)
+	testing.expect(t, clip.x + clip.w < player.x)
 	testing.expect(t, player.x + player.w < pitch.x)
 	testing.expect(t, pitch.x + pitch.w <= ui.width - 18)
 }

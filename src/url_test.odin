@@ -71,6 +71,31 @@ window_header_geometry_separates_controls_title_and_mode_test :: proc(
 }
 
 @(test)
+window_header_identity_reports_each_active_view_test :: proc(t: ^testing.T) {
+	testing.expect_value(
+		t,
+		active_view_label(.Vocal, .Create),
+		"VOCAL SOURCES",
+	)
+	testing.expect_value(t, active_view_label(.Vocal, .Play), "VOCAL CLIPS")
+	testing.expect_value(
+		t,
+		active_view_label(.Dancing, .Create),
+		"DANCING SOURCES",
+	)
+	testing.expect_value(
+		t,
+		active_view_label(.Dancing, .Play),
+		"DANCING CLIPS",
+	)
+	settings := settings_button_rect_for_size(720)
+	title := app_title_rect_for_size(1100, 720)
+	workflow := workflow_button_rect_for_size(1100, 720)
+	testing.expect_value(t, title.x-(settings.x+settings.w), 16.0)
+	testing.expect_value(t, workflow.x-(title.x+title.w), 12.0)
+}
+
+@(test)
 window_resize_geometry_detects_edges_and_enforces_minimum_test :: proc(
 	t: ^testing.T,
 ) {
@@ -154,11 +179,11 @@ window_controls_remain_registered_over_modal_content_test :: proc(
 		height = 720,
 		mode = .Play,
 		randomize_help_open = true,
-		active_exercise = -1,
+		active_clip = -1,
 		source_details_index = -1,
 		source_modal_refetch_index = -1,
-		exercise_rename_index = -1,
-		exercise_metadata_index = -1,
+		clip_rename_index = -1,
+		clip_metadata_index = -1,
 		transcript_active_match = -1,
 	}
 	library_recovery_state = {}
@@ -195,11 +220,11 @@ window_controls_remain_registered_over_modal_content_test :: proc(
 }
 
 @(test)
-successful_clip_commit_resets_exercise_output_test :: proc(t: ^testing.T) {
+successful_clip_commit_resets_clip_output_test :: proc(t: ^testing.T) {
 	previous_state := state
 	previous_ui := ui
 	defer {
-		delete(ui.exercise_name)
+		delete(ui.clip_name)
 		state = previous_state
 		ui = previous_ui
 	}
@@ -210,13 +235,13 @@ successful_clip_commit_resets_exercise_output_test :: proc(t: ^testing.T) {
 	state.has_start = true
 	state.has_end = true
 	ui.focus = .None
-	ui_set_string(&ui.exercise_name, "Scale")
-	reset_exercise_output()
+	ui_set_string(&ui.clip_name, "Scale")
+	reset_clip_output()
 	testing.expect_value(t, state.range_start, 0)
 	testing.expect_value(t, state.range_end, 0)
 	testing.expect(t, !state.has_start)
 	testing.expect(t, !state.has_end)
-	testing.expect_value(t, ui.exercise_name, "")
+	testing.expect_value(t, ui.clip_name, "")
 }
 
 @(test)
@@ -289,7 +314,7 @@ youtube_json3_caption_mapping_test :: proc(t: ^testing.T) {
 
 @(test)
 new_caption_generation_indexes_the_imported_source_test :: proc(t: ^testing.T) {
-	support, found := os.lookup_env("VT_APP_SUPPORT_DIR")
+	support, found := os.lookup_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR")
 	defer delete(support)
 	testing.expect(t, found)
 	if !found {return}
@@ -377,7 +402,7 @@ completed_refetch_preserves_the_current_source_test :: proc(t: ^testing.T) {
 @(test)
 canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	path, found := os.lookup_env("VT_TEST_LIBRARY")
+	path, found := os.lookup_env("HW_VIDEO_CLIPS_TEST_LIBRARY")
 	defer delete(path)
 	testing.expect(t, found)
 	if !found {return}
@@ -392,32 +417,44 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 
 	testing.expect(t, database_create_schema(database))
 	testing.expect(t, database_integrity_ok(database))
+	schema_version, schema_version_read :=
+		library_database_user_version(database)
+	testing.expect(t, schema_version_read)
+	testing.expect_value(t, schema_version, LIBRARY_SCHEMA_VERSION)
 	source_count, sources_counted := database_count(database, "sources")
 	segment_count, segments_counted := database_count(database, "transcript_segments")
 	hint_count, hints_counted := database_count(database, "import_hints")
-	exercise_count, exercises_counted := database_count(database, "exercises")
-	testing.expect(t, sources_counted && segments_counted && hints_counted && exercises_counted)
+	clip_count, clips_counted := database_count(database, "clips")
+	testing.expect(t, sources_counted && segments_counted && hints_counted && clips_counted)
 	testing.expect_value(t, source_count, 7)
 	testing.expect_value(t, segment_count, 1532)
 	testing.expect_value(t, hint_count, 12)
-	testing.expect_value(t, exercise_count, 1)
+	testing.expect_value(t, clip_count, 1)
 
 	loaded: App_State
 	testing.expect(t, database_load_state(database, &loaded))
 	defer {
 		for &source in loaded.sources {delete_source_video(&source)}
 		for &hint in loaded.hints {delete_import_hint(&hint)}
-		for &exercise in loaded.exercises {delete_exercise(&exercise)}
+		for &clip in loaded.clips {delete_clip(&clip)}
 		delete(loaded.sources)
 		delete(loaded.hints)
-		delete(loaded.exercises)
+		delete(loaded.clips)
 		transcript_generation_destroy(&loaded.transcripts)
 	}
 	testing.expect_value(t, len(loaded.sources), source_count)
 	testing.expect_value(t, len(loaded.transcripts.segments), segment_count)
 	testing.expect_value(t, len(loaded.transcripts.source_spans), source_count)
 	testing.expect_value(t, len(loaded.hints), hint_count)
-	testing.expect_value(t, len(loaded.exercises), exercise_count)
+	testing.expect_value(t, len(loaded.clips), clip_count)
+	for source in loaded.sources {
+		testing.expect_value(t, source.workflow, Workflow_Kind.Vocal)
+	}
+	for clip in loaded.clips {
+		testing.expect_value(t, clip.workflow, Workflow_Kind.Vocal)
+		testing.expect_value(t, clip.dance_count_in_bpm, 120)
+		testing.expect_value(t, clip.dance_playback_rate, f32(1))
+	}
 	next_segment := 0
 	for span in loaded.transcripts.source_spans {
 		testing.expect_value(t, span.start, next_segment)
@@ -440,16 +477,16 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 			testing.expect_value(t, segment.source_id, source.id)
 		}
 	}
-	for exercise in loaded.exercises {
+	for clip in loaded.clips {
 		source_found := false
 		for source in loaded.sources {
-			if source.id == exercise.source_id {
+			if source.id == clip.source_id {
 				source_found = true
 				break
 			}
 		}
 		testing.expect(t, source_found)
-		testing.expect(t, filepath.is_abs(exercise.clip_path))
+		testing.expect(t, filepath.is_abs(clip.clip_path))
 	}
 
 	previous_state := state
@@ -466,10 +503,10 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	defer {
 		for &source in state.sources {delete_source_video(&source)}
 		for &hint in state.hints {delete_import_hint(&hint)}
-		for &exercise in state.exercises {delete_exercise(&exercise)}
+		for &clip in state.clips {delete_clip(&clip)}
 		delete(state.sources)
 		delete(state.hints)
-		delete(state.exercises)
+		delete(state.clips)
 		transcript_generation_destroy(&state.transcripts)
 		delete(ui.transcript_matches)
 		state = previous_state
@@ -607,9 +644,9 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 		testing.expect_value(
 			t,
 			randomize.accessibility_label,
-			"Play a random exercise",
+			"Play a random clip",
 		)
-		testing.expect_value(t, randomize.flash_label, "randomize exercise")
+		testing.expect_value(t, randomize.flash_label, "randomize clip")
 	}
 	if randomize != nil && randomize_help != nil {
 		testing.expect(t, .Enabled in randomize_help.flags)
@@ -637,9 +674,9 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 		testing.expect_value(
 			t,
 			play_next.accessibility_label,
-			"Play the next filtered exercise",
+			"Play the next filtered clip",
 		)
-		testing.expect_value(t, play_next.flash_label, "play next exercise")
+		testing.expect_value(t, play_next.flash_label, "play next clip")
 	}
 	if shuffle != nil {
 		testing.expect(t, .Enabled in shuffle.flags)
@@ -718,8 +755,8 @@ sqlite_source_round_trip_preserves_metadata_and_unicode_test :: proc(t: ^testing
 	defer {
 		for &loaded_source in loaded.sources {delete_source_video(&loaded_source)}
 		for &hint in loaded.hints {delete_import_hint(&hint)}
-		for &exercise in loaded.exercises {delete_exercise(&exercise)}
-		delete(loaded.sources); delete(loaded.hints); delete(loaded.exercises)
+		for &clip in loaded.clips {delete_clip(&clip)}
+		delete(loaded.sources); delete(loaded.hints); delete(loaded.clips)
 		transcript_generation_destroy(&loaded.transcripts)
 	}
 	testing.expect_value(t, len(loaded.sources), 1)
@@ -841,7 +878,7 @@ concurrent_notifications_remove_completed_tasks_without_hiding_siblings_test :: 
 		library_legacy_fallback = previous_fallback
 	}
 	notification_history_initialize()
-	export_id := notification_begin("Exporting exercise clip")
+	export_id := notification_begin("Exporting clip")
 	import_id := notification_begin("Downloading source")
 	testing.expect_value(t, len(notification_history.footer_task_ids), 2)
 
@@ -855,17 +892,17 @@ concurrent_notifications_remove_completed_tasks_without_hiding_siblings_test :: 
 	testing.expect_value(t, notification_find(export_id).kind, Notification_Kind.Activity)
 	testing.expect_value(t, notification_find(import_id).kind, Notification_Kind.Success)
 
-	testing.expect(t, notification_update(export_id, "Exporting exercise clip 80%"))
+	testing.expect(t, notification_update(export_id, "Exporting clip 80%"))
 	testing.expect_value(t, len(notification_history.footer_task_ids), 1)
 	testing.expect_value(t, notification_find(import_id).summary, "Imported 1 source")
 
 	testing.expect(t, notification_finish(
 		export_id,
 		.Success,
-		"Saved exercise clip",
+		"Saved clip",
 	))
 	testing.expect_value(t, len(notification_history.footer_task_ids), 0)
-	testing.expect_value(t, ui.status, "Saved exercise clip")
+	testing.expect_value(t, ui.status, "Saved clip")
 }
 
 @(test)
@@ -944,8 +981,8 @@ simulated_tasks_use_the_real_footer_registry_without_database_writes_test :: pro
 		playback_rate=1,
 		source_details_index=-1,
 		source_modal_refetch_index=-1,
-		exercise_rename_index=-1,
-		exercise_metadata_index=-1,
+		clip_rename_index=-1,
+		clip_metadata_index=-1,
 		transcript_active_match=-1,
 	}
 	defer {
@@ -1102,14 +1139,14 @@ notification_startup_marks_unfinished_activity_as_interrupted_test :: proc(
 }
 
 @(test)
-exercise_range_validation_test :: proc(t: ^testing.T) {
-	testing.expect(t, valid_exercise_range(10, 20, 60))
-	testing.expect(t, !valid_exercise_range(-1, 20, 60))
-	testing.expect(t, !valid_exercise_range(20, 20, 60))
-	testing.expect(t, !valid_exercise_range(20, 20.999, 60))
-	testing.expect(t, valid_exercise_range(20, 21, 60))
-	testing.expect(t, !valid_exercise_range(20, 61, 60))
-	testing.expect(t, valid_exercise_range(20, 61, 0))
+clip_range_validation_test :: proc(t: ^testing.T) {
+	testing.expect(t, valid_clip_range(10, 20, 60))
+	testing.expect(t, !valid_clip_range(-1, 20, 60))
+	testing.expect(t, !valid_clip_range(20, 20, 60))
+	testing.expect(t, !valid_clip_range(20, 20.999, 60))
+	testing.expect(t, valid_clip_range(20, 21, 60))
+	testing.expect(t, !valid_clip_range(20, 61, 60))
+	testing.expect(t, valid_clip_range(20, 61, 0))
 }
 
 @(test)
@@ -1120,6 +1157,27 @@ cli_source_add_parses_json_tool_arguments_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, request.command, CLI_Command.Source_Add)
 	testing.expect_value(t, request.url, "https://youtu.be/dQw4w9WgXcQ")
 	testing.expect_value(t, request.max_height, 720)
+	testing.expect_value(t, request.workflow, Workflow_Kind.Vocal)
+}
+
+@(test)
+cli_workflow_option_selects_the_independent_dancing_library_test :: proc(
+	t: ^testing.T,
+) {
+	request, result, ok := cli_parse_request(
+		[]string{"source", "list", "--workflow", "dancing"},
+	)
+	defer delete(result.output)
+	testing.expect(t, ok)
+	testing.expect_value(t, request.command, CLI_Command.Source_List)
+	testing.expect_value(t, request.workflow, Workflow_Kind.Dancing)
+
+	_, invalid_result, invalid_ok := cli_parse_request(
+		[]string{"clip", "list", "--workflow", "other"},
+	)
+	defer delete(invalid_result.output)
+	testing.expect(t, !invalid_ok)
+	testing.expect_value(t, invalid_result.exit_code, CLI_Exit.Usage)
 }
 
 @(test)
@@ -1406,7 +1464,7 @@ cli_ui_check_failure_encodes_compact_json_test :: proc(t: ^testing.T) {
 ui_diagnostic_artifacts_keep_only_the_newest_twenty_files_test :: proc(
 	t: ^testing.T,
 ) {
-	support, found := os.lookup_env("VT_APP_SUPPORT_DIR")
+	support, found := os.lookup_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR")
 	defer delete(support)
 	testing.expect(t, found)
 	if !found {return}
@@ -1481,18 +1539,18 @@ persisted_state_json_round_trip_test :: proc(t: ^testing.T) {
 		media_path="/tmp/source.mp4",
 		duration=90,
 	})
-	append(&original.exercises, Exercise{
-		id="exercise-1",
+	append(&original.clips, Clip{
+		id="clip-1",
 		source_id="source-1",
 		name="Scale",
 		start_seconds=12,
 		end_seconds=24,
-		clip_path="/tmp/exercise.mp4",
+		clip_path="/tmp/clip.mp4",
 	})
 	encoded, marshal_error := json.marshal(original)
 	defer delete(encoded)
 	defer delete(original.sources)
-	defer delete(original.exercises)
+	defer delete(original.clips)
 	testing.expect(t, marshal_error == nil)
 	restored: Persisted_State
 	unmarshal_error := json.unmarshal(encoded, &restored, .JSON)
@@ -1504,18 +1562,18 @@ persisted_state_json_round_trip_test :: proc(t: ^testing.T) {
 			delete(source.url)
 			delete(source.media_path)
 		}
-		for exercise in restored.exercises {
-			delete(exercise.id)
-			delete(exercise.source_id)
-			delete(exercise.name)
-			delete(exercise.clip_path)
+		for clip in restored.clips {
+			delete(clip.id)
+			delete(clip.source_id)
+			delete(clip.name)
+			delete(clip.clip_path)
 		}
 		delete(restored.sources)
-		delete(restored.exercises)
+		delete(restored.clips)
 	}
 	testing.expect(t, unmarshal_error == nil)
 	testing.expect_value(t, restored.sources[0].title, "Warmup")
-	testing.expect_value(t, restored.exercises[0].end_seconds, 24)
+	testing.expect_value(t, restored.clips[0].end_seconds, 24)
 	database: ^SQLite_DB
 	path := strings.clone_to_cstring(":memory:")
 	defer delete(path)
@@ -1524,12 +1582,12 @@ persisted_state_json_round_trip_test :: proc(t: ^testing.T) {
 	if opened {
 		defer sqlite3_close(database)
 		testing.expect(t, database_create_schema(database))
-		testing.expect(t, database_save_collections(database, restored.sources[:], restored.segments[:], restored.hints[:], restored.exercises[:]))
+		testing.expect(t, database_save_collections(database, restored.sources[:], restored.segments[:], restored.hints[:], restored.clips[:]))
 		source_count, source_count_ok := database_count(database, "sources")
-		exercise_count, exercise_count_ok := database_count(database, "exercises")
-		testing.expect(t, source_count_ok && exercise_count_ok)
+		clip_count, clip_count_ok := database_count(database, "clips")
+		testing.expect(t, source_count_ok && clip_count_ok)
 		testing.expect_value(t, source_count, 1)
-		testing.expect_value(t, exercise_count, 1)
+		testing.expect_value(t, clip_count, 1)
 	}
 }
 
@@ -1550,13 +1608,13 @@ youtube_command_requests_timed_captions_test :: proc(t: ^testing.T) {
 @(test)
 embedded_helper_path_uses_app_resources_test :: proc(t: ^testing.T) {
 	path := embedded_helper_path(
-		"/Applications/VocalTraining.app/Contents/MacOS/VocalTraining",
+		"/Applications/hw_videoClips.app/Contents/MacOS/hw_videoClips",
 		"ffmpeg",
 	)
 	testing.expect_value(
 		t,
 		path,
-		"/Applications/VocalTraining.app/Contents/Resources/helpers/ffmpeg",
+		"/Applications/hw_videoClips.app/Contents/Resources/helpers/ffmpeg",
 	)
 }
 
@@ -1572,11 +1630,11 @@ youtube_command_uses_resolved_helpers_test :: proc(t: ^testing.T) {
 		"https://youtu.be/abc",
 		"/tmp/source.%(ext)s",
 		"/tmp/download.log",
-		"/Applications/VocalTraining.app/Contents/Resources/helpers/yt-dlp",
-		"/Applications/VocalTraining.app/Contents/Resources/helpers/ffmpeg",
+		"/Applications/hw_videoClips.app/Contents/Resources/helpers/yt-dlp",
+		"/Applications/hw_videoClips.app/Contents/Resources/helpers/ffmpeg",
 	)
-	testing.expect(t, strings.has_prefix(command, "'/Applications/VocalTraining.app/Contents/Resources/helpers/yt-dlp'"))
-	testing.expect(t, strings.contains(command, "--ffmpeg-location '/Applications/VocalTraining.app/Contents/Resources/helpers/ffmpeg'"))
+	testing.expect(t, strings.has_prefix(command, "'/Applications/hw_videoClips.app/Contents/Resources/helpers/yt-dlp'"))
+	testing.expect(t, strings.contains(command, "--ffmpeg-location '/Applications/hw_videoClips.app/Contents/Resources/helpers/ffmpeg'"))
 }
 
 @(test)
@@ -1586,9 +1644,9 @@ clip_command_uses_range_duration_test :: proc(t: ^testing.T) {
 		"/tmp/clip.mp4",
 		12.5,
 		20.25,
-		"/Applications/VocalTraining.app/Contents/Resources/helpers/ffmpeg",
+		"/Applications/hw_videoClips.app/Contents/Resources/helpers/ffmpeg",
 	)
-	testing.expect(t, strings.has_prefix(command, "'/Applications/VocalTraining.app/Contents/Resources/helpers/ffmpeg'"))
+	testing.expect(t, strings.has_prefix(command, "'/Applications/hw_videoClips.app/Contents/Resources/helpers/ffmpeg'"))
 	testing.expect(t, strings.contains(command, "-ss 12.500"))
 	testing.expect(t, strings.contains(command, "-t 7.750"))
 	testing.expect(t, strings.contains(command, "'/tmp/source video.mp4'"))
@@ -1635,19 +1693,19 @@ metal_ui_word_backspace_preserves_utf8_boundaries_test :: proc(t: ^testing.T) {
 
 @(test)
 metal_ui_word_backspace_uses_punctuation_boundaries_test :: proc(t: ^testing.T) {
-	value := strings.clone("vocal-training.app/exercises")
+	value := strings.clone("hw_videoClips.app/clips")
 	defer delete(value)
 	remove_last_word(&value)
-	testing.expect_value(t, value, "vocal-training.app/")
+	testing.expect_value(t, value, "hw_videoClips.app/")
 	remove_last_word(&value)
-	testing.expect_value(t, value, "vocal-training.")
+	testing.expect_value(t, value, "hw_videoClips.")
 	remove_last_word(&value)
-	testing.expect_value(t, value, "vocal-")
+	testing.expect_value(t, value, "")
 }
 
 @(test)
 metal_ui_word_backspace_keeps_underscore_inside_word_test :: proc(t: ^testing.T) {
-	value := strings.clone("vocal_training")
+	value := strings.clone("hw_videoClips")
 	defer delete(value)
 	remove_last_word(&value)
 	testing.expect_value(t, value, "")
@@ -1660,10 +1718,10 @@ terminal_layout_stays_partitioned_at_minimum_size_test :: proc(t: ^testing.T) {
 	defer { ui.width, ui.height = old_width, old_height; ui.mode, ui.source_modal_open = old_mode, old_modal }
 	ui.width, ui.height = 1100, 720
 	ui.mode, ui.source_modal_open = .Create, false
-	import_field, import_button, _, source_panel, player, transcript, _, exercise_panel, _, _, controls := layout_rects()
+	import_field, import_button, _, source_panel, player, transcript, _, clip_panel, _, _, controls := layout_rects()
 	testing.expect(t, import_field.w == 0 && import_button.w == 0)
 	testing.expect(t, source_panel.x+source_panel.w < player.x)
-	testing.expect(t, player.x+player.w < exercise_panel.x)
+	testing.expect(t, player.x+player.w < clip_panel.x)
 	testing.expect(t, transcript.y+transcript.h < player.y)
 	testing.expect(t, controls.x >= 0 && controls.x+controls.w <= ui.width)
 }
@@ -1721,12 +1779,12 @@ metal_ui_content_regions_exclude_headers_and_fields_test :: proc(t: ^testing.T) 
 	testing.expect(t, player_content.y > player.y)
 	testing.expect(t, player_content.y+player_content.h < player.y+player.h)
 
-	exercise_panel := UI_Rect{798, 116, 284, 500}
-	exercise_search := UI_Rect{806, 544, 268, 28}
-	exercise_name := UI_Rect{806, 124, 268, 30}
-	exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
-	testing.expect(t, exercise_content.y > exercise_name.y+exercise_name.h)
-	testing.expect(t, exercise_content.y+exercise_content.h < exercise_search.y)
+	clip_panel := UI_Rect{798, 116, 284, 500}
+	clip_search := UI_Rect{806, 544, 268, 28}
+	clip_name := UI_Rect{806, 124, 268, 30}
+	clip_content := clip_content_rect(clip_search, clip_panel, clip_name)
+	testing.expect(t, clip_content.y > clip_name.y+clip_name.h)
+	testing.expect(t, clip_content.y+clip_content.h < clip_search.y)
 }
 
 @(test)
@@ -1895,28 +1953,28 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 command_palette_uses_current_action_availability_test :: proc(t: ^testing.T) {
 	previous_mode := ui.mode
 	previous_pitch := ui.pitch
-	previous_search := ui.exercise_search
+	previous_search := ui.clip_search
 	previous_state := state
 	previous_recovery := library_recovery_state
 	previous_pending := major_change_pending
 	previous_actions := command_palette_actions
 	defer {
-		delete(state.exercises)
+		delete(state.clips)
 		delete(command_palette_actions)
 		command_palette_actions = previous_actions
 		ui.mode = previous_mode
 		ui.pitch = previous_pitch
-		ui.exercise_search = previous_search
+		ui.clip_search = previous_search
 		state = previous_state
 		library_recovery_state = previous_recovery
 		major_change_pending = previous_pending
 	}
 	command_palette_actions = nil
 	state = App_State{active_source = -1}
-	state.exercises = make([dynamic]Exercise)
-	append(&state.exercises, Exercise{name = "Warm up"})
+	state.clips = make([dynamic]Clip)
+	append(&state.clips, Clip{name = "Warm up"})
 	ui.mode = .Play
-	ui.exercise_search = "Missing"
+	ui.clip_search = "Missing"
 	ui.pitch.permission = .Denied
 	ui.pitch.permission_pending = false
 	library_recovery_state = Library_Recovery_State{required = true}
@@ -1940,7 +1998,7 @@ command_palette_uses_current_action_availability_test :: proc(t: ^testing.T) {
 		case "Start pitch tracking":
 			found_pitch = true
 			testing.expect(t, !matches)
-		case "Play next exercise":
+		case "Play next clip":
 			found_next = true
 			testing.expect(t, !matches)
 		}
@@ -1951,12 +2009,12 @@ command_palette_uses_current_action_availability_test :: proc(t: ^testing.T) {
 	testing.expect(t, found_next)
 
 	library_recovery_state = {}
-	ui.exercise_search = ""
+	ui.clip_search = ""
 	ui.pitch.permission = .Authorized
 	active = palette_active_context()
 	for entry in entries {
 		if entry.title == "Start pitch tracking" ||
-		   entry.title == "Play next exercise" {
+		   entry.title == "Play next clip" {
 			testing.expect(
 				t,
 				command_palette.context_matches(active, entry.contexts),
@@ -2108,7 +2166,7 @@ core_text_draws_a_truncated_line_before_releasing_it_test :: proc(t: ^testing.T)
 
 @(test)
 metal_player_survives_autorelease_pool_drain_and_replacement_test :: proc(t: ^testing.T) {
-	headless, skip := os.lookup_env("VT_HEADLESS_TEST")
+	headless, skip := os.lookup_env("HW_VIDEO_CLIPS_HEADLESS_TEST")
 	delete(headless)
 	if skip {return}
 	objc_handle := os.dlopen("/usr/lib/libobjc.A.dylib", os.RTLD_NOW)
@@ -2251,7 +2309,7 @@ durable_model_clone_survives_source_arena_destruction_test :: proc(t: ^testing.T
 
 @(test)
 portable_library_round_trip_omits_machine_paths_test :: proc(t: ^testing.T) {
-	support, found := os.lookup_env("VT_APP_SUPPORT_DIR")
+	support, found := os.lookup_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR")
 	defer delete(support)
 	testing.expect(t, found)
 	if !found {return}
@@ -2263,7 +2321,7 @@ portable_library_round_trip_omits_machine_paths_test :: proc(t: ^testing.T) {
 	}
 	state.sources = make([dynamic]Source_Video)
 	state.hints = make([dynamic]Import_Hint)
-	state.exercises = make([dynamic]Exercise)
+	state.clips = make([dynamic]Clip)
 	transcripts, transcripts_ok := transcript_generation_create(1)
 	testing.expect(t, transcripts_ok)
 	if !transcripts_ok {return}
@@ -2294,18 +2352,18 @@ portable_library_round_trip_omits_machine_paths_test :: proc(t: ^testing.T) {
 	testing.expect(t, hint_ok)
 	if !hint_ok {return}
 	append(&state.hints, hint)
-	exercise, exercise_ok := clone_exercise(Exercise{
-		id = "exercise-1",
+	clip, clip_ok := clone_clip(Clip{
+		id = "clip-1",
 		source_id = "source-1",
 		name = "Warm up",
 		start_seconds = 40,
 		end_seconds = 55,
-		clip_path = fmt.tprintf("%s/clips/exercise-1.mp4", support),
+		clip_path = fmt.tprintf("%s/clips/clip-1.mp4", support),
 		last_randomized_sequence = 12,
 	})
-	testing.expect(t, exercise_ok)
-	if !exercise_ok {return}
-	append(&state.exercises, exercise)
+	testing.expect(t, clip_ok)
+	if !clip_ok {return}
+	append(&state.clips, clip)
 	testing.expect(t, transcript_append_copy(&state.transcripts, Transcript_Segment{
 		id = "segment-1",
 		source_id = "source-1",
@@ -2314,7 +2372,7 @@ portable_library_round_trip_omits_machine_paths_test :: proc(t: ^testing.T) {
 		text = "Sing now",
 	}))
 
-	path := fmt.tprintf("%s/portable-library-test.vocaltraining.json", support)
+	path := fmt.tprintf("%s/portable-library-test.hwvideoclips.json", support)
 	defer os.remove(path)
 	testing.expect_value(t, portable_library_export(path), Portable_Library_Error.None)
 	bytes, read_ok := os.read_entire_file(path, context.temp_allocator)
@@ -2332,7 +2390,7 @@ portable_library_round_trip_omits_machine_paths_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, import_error, Portable_Library_Error.None)
 	defer app_state_collections_destroy(&imported)
 	testing.expect_value(t, len(imported.sources), 1)
-	testing.expect_value(t, len(imported.exercises), 1)
+	testing.expect_value(t, len(imported.clips), 1)
 	testing.expect_value(t, len(imported.transcripts.segments), 1)
 	testing.expect_value(t, imported.sources[0].title, "Živý hlas")
 	testing.expect_value(
@@ -2342,9 +2400,84 @@ portable_library_round_trip_omits_machine_paths_test :: proc(t: ^testing.T) {
 	)
 	testing.expect_value(
 		t,
-		imported.exercises[0].clip_path,
-		fmt.tprintf("%s/clips/exercise-1.mp4", support),
+		imported.clips[0].clip_path,
+		fmt.tprintf("%s/clips/clip-1.mp4", support),
 	)
+}
+
+@(test)
+portable_library_current_workflow_export_is_scoped_test :: proc(t: ^testing.T) {
+	previous_state := state
+	state = {}
+	defer {
+		app_state_collections_destroy(&state)
+		state = previous_state
+	}
+	state.sources = make([dynamic]Source_Video)
+	state.hints = make([dynamic]Import_Hint)
+	state.clips = make([dynamic]Clip)
+	transcripts, transcripts_ok := transcript_generation_create(0)
+	testing.expect(t, transcripts_ok)
+	if !transcripts_ok {return}
+	state.transcripts = transcripts
+	vocal_source, vocal_ok := clone_source_video(Source_Video{
+		id="vocal-source",
+		workflow=.Vocal,
+		video_id="shared-video",
+		duration=30,
+	})
+	dance_source, dance_ok := clone_source_video(Source_Video{
+		id="dancing-shared-video",
+		workflow=.Dancing,
+		video_id="shared-video",
+		duration=30,
+	})
+	testing.expect(t, vocal_ok && dance_ok)
+	if !vocal_ok || !dance_ok {return}
+	append(&state.sources, vocal_source, dance_source)
+	vocal_clip, vocal_clip_ok := clone_clip(Clip{
+		id="vocal-clip",
+		source_id="vocal-source",
+		workflow=.Vocal,
+		start_seconds=1,
+		end_seconds=2,
+	})
+	dance_clip, dance_clip_ok := clone_clip(Clip{
+		id="dance-clip",
+		source_id="dancing-shared-video",
+		workflow=.Dancing,
+		start_seconds=1,
+		end_seconds=2,
+		dance_count_in_beats=8,
+		dance_count_in_bpm=120,
+		dance_playback_rate=0.8,
+	})
+	testing.expect(t, vocal_clip_ok && dance_clip_ok)
+	if !vocal_clip_ok || !dance_clip_ok {return}
+	append(&state.clips, vocal_clip, dance_clip)
+
+	vocal, vocal_created :=
+		portable_library_from_state(.Vocal, context.temp_allocator)
+	testing.expect(t, vocal_created)
+	testing.expect_value(t, vocal.scope, "vocal")
+	testing.expect_value(t, len(vocal.sources), 1)
+	testing.expect_value(t, len(vocal.clips), 1)
+	testing.expect_value(t, vocal.sources[0].workflow, Workflow_Kind.Vocal)
+
+	dancing, dancing_created :=
+		portable_library_from_state(.Dancing, context.temp_allocator)
+	testing.expect(t, dancing_created)
+	testing.expect_value(t, dancing.scope, "dancing")
+	testing.expect_value(t, len(dancing.sources), 1)
+	testing.expect_value(t, len(dancing.clips), 1)
+	testing.expect_value(t, dancing.clips[0].dance_count_in_beats, 8)
+	testing.expect_value(t, dancing.clips[0].dance_playback_rate, f32(0.8))
+
+	all, all_created :=
+		portable_library_from_state(.All, context.temp_allocator)
+	testing.expect(t, all_created)
+	testing.expect_value(t, len(all.sources), 2)
+	testing.expect_value(t, len(all.clips), 2)
 }
 
 @(test)
@@ -2359,6 +2492,7 @@ portable_library_validation_rejects_versions_and_broken_references_test :: proc(
 	data := Portable_Library{
 		format = PORTABLE_LIBRARY_FORMAT,
 		version = PORTABLE_LIBRARY_VERSION + 1,
+		scope = "all",
 		sources = []Portable_Source{source},
 	}
 	testing.expect_value(
@@ -2367,8 +2501,8 @@ portable_library_validation_rejects_versions_and_broken_references_test :: proc(
 		Portable_Library_Error.Version,
 	)
 	data.version = PORTABLE_LIBRARY_VERSION
-	data.exercises = []Portable_Exercise{{
-		id = "exercise-1",
+	data.clips = []Portable_Clip{{
+		id = "clip-1",
 		source_id = "missing",
 		start_seconds = 1,
 		end_seconds = 2,
@@ -2419,7 +2553,7 @@ portable_library_install_replaces_database_and_memory_together_test :: proc(
 	}
 	state.sources = make([dynamic]Source_Video)
 	state.hints = make([dynamic]Import_Hint)
-	state.exercises = make([dynamic]Exercise)
+	state.clips = make([dynamic]Clip)
 	state.transcripts, _ = transcript_generation_create(0)
 	old_source, old_ok := clone_source_video(Source_Video{
 		id = "old-source",
@@ -2435,7 +2569,7 @@ portable_library_install_replaces_database_and_memory_together_test :: proc(
 
 	imported.sources = make([dynamic]Source_Video)
 	imported.hints = make([dynamic]Import_Hint)
-	imported.exercises = make([dynamic]Exercise)
+	imported.clips = make([dynamic]Clip)
 	imported.transcripts, _ = transcript_generation_create(0)
 	new_source, new_ok := clone_source_video(Source_Video{
 		id = "new-source",
@@ -2512,7 +2646,7 @@ library_transaction_test_begin :: proc(
 	state = {}
 	state.sources = make([dynamic]Source_Video)
 	state.hints = make([dynamic]Import_Hint)
-	state.exercises = make([dynamic]Exercise)
+	state.clips = make([dynamic]Clip)
 	transcripts, transcripts_created := transcript_generation_create(0)
 	if !transcripts_created {
 		app_state_collections_destroy(&state)
@@ -2616,7 +2750,7 @@ failed_import_commit_keeps_live_library_state_test :: proc(t: ^testing.T) {
 successful_import_commit_survives_database_reload_test :: proc(t: ^testing.T) {
 	temporary_file, temporary_error := os2.create_temp_file(
 		"",
-		"vocal-training-library-transaction-*.sqlite3",
+		"hw_videoClips-library-transaction-*.sqlite3",
 	)
 	testing.expect(t, temporary_error == nil)
 	if temporary_error != nil {return}
@@ -2718,30 +2852,30 @@ repair_commit_publishes_only_after_database_success_test :: proc(t: ^testing.T) 
 	testing.expect(t, source_copied)
 	if !source_copied {return}
 	append(&state.sources, source)
-	exercise, exercise_copied := clone_exercise(Exercise{
-		id = "exercise-1",
+	clip, clip_copied := clone_clip(Clip{
+		id = "clip-1",
 		source_id = "source-1",
 		name = "Original",
 		start_seconds = 2,
 		end_seconds = 8,
 		clip_path = "/tmp/original.mp4",
 	})
-	testing.expect(t, exercise_copied)
-	if !exercise_copied {return}
-	append(&state.exercises, exercise)
+	testing.expect(t, clip_copied)
+	if !clip_copied {return}
+	append(&state.clips, clip)
 
 	testing.expect(t, database_save_state(fixture.database))
 	testing.expect(t, sqlite_execute(
 		fixture.database,
-		`CREATE TRIGGER fail_exercise_insert
-		 BEFORE INSERT ON exercises
+		`CREATE TRIGGER fail_clip_insert
+		 BEFORE INSERT ON clips
 		 BEGIN
-		   SELECT RAISE(ABORT, 'forced exercise insert failure');
+		   SELECT RAISE(ABORT, 'forced clip insert failure');
 		 END`,
 	))
 
-	index, repaired := repair_exercise_apply(Exercise{
-		id = "exercise-1",
+	index, repaired := repair_clip_apply(Clip{
+		id = "clip-1",
 		source_id = "source-1",
 		name = "Repaired",
 		start_seconds = 2,
@@ -2750,12 +2884,12 @@ repair_commit_publishes_only_after_database_success_test :: proc(t: ^testing.T) 
 	})
 	testing.expect(t, !repaired)
 	testing.expect_value(t, index, -1)
-	testing.expect_value(t, state.exercises[0].name, "Original")
-	testing.expect_value(t, state.exercises[0].clip_path, "/tmp/original.mp4")
+	testing.expect_value(t, state.clips[0].name, "Original")
+	testing.expect_value(t, state.clips[0].clip_path, "/tmp/original.mp4")
 
 	statement, prepared := sqlite_prepare(
 		fixture.database,
-		"SELECT name, clip_path FROM exercises WHERE id = 'exercise-1'",
+		"SELECT name, clip_path FROM clips WHERE id = 'clip-1'",
 	)
 	testing.expect(t, prepared)
 	if !prepared {return}
@@ -2769,9 +2903,9 @@ repair_commit_publishes_only_after_database_success_test :: proc(t: ^testing.T) 
 	}
 	sqlite3_finalize(statement)
 
-	testing.expect(t, sqlite_execute(fixture.database, "DROP TRIGGER fail_exercise_insert"))
-	index, repaired = repair_exercise_apply(Exercise{
-		id = "exercise-1",
+	testing.expect(t, sqlite_execute(fixture.database, "DROP TRIGGER fail_clip_insert"))
+	index, repaired = repair_clip_apply(Clip{
+		id = "clip-1",
 		source_id = "source-1",
 		name = "Repaired",
 		start_seconds = 2,
@@ -2780,14 +2914,14 @@ repair_commit_publishes_only_after_database_success_test :: proc(t: ^testing.T) 
 	})
 	testing.expect(t, repaired)
 	testing.expect_value(t, index, 0)
-	testing.expect_value(t, state.exercises[0].name, "Repaired")
+	testing.expect_value(t, state.clips[0].name, "Repaired")
 
 	loaded: App_State
 	testing.expect(t, database_load_state(fixture.database, &loaded))
 	defer app_state_collections_destroy(&loaded)
-	testing.expect_value(t, len(loaded.exercises), 1)
-	testing.expect_value(t, loaded.exercises[0].name, "Repaired")
-	testing.expect_value(t, loaded.exercises[0].clip_path, "/tmp/repaired.mp4")
+	testing.expect_value(t, len(loaded.clips), 1)
+	testing.expect_value(t, loaded.clips[0].name, "Repaired")
+	testing.expect_value(t, loaded.clips[0].clip_path, "/tmp/repaired.mp4")
 }
 
 @(test)
@@ -2799,6 +2933,9 @@ library_recovery_quality_requires_the_saved_height_test :: proc(t: ^testing.T) {
 
 @(test)
 mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
+	previous_workflow := ui.workflow
+	defer ui.workflow = previous_workflow
+	ui.workflow = .Vocal
 	create_actions := [8]int{5, 7, 3, 4, 6, 0, 1, 2}
 	for action, slot in create_actions {
 		testing.expect_value(t, control_action_for_slot(.Create, slot), action)
@@ -2813,7 +2950,32 @@ mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+dancing_control_slots_replace_pitch_with_dance_tools_test :: proc(t: ^testing.T) {
+	previous_workflow := ui.workflow
+	defer ui.workflow = previous_workflow
+	ui.workflow = .Dancing
+	actions := [13]int{
+		12, 10, 8, 9, 7,
+		3, 4, 13, 14,
+		DANCE_MIRROR_ACTION_INDEX,
+		DANCE_LOOP_ACTION_INDEX,
+		DANCE_COUNT_IN_ACTION_INDEX,
+		DANCE_COUNT_EACH_LOOP_ACTION_INDEX,
+	}
+	testing.expect_value(t, control_slot_count(.Play), len(actions))
+	for action, slot in actions {
+		testing.expect_value(t, control_action_for_slot(.Play, slot), action)
+		testing.expect_value(t, control_slot_for_action(.Play, action), slot)
+	}
+	testing.expect_value(t, numbered_action_for_code(.Play, 3, 1), DANCE_MIRROR_ACTION_INDEX)
+	testing.expect_value(t, numbered_action_for_code(.Play, 3, 4), DANCE_COUNT_EACH_LOOP_ACTION_INDEX)
+}
+
+@(test)
 numbered_action_codes_match_interface_sections_test :: proc(t: ^testing.T) {
+	previous_workflow := ui.workflow
+	defer ui.workflow = previous_workflow
+	ui.workflow = .Vocal
 	create_codes := [8]Numbered_Action_Code{
 		{1, 1}, {1, 2}, {2, 1}, {2, 2},
 		{2, 3}, {3, 1}, {3, 2}, {3, 3},
@@ -2845,6 +3007,46 @@ numbered_action_codes_match_interface_sections_test :: proc(t: ^testing.T) {
 		)
 	}
 	testing.expect_value(t, pitch_numbered_action_text(), "31")
+}
+
+@(test)
+dancing_clip_navigation_stays_inside_the_active_workflow_test :: proc(t: ^testing.T) {
+	previous_workflow := ui.workflow
+	defer ui.workflow = previous_workflow
+	clips := [4]Clip{
+		{workflow=.Vocal, name="Warm up"},
+		{workflow=.Dancing, name="Warm up"},
+		{workflow=.Vocal, name="Warm down"},
+		{workflow=.Dancing, name="Warm down"},
+	}
+	ui.workflow = .Vocal
+	testing.expect_value(t, next_filtered_clip_index(clips[:], -1, "Warm"), 0)
+	testing.expect_value(t, next_filtered_clip_index(clips[:], 0, "Warm"), 2)
+	ui.workflow = .Dancing
+	testing.expect_value(t, next_filtered_clip_index(clips[:], -1, "Warm"), 1)
+	testing.expect_value(t, next_filtered_clip_index(clips[:], 1, "Warm"), 3)
+}
+
+@(test)
+dancing_mirror_swaps_only_horizontal_texture_coordinates_test :: proc(t: ^testing.T) {
+	previous_width, previous_height := ui.width, ui.height
+	defer ui.width, ui.height = previous_width, previous_height
+	ui.width, ui.height = 100, 100
+	normal := texture_rect_vertices({0, 0, 100, 100}, {1, 1, 1, 1})
+	mirrored := texture_rect_vertices({0, 0, 100, 100}, {1, 1, 1, 1}, true)
+	for index in 0 ..< len(normal) {
+		testing.expect_value(t, mirrored[index].u, 1 - normal[index].u)
+		testing.expect_value(t, mirrored[index].v, normal[index].v)
+		testing.expect_value(t, mirrored[index].x, normal[index].x)
+		testing.expect_value(t, mirrored[index].y, normal[index].y)
+	}
+}
+
+@(test)
+dancing_count_in_interval_uses_saved_bpm_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, dance_count_in_interval_ms(40), i64(1500))
+	testing.expect_value(t, dance_count_in_interval_ms(120), i64(500))
+	testing.expect_value(t, dance_count_in_interval_ms(240), i64(250))
 }
 
 @(test)
@@ -2930,11 +3132,11 @@ pitch_monitor_registers_controls_and_help_overlay_test :: proc(
 		width = 1100,
 		height = 720,
 		mode = .Play,
-		active_exercise = -1,
+		active_clip = -1,
 		source_details_index = -1,
 		source_modal_refetch_index = -1,
-		exercise_rename_index = -1,
-		exercise_metadata_index = -1,
+		clip_rename_index = -1,
+		clip_metadata_index = -1,
 		transcript_active_match = -1,
 	}
 	ui.pitch.settings = pitch_default_settings()
@@ -2979,6 +3181,81 @@ pitch_monitor_registers_controls_and_help_overlay_test :: proc(
 }
 
 @(test)
+dancing_tools_register_controls_without_pitch_controls_test :: proc(
+	t: ^testing.T,
+) {
+	previous_state := state
+	previous_ui := ui
+	previous_ui_build := ui_build
+	previous_recovery := library_recovery_state
+	previous_pending := major_change_pending
+	state = {}
+	defer {
+		app_state_collections_destroy(&state)
+		state = previous_state
+		ui = previous_ui
+		ui_build = previous_ui_build
+		library_recovery_state = previous_recovery
+		major_change_pending = previous_pending
+	}
+	state.sources = make([dynamic]Source_Video)
+	state.hints = make([dynamic]Import_Hint)
+	state.clips = make([dynamic]Clip)
+	transcripts, transcripts_ok := transcript_generation_create(0)
+	testing.expect(t, transcripts_ok)
+	if !transcripts_ok {return}
+	state.transcripts = transcripts
+	clip, clip_ok := clone_clip(Clip{
+		id="dance-clip",
+		source_id="dance-source",
+		workflow=.Dancing,
+		dance_count_in_bpm=120,
+		dance_playback_rate=1,
+	})
+	testing.expect(t, clip_ok)
+	if !clip_ok {return}
+	append(&state.clips, clip)
+	ui = UI_State{
+		width=1100,
+		height=720,
+		mode=.Play,
+		workflow=.Dancing,
+		active_clip=0,
+		source_details_index=-1,
+		source_modal_refetch_index=-1,
+		clip_rename_index=-1,
+		clip_metadata_index=-1,
+		transcript_active_match=-1,
+	}
+	library_recovery_state = {}
+	major_change_pending = {}
+	frame_arena: mem_virtual.Arena
+	frame_error := mem_virtual.arena_init_static(
+		&frame_arena,
+		1024 * 1024,
+		4096,
+	)
+	testing.expect(t, frame_error == nil)
+	if frame_error != nil {return}
+	defer mem_virtual.arena_destroy(&frame_arena)
+	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	dance_kinds := [6]UI_Action_Kind{
+		.Dance_Mirror_Toggle,
+		.Dance_Loop_Toggle,
+		.Dance_Count_In,
+		.Dance_Count_Each_Loop_Toggle,
+		.Dance_BPM_Down,
+		.Dance_BPM_Up,
+	}
+	for kind in dance_kinds {
+		testing.expect(t, find_ui_control_by_action(kind) != nil)
+	}
+	testing.expect(t, find_ui_control_by_action(.Pitch_Toggle) == nil)
+	testing.expect(t, find_ui_control_by_action(.Pitch_Reference_Down) == nil)
+}
+
+@(test)
 pitch_action_availability_matches_microphone_permission_test :: proc(
 	t: ^testing.T,
 ) {
@@ -3002,21 +3279,21 @@ pitch_action_availability_matches_microphone_permission_test :: proc(
 }
 
 @(test)
-random_exercise_weight_increases_with_skipped_draws_test :: proc(t: ^testing.T) {
-	testing.expect_value(t, random_exercise_weight(10, 10), 2)
-	testing.expect_value(t, random_exercise_weight(9, 10), 3)
-	testing.expect_value(t, random_exercise_weight(8, 10), 4)
-	testing.expect_value(t, random_exercise_weight(7, 10), 5)
-	testing.expect_value(t, random_exercise_weight(6, 10), 6)
-	testing.expect_value(t, random_exercise_weight(1, 10), 6)
-	testing.expect_value(t, random_exercise_weight(0, 10), 6)
+random_clip_weight_increases_with_skipped_draws_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, random_clip_weight(10, 10), 2)
+	testing.expect_value(t, random_clip_weight(9, 10), 3)
+	testing.expect_value(t, random_clip_weight(8, 10), 4)
+	testing.expect_value(t, random_clip_weight(7, 10), 5)
+	testing.expect_value(t, random_clip_weight(6, 10), 6)
+	testing.expect_value(t, random_clip_weight(1, 10), 6)
+	testing.expect_value(t, random_clip_weight(0, 10), 6)
 }
 
 @(test)
-play_next_exercise_index_respects_filter_and_wraps_test :: proc(
+play_next_clip_index_respects_filter_and_wraps_test :: proc(
 	t: ^testing.T,
 ) {
-	exercises := [4]Exercise{
+	clips := [4]Clip{
 		{name = "Warm up"},
 		{name = "Breathing"},
 		{name = "Warm down"},
@@ -3024,27 +3301,27 @@ play_next_exercise_index_respects_filter_and_wraps_test :: proc(
 	}
 	testing.expect_value(
 		t,
-		next_filtered_exercise_index(exercises[:], -1, "Warm"),
+		next_filtered_clip_index(clips[:], -1, "Warm"),
 		0,
 	)
 	testing.expect_value(
 		t,
-		next_filtered_exercise_index(exercises[:], 0, "Warm"),
+		next_filtered_clip_index(clips[:], 0, "Warm"),
 		2,
 	)
 	testing.expect_value(
 		t,
-		next_filtered_exercise_index(exercises[:], 2, "Warm"),
+		next_filtered_clip_index(clips[:], 2, "Warm"),
 		0,
 	)
 	testing.expect_value(
 		t,
-		next_filtered_exercise_index(exercises[:], 1, "Warm"),
+		next_filtered_clip_index(clips[:], 1, "Warm"),
 		0,
 	)
 	testing.expect_value(
 		t,
-		next_filtered_exercise_index(exercises[:], 0, "Missing"),
+		next_filtered_clip_index(clips[:], 0, "Missing"),
 		-1,
 	)
 }
@@ -3053,14 +3330,14 @@ play_next_exercise_index_respects_filter_and_wraps_test :: proc(
 shuffled_play_next_uses_randomize_weights_within_filter_test :: proc(
 	t: ^testing.T,
 ) {
-	exercises := [3]Exercise{
+	clips := [3]Clip{
 		{name = "Warm up", last_randomized_sequence = 10},
 		{name = "Breathing", last_randomized_sequence = 9},
 		{name = "Warm down", last_randomized_sequence = 0},
 	}
 	testing.expect_value(
 		t,
-		filtered_random_exercise_total_weight(exercises[:], -1, "Warm"),
+		filtered_random_clip_total_weight(clips[:], -1, "Warm"),
 		8,
 	)
 	for roll in 0 ..< 8 {
@@ -3068,8 +3345,8 @@ shuffled_play_next_uses_randomize_weights_within_filter_test :: proc(
 		if roll < 2 {expected = 0}
 		testing.expect_value(
 			t,
-			filtered_random_exercise_index_for_weighted_roll(
-				exercises[:],
+			filtered_random_clip_index_for_weighted_roll(
+				clips[:],
 				-1,
 				"Warm",
 				roll,
@@ -3079,13 +3356,13 @@ shuffled_play_next_uses_randomize_weights_within_filter_test :: proc(
 	}
 	testing.expect_value(
 		t,
-		filtered_random_exercise_total_weight(exercises[:], 0, "Warm"),
+		filtered_random_clip_total_weight(clips[:], 0, "Warm"),
 		6,
 	)
 	testing.expect_value(
 		t,
-		filtered_random_exercise_index_for_weighted_roll(
-			exercises[:],
+		filtered_random_clip_index_for_weighted_roll(
+			clips[:],
 			0,
 			"Warm",
 			0,
@@ -3095,7 +3372,7 @@ shuffled_play_next_uses_randomize_weights_within_filter_test :: proc(
 }
 
 @(test)
-exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
+clip_autoplay_advances_only_after_clip_completion_test :: proc(
 	t: ^testing.T,
 ) {
 	testing.expect(t, playback_position_finished(10, 10))
@@ -3103,7 +3380,7 @@ exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
 	testing.expect(t, !playback_position_finished(9.9, 10))
 	testing.expect(
 		t,
-		exercise_autoplay_should_advance(
+		clip_autoplay_should_advance(
 			true,
 			true,
 			false,
@@ -3114,7 +3391,7 @@ exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
 	)
 	testing.expect(
 		t,
-		!exercise_autoplay_should_advance(
+		!clip_autoplay_should_advance(
 			true,
 			false,
 			false,
@@ -3125,7 +3402,7 @@ exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
 	)
 	testing.expect(
 		t,
-		!exercise_autoplay_should_advance(
+		!clip_autoplay_should_advance(
 			true,
 			true,
 			true,
@@ -3136,7 +3413,7 @@ exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
 	)
 	testing.expect(
 		t,
-		!exercise_autoplay_should_advance(
+		!clip_autoplay_should_advance(
 			false,
 			true,
 			false,
@@ -3147,7 +3424,7 @@ exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
 	)
 	testing.expect(
 		t,
-		!exercise_autoplay_should_advance(
+		!clip_autoplay_should_advance(
 			true,
 			true,
 			false,
@@ -3158,7 +3435,7 @@ exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
 	)
 	testing.expect(
 		t,
-		!exercise_autoplay_should_advance(
+		!clip_autoplay_should_advance(
 			true,
 			true,
 			false,
@@ -3170,15 +3447,15 @@ exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
 }
 
 @(test)
-random_exercise_weighted_roll_uses_exact_weight_ranges_test :: proc(
+random_clip_weighted_roll_uses_exact_weight_ranges_test :: proc(
 	t: ^testing.T,
 ) {
-	exercises := [3]Exercise{
+	clips := [3]Clip{
 		{last_randomized_sequence = 10},
 		{last_randomized_sequence = 9},
 		{last_randomized_sequence = 0},
 	}
-	testing.expect_value(t, random_exercise_total_weight(exercises[:], -1), 11)
+	testing.expect_value(t, random_clip_total_weight(clips[:], -1), 11)
 	for roll in 0..<11 {
 		expected := 2
 		if roll < 2 {
@@ -3188,16 +3465,16 @@ random_exercise_weighted_roll_uses_exact_weight_ranges_test :: proc(
 		}
 		testing.expect_value(
 			t,
-			random_exercise_index_for_weighted_roll(exercises[:], -1, roll),
+			random_clip_index_for_weighted_roll(clips[:], -1, roll),
 			expected,
 		)
 	}
-	testing.expect_value(t, random_exercise_total_weight(exercises[:], 1), 8)
+	testing.expect_value(t, random_clip_total_weight(clips[:], 1), 8)
 	for roll in 0..<8 {
 		expected := 2
 		if roll < 2 {expected = 0}
-		selected := random_exercise_index_for_weighted_roll(
-			exercises[:],
+		selected := random_clip_index_for_weighted_roll(
+			clips[:],
 			1,
 			roll,
 		)
@@ -3207,82 +3484,82 @@ random_exercise_weighted_roll_uses_exact_weight_ranges_test :: proc(
 }
 
 @(test)
-random_exercise_weighted_roll_handles_empty_and_single_libraries_test :: proc(
+random_clip_weighted_roll_handles_empty_and_single_libraries_test :: proc(
 	t: ^testing.T,
 ) {
-	empty: [0]Exercise
-	testing.expect_value(t, random_exercise_total_weight(empty[:], -1), 0)
+	empty: [0]Clip
+	testing.expect_value(t, random_clip_total_weight(empty[:], -1), 0)
 	testing.expect_value(
 		t,
-		random_exercise_index_for_weighted_roll(empty[:], -1, 0),
+		random_clip_index_for_weighted_roll(empty[:], -1, 0),
 		-1,
 	)
-	single := [1]Exercise{{last_randomized_sequence = 4}}
-	testing.expect_value(t, random_exercise_total_weight(single[:], 0), 2)
+	single := [1]Clip{{last_randomized_sequence = 4}}
+	testing.expect_value(t, random_clip_total_weight(single[:], 0), 2)
 	testing.expect_value(
 		t,
-		random_exercise_index_for_weighted_roll(single[:], 0, 0),
+		random_clip_index_for_weighted_roll(single[:], 0, 0),
 		0,
 	)
 }
 
 @(test)
-random_exercise_help_ranks_the_next_draw_candidates_test :: proc(
+random_clip_help_ranks_the_next_draw_candidates_test :: proc(
 	t: ^testing.T,
 ) {
-	exercises := [4]Exercise{
+	clips := [4]Clip{
 		{last_randomized_sequence = 10},
 		{last_randomized_sequence = 9},
 		{last_randomized_sequence = 0},
 		{last_randomized_sequence = 8},
 	}
-	candidates: [RANDOM_EXERCISE_HELP_LIMIT]Random_Exercise_Candidate
-	count, total := random_exercise_ranked_candidates(
-		exercises[:],
+	candidates: [RANDOM_CLIP_HELP_LIMIT]Random_Clip_Candidate
+	count, total := random_clip_ranked_candidates(
+		clips[:],
 		1,
 		candidates[:],
 	)
 	testing.expect_value(t, count, 3)
 	testing.expect_value(t, total, 12)
-	testing.expect_value(t, candidates[0].exercise_index, 2)
+	testing.expect_value(t, candidates[0].clip_index, 2)
 	testing.expect_value(t, candidates[0].weight, 6)
-	testing.expect_value(t, candidates[1].exercise_index, 3)
+	testing.expect_value(t, candidates[1].clip_index, 3)
 	testing.expect_value(t, candidates[1].weight, 4)
-	testing.expect_value(t, candidates[2].exercise_index, 0)
+	testing.expect_value(t, candidates[2].clip_index, 0)
 	testing.expect_value(t, candidates[2].weight, 2)
 }
 
 @(test)
-random_exercise_help_limits_results_and_keeps_library_order_for_ties_test :: proc(
+random_clip_help_limits_results_and_keeps_library_order_for_ties_test :: proc(
 	t: ^testing.T,
 ) {
-	exercises: [12]Exercise
-	candidates: [RANDOM_EXERCISE_HELP_LIMIT]Random_Exercise_Candidate
-	count, total := random_exercise_ranked_candidates(
-		exercises[:],
+	clips: [12]Clip
+	candidates: [RANDOM_CLIP_HELP_LIMIT]Random_Clip_Candidate
+	count, total := random_clip_ranked_candidates(
+		clips[:],
 		-1,
 		candidates[:],
 	)
-	testing.expect_value(t, count, RANDOM_EXERCISE_HELP_LIMIT)
+	testing.expect_value(t, count, RANDOM_CLIP_HELP_LIMIT)
 	testing.expect_value(t, total, 72)
 	for candidate, index in candidates {
-		testing.expect_value(t, candidate.exercise_index, index)
+		testing.expect_value(t, candidate.clip_index, index)
 		testing.expect_value(t, candidate.weight, 6)
 	}
 
-	single := [1]Exercise{{last_randomized_sequence = 4}}
-	count, total = random_exercise_ranked_candidates(
+	single := [1]Clip{{last_randomized_sequence = 4}}
+	count, total = random_clip_ranked_candidates(
 		single[:],
 		0,
 		candidates[:],
 	)
 	testing.expect_value(t, count, 1)
 	testing.expect_value(t, total, 2)
-	testing.expect_value(t, candidates[0].exercise_index, 0)
+	testing.expect_value(t, candidates[0].clip_index, 0)
 }
 
 @(test)
-random_exercise_history_survives_collection_replacement_and_prunes_removed_ids_test :: proc(
+random_clip_history_survives_collection_replacement_and_prunes_removed_ids_test :: proc(
 	t: ^testing.T,
 ) {
 	database: ^SQLite_DB
@@ -3307,9 +3584,9 @@ random_exercise_history_survives_collection_replacement_and_prunes_removed_ids_t
 		media_path = "/tmp/source.mp4",
 		duration = 60,
 	}}
-	exercises := [2]Exercise{
+	clips := [2]Clip{
 		{
-			id = "exercise-1",
+			id = "clip-1",
 			source_id = "source-1",
 			name = "One",
 			start_seconds = 1,
@@ -3317,7 +3594,7 @@ random_exercise_history_survives_collection_replacement_and_prunes_removed_ids_t
 			clip_path = "/tmp/one.mp4",
 		},
 		{
-			id = "exercise-2",
+			id = "clip-2",
 			source_id = "source-1",
 			name = "Two",
 			start_seconds = 3,
@@ -3330,27 +3607,27 @@ random_exercise_history_survives_collection_replacement_and_prunes_removed_ids_t
 		sources[:],
 		nil,
 		nil,
-		exercises[:],
+		clips[:],
 	))
-	testing.expect(t, database_exercise_randomization_save(
+	testing.expect(t, database_clip_randomization_save(
 		database,
-		"exercise-1",
+		"clip-1",
 		7,
 	))
-	testing.expect(t, database_exercise_randomization_save(
+	testing.expect(t, database_clip_randomization_save(
 		database,
-		"exercise-2",
+		"clip-2",
 		4,
 	))
 	loaded: App_State
 	testing.expect(t, database_load_state(database, &loaded))
 	defer app_state_collections_destroy(&loaded)
-	testing.expect_value(t, loaded.exercises[0].last_randomized_sequence, i64(7))
-	testing.expect_value(t, loaded.exercises[1].last_randomized_sequence, i64(4))
+	testing.expect_value(t, loaded.clips[0].last_randomized_sequence, i64(7))
+	testing.expect_value(t, loaded.clips[1].last_randomized_sequence, i64(4))
 
-	imported := [2]Exercise{
+	imported := [2]Clip{
 		{
-			id = "exercise-1",
+			id = "clip-1",
 			source_id = "source-1",
 			name = "One imported",
 			start_seconds = 1,
@@ -3358,7 +3635,7 @@ random_exercise_history_survives_collection_replacement_and_prunes_removed_ids_t
 			clip_path = "/tmp/one.mp4",
 		},
 		{
-			id = "exercise-2",
+			id = "clip-2",
 			source_id = "source-1",
 			name = "Two imported",
 			start_seconds = 3,
@@ -3376,7 +3653,7 @@ random_exercise_history_survives_collection_replacement_and_prunes_removed_ids_t
 	testing.expect_value(t, imported[0].last_randomized_sequence, i64(7))
 	testing.expect_value(t, imported[1].last_randomized_sequence, i64(4))
 
-	remaining := [1]Exercise{imported[0]}
+	remaining := [1]Clip{imported[0]}
 	testing.expect(t, database_save_collections(
 		database,
 		sources[:],
@@ -3384,7 +3661,7 @@ random_exercise_history_survives_collection_replacement_and_prunes_removed_ids_t
 		nil,
 		remaining[:],
 	))
-	count, counted := database_count(database, "exercise_randomization")
+	count, counted := database_count(database, "clip_randomization")
 	testing.expect(t, counted)
 	testing.expect_value(t, count, 1)
 }
@@ -3408,11 +3685,11 @@ create_action_emphasis_follows_range_workflow_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-exercise_rename_modal_keeps_original_name_above_input_test :: proc(t: ^testing.T) {
-	modal := exercise_rename_modal_rect_for_size(1100, 720)
-	input := exercise_rename_input_rect(modal)
-	cancel := exercise_rename_cancel_rect(modal)
-	confirm := exercise_rename_confirm_rect(modal)
+clip_rename_modal_keeps_original_name_above_input_test :: proc(t: ^testing.T) {
+	modal := clip_rename_modal_rect_for_size(1100, 720)
+	input := clip_rename_input_rect(modal)
+	cancel := clip_rename_cancel_rect(modal)
+	confirm := clip_rename_confirm_rect(modal)
 	original_name_bottom := modal.y + modal.h - 130
 	testing.expect(t, original_name_bottom > input.y + input.h)
 	testing.expect(t, input.y > cancel.y + cancel.h)
@@ -3422,16 +3699,68 @@ exercise_rename_modal_keeps_original_name_above_input_test :: proc(t: ^testing.T
 }
 
 @(test)
-exercise_metadata_modal_contains_rows_and_actions_test :: proc(t: ^testing.T) {
-	modal := exercise_metadata_modal_rect_for_size(1100, 720)
-	last_row := exercise_metadata_row_rect(modal, 9)
-	close_button := exercise_metadata_close_rect(modal)
-	source_button := exercise_metadata_source_rect(modal)
+clip_metadata_modal_contains_rows_and_actions_test :: proc(t: ^testing.T) {
+	modal := clip_metadata_modal_rect_for_size(1100, 720)
+	last_row := clip_metadata_row_rect(modal, 9)
+	close_button := clip_metadata_close_rect(modal)
+	source_button := clip_metadata_source_rect(modal)
 	testing.expect_value(t, modal.x + modal.w / 2, 550.0)
 	testing.expect(t, last_row.y > close_button.y + close_button.h)
 	testing.expect(t, last_row.y > source_button.y + source_button.h)
 	testing.expect(t, close_button.x >= modal.x && close_button.x + close_button.w <= modal.x + modal.w)
 	testing.expect(t, source_button.x >= modal.x && source_button.x + source_button.w <= modal.x + modal.w)
+}
+
+@(test)
+data_modal_registers_scoped_export_and_numbered_actions_test :: proc(t: ^testing.T) {
+	previous_width := ui.width
+	previous_height := ui.height
+	previous_open := ui.data_modal_open
+	previous_confirm := ui.library_import_confirm_open
+	previous_workflow := ui.workflow
+	previous_ui_build := ui_build
+	defer {
+		ui.width = previous_width
+		ui.height = previous_height
+		ui.data_modal_open = previous_open
+		ui.library_import_confirm_open = previous_confirm
+		ui.workflow = previous_workflow
+		ui_build = previous_ui_build
+	}
+	ui.width = 1100
+	ui.height = 720
+	ui.data_modal_open = true
+	ui.library_import_confirm_open = false
+	ui.workflow = .Dancing
+
+	frame_arena: mem_virtual.Arena
+	frame_error := mem_virtual.arena_init_static(&frame_arena, 1024*1024, 4096)
+	testing.expect(t, frame_error == nil)
+	if frame_error != nil {return}
+	defer mem_virtual.arena_destroy(&frame_arena)
+	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
+
+	actions := [5]UI_Action_Kind{
+		.Export_Library,
+		.Export_Current_Workflow,
+		.Import_Library,
+		.Open_Data_Folder,
+		.Close_Data_Modal,
+	}
+	modal := data_modal_rect()
+	for action, index in actions {
+		control := find_ui_control_by_action(action)
+		testing.expect(t, control != nil)
+		if control == nil {continue}
+		expected := data_modal_action_rect(modal, index)
+		testing.expect_value(t, control.rect, expected)
+		testing.expect(t, control.rect.x >= modal.x)
+		testing.expect(t, control.rect.y >= modal.y)
+		testing.expect(t, control.rect.x + control.rect.w <= modal.x + modal.w)
+		testing.expect(t, control.rect.y + control.rect.h <= modal.y + modal.h)
+	}
+	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	ui_build.controls = nil
 }
 
 @(test)
@@ -3553,7 +3882,7 @@ activity_spinner_advances_and_wraps_test :: proc(t: ^testing.T) {
 
 @(test)
 download_progress_uses_latest_complete_progress_line_test :: proc(t: ^testing.T) {
-	status, ok := download_progress_status("noise\nVT_PROGRESS| 12.5%|80.0MiB|4.0MiB/s|00:18\nVT_PROGRESS| 25.0%|80.0MiB|5.0MiB/s|00:12\n")
+	status, ok := download_progress_status("noise\nHW_VIDEO_CLIPS_PROGRESS| 12.5%|80.0MiB|4.0MiB/s|00:18\nHW_VIDEO_CLIPS_PROGRESS| 25.0%|80.0MiB|5.0MiB/s|00:12\n")
 	testing.expect(t, ok)
 	testing.expect_value(t, status, "Downloading 25.0% / 80.0MiB / 5.0MiB/s / ETA 00:12")
 	_, ok = download_progress_status("noise only")
@@ -3572,7 +3901,7 @@ import_progress_ignores_stale_download_during_existing_media_validation_test :: 
 	}
 	status := import_progress_status(
 		&job,
-		"VT_PROGRESS|100.0%|7.18MiB|8.27MiB/s|NA\n",
+		"HW_VIDEO_CLIPS_PROGRESS|100.0%|7.18MiB|8.27MiB/s|NA\n",
 	)
 	testing.expect_value(
 		t,
@@ -3582,7 +3911,7 @@ import_progress_ignores_stale_download_during_existing_media_validation_test :: 
 }
 
 @(test)
-import_progress_reports_download_finalization_and_exercise_rebuild_phases_test :: proc(
+import_progress_reports_download_finalization_and_clip_rebuild_phases_test :: proc(
 	t: ^testing.T,
 ) {
 	job := Import_Job{
@@ -3593,22 +3922,22 @@ import_progress_reports_download_finalization_and_exercise_rebuild_phases_test :
 	}
 	status := import_progress_status(
 		&job,
-		"VT_PROGRESS|100.0%|7.18MiB|8.27MiB/s|NA\n",
+		"HW_VIDEO_CLIPS_PROGRESS|100.0%|7.18MiB|8.27MiB/s|NA\n",
 	)
 	testing.expect_value(
 		t,
 		status,
 		"Recovering source 7 of 7: finalizing downloaded media",
 	)
-	job.phase = .Rebuilding_Exercises
+	job.phase = .Rebuilding_Clips
 	status = import_progress_status(
 		&job,
-		"VT_PROGRESS|100.0%|7.18MiB|8.27MiB/s|NA\n",
+		"HW_VIDEO_CLIPS_PROGRESS|100.0%|7.18MiB|8.27MiB/s|NA\n",
 	)
 	testing.expect_value(
 		t,
 		status,
-		"Recovering source 7 of 7: rebuilding exercises",
+		"Recovering source 7 of 7: rebuilding clips",
 	)
 }
 
@@ -3644,7 +3973,7 @@ source_probe_cache_uses_video_id_across_timestamp_urls_test :: proc(t: ^testing.
 	result := Source_Probe_Result{
 		url = "https://youtu.be/KfnxccMdi-A?t=321",
 		video_id = "KfnxccMdi-A",
-		title = "Exercise",
+		title = "Clip",
 		selected_height = 1080,
 	}
 	result.heights = make([dynamic]int)
@@ -3791,6 +4120,94 @@ interface_theme_round_trips_through_application_preferences_test :: proc(
 }
 
 @(test)
+active_view_round_trips_through_application_preferences_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+
+	defaults := Active_View_Preference{workflow = .Vocal, mode = .Create}
+	testing.expect_value(t, database_active_view_load(database), defaults)
+	preferences := [4]Active_View_Preference{
+		{workflow = .Vocal, mode = .Create},
+		{workflow = .Vocal, mode = .Play},
+		{workflow = .Dancing, mode = .Create},
+		{workflow = .Dancing, mode = .Play},
+	}
+	for preference in preferences {
+		testing.expect(t, database_active_view_save(database, preference))
+		testing.expect_value(
+			t,
+			database_active_view_load(database),
+			preference,
+		)
+	}
+	testing.expect(
+		t,
+		sqlite_execute(
+			database,
+			"UPDATE app_preferences SET value = 'invalid' WHERE key = 'active_view'",
+		),
+	)
+	testing.expect_value(t, database_active_view_load(database), defaults)
+	testing.expect(
+		t,
+		!database_active_view_save(
+			database,
+			{workflow = Workflow_Kind(99), mode = .Create},
+		),
+	)
+}
+
+@(test)
+active_view_persistence_uses_current_workflow_and_workspace_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+
+	previous_database := library_database
+	previous_workflow := ui.workflow
+	previous_mode := ui.mode
+	defer {
+		library_database = previous_database
+		ui.workflow = previous_workflow
+		ui.mode = previous_mode
+	}
+	library_database = database
+	ui.workflow = .Dancing
+	ui.mode = .Play
+	persist_active_view_preference()
+	testing.expect_value(
+		t,
+		database_active_view_load(database),
+		Active_View_Preference{workflow = .Dancing, mode = .Play},
+	)
+}
+
+@(test)
 flash_leader_round_trips_through_application_preferences_test :: proc(
 	t: ^testing.T,
 ) {
@@ -3809,8 +4226,8 @@ flash_leader_round_trips_through_application_preferences_test :: proc(
 	testing.expect(t, database_create_schema(database))
 	_, found := database_flash_leader_load(database)
 	testing.expect(t, !found)
-	shortcut := vocal_shortcut_character("g", {.Control, .Shift})
-	encoded, valid := vocal_shortcut_serialize(
+	shortcut := video_clips_shortcut_character("g", {.Control, .Shift})
+	encoded, valid := video_clips_shortcut_serialize(
 		shortcut,
 		context.temp_allocator,
 	)
@@ -3820,11 +4237,11 @@ flash_leader_round_trips_through_application_preferences_test :: proc(
 	stored, found = database_flash_leader_load(database)
 	testing.expect(t, found)
 	defer delete(stored)
-	decoded: Vocal_Shortcut
-	decoded, valid = vocal_shortcut_deserialize(stored)
+	decoded: Video_Clips_Shortcut
+	decoded, valid = video_clips_shortcut_deserialize(stored)
 	testing.expect(t, valid)
-	defer vocal_shortcut_destroy(&decoded)
-	testing.expect(t, vocal_shortcut_equal(shortcut, decoded))
+	defer video_clips_shortcut_destroy(&decoded)
+	testing.expect(t, video_clips_shortcut_equal(shortcut, decoded))
 }
 
 @(test)
@@ -4118,21 +4535,21 @@ source_timeline_maps_and_clamps_pointer_position_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-source_and_exercise_id_lookups_return_stable_indices_test :: proc(t: ^testing.T) {
+source_and_clip_id_lookups_return_stable_indices_test :: proc(t: ^testing.T) {
 	sources := []Source_Video{{id="source-a"}, {id="source-b"}}
-	exercises := []Exercise{{id="exercise-a"}, {id="exercise-b"}}
+	clips := []Clip{{id="clip-a"}, {id="clip-b"}}
 	testing.expect_value(t, source_index_for_id(sources, "source-b"), 1)
 	testing.expect_value(t, source_index_for_id(sources, "missing"), -1)
-	testing.expect_value(t, exercise_index_for_id(exercises, "exercise-a"), 0)
-	testing.expect_value(t, exercise_index_for_id(exercises, "missing"), -1)
-	linked_exercises := []Exercise{{source_id="source-b"}, {source_id="missing"}}
-	testing.expect_value(t, source_index_for_exercise(sources, linked_exercises, 0), 1)
-	testing.expect_value(t, source_index_for_exercise(sources, linked_exercises, 1), -1)
-	testing.expect_value(t, source_index_for_exercise(sources, linked_exercises, 2), -1)
+	testing.expect_value(t, clip_index_for_id(clips, "clip-a"), 0)
+	testing.expect_value(t, clip_index_for_id(clips, "missing"), -1)
+	linked_clips := []Clip{{source_id="source-b"}, {source_id="missing"}}
+	testing.expect_value(t, source_index_for_clip(sources, linked_clips, 0), 1)
+	testing.expect_value(t, source_index_for_clip(sources, linked_clips, 1), -1)
+	testing.expect_value(t, source_index_for_clip(sources, linked_clips, 2), -1)
 }
 
 @(test)
-rename_exercise_updates_memory_and_database_test :: proc(t: ^testing.T) {
+rename_clip_updates_memory_and_database_test :: proc(t: ^testing.T) {
 	database: ^SQLite_DB
 	path := strings.clone_to_cstring(":memory:")
 	defer delete(path)
@@ -4149,14 +4566,14 @@ rename_exercise_updates_memory_and_database_test :: proc(t: ^testing.T) {
 	state = {}
 	state.sources = make([dynamic]Source_Video)
 	state.hints = make([dynamic]Import_Hint)
-	state.exercises = make([dynamic]Exercise)
+	state.clips = make([dynamic]Clip)
 	defer {
 		for &source in state.sources {delete_source_video(&source)}
 		for &hint in state.hints {delete_import_hint(&hint)}
-		for &exercise in state.exercises {delete_exercise(&exercise)}
+		for &clip in state.clips {delete_clip(&clip)}
 		delete(state.sources)
 		delete(state.hints)
-		delete(state.exercises)
+		delete(state.clips)
 		transcript_generation_destroy(&state.transcripts)
 		state = previous_state
 		ui = previous_ui
@@ -4174,23 +4591,23 @@ rename_exercise_updates_memory_and_database_test :: proc(t: ^testing.T) {
 	testing.expect(t, source_copied)
 	if !source_copied {return}
 	append(&state.sources, source)
-	exercise, exercise_copied := clone_exercise(Exercise{
-		id="exercise-1",
+	clip, clip_copied := clone_clip(Clip{
+		id="clip-1",
 		source_id="source-1",
 		name="Original",
 		start_seconds=2,
 		end_seconds=8,
-		clip_path="/tmp/exercise.mp4",
+		clip_path="/tmp/clip.mp4",
 	})
-	testing.expect(t, exercise_copied)
-	if !exercise_copied {return}
-	append(&state.exercises, exercise)
+	testing.expect(t, clip_copied)
+	if !clip_copied {return}
+	append(&state.clips, clip)
 	library_database = database
 	library_legacy_fallback = false
 
-	testing.expect(t, rename_exercise(0, "  Renamed  "))
-	testing.expect_value(t, state.exercises[0].name, "Renamed")
-	statement, prepared := sqlite_prepare(database, "SELECT name FROM exercises WHERE id = 'exercise-1'")
+	testing.expect(t, rename_clip(0, "  Renamed  "))
+	testing.expect_value(t, state.clips[0].name, "Renamed")
+	statement, prepared := sqlite_prepare(database, "SELECT name FROM clips WHERE id = 'clip-1'")
 	testing.expect(t, prepared)
 	if !prepared {return}
 	defer sqlite3_finalize(statement)
@@ -4487,13 +4904,13 @@ text_click_counts_select_caret_word_and_all_test :: proc(t: ^testing.T) {
 		ui.drag_origin_start = previous_start
 		ui.drag_origin_end = previous_end
 	}
-	begin_text_selection_at_offset(&value, .Exercise_Name, 1, 1)
+	begin_text_selection_at_offset(&value, .Clip_Name, 1, 1)
 	testing.expect_value(t, ui.selection_anchor_byte, 1)
 	testing.expect_value(t, ui.caret_byte_offset, 1)
-	begin_text_selection_at_offset(&value, .Exercise_Name, 5, 2)
+	begin_text_selection_at_offset(&value, .Clip_Name, 5, 2)
 	start, end := text_selection_bounds(value)
 	testing.expect_value(t, value[start:end], "two")
-	begin_text_selection_at_offset(&value, .Exercise_Name, 3, 3)
+	begin_text_selection_at_offset(&value, .Clip_Name, 3, 3)
 	start, end = text_selection_bounds(value)
 	testing.expect_value(t, start, 0)
 	testing.expect_value(t, end, len(value))
@@ -4602,8 +5019,8 @@ source_search_matches_title_and_video_id_without_case_test :: proc(t: ^testing.T
 
 @(test)
 flash_leader_starts_only_without_text_focus_test :: proc(t: ^testing.T) {
-	ui.flash_leader = vocal_shortcut_clone(vocal_shortcut_default())
-	defer vocal_shortcut_destroy(&ui.flash_leader)
+	ui.flash_leader = video_clips_shortcut_clone(video_clips_shortcut_default())
+	defer video_clips_shortcut_destroy(&ui.flash_leader)
 	testing.expect(t, flash_leader_allowed(.None, 44, 0, "/"))
 	testing.expect(t, !flash_leader_allowed(.Source_Search, 44, 0, "/"))
 	testing.expect(
@@ -4633,8 +5050,8 @@ escape_unfocuses_each_text_input_kind_test :: proc(t: ^testing.T) {
 	testing.expect(t, escape_should_unfocus(.URL))
 	testing.expect(t, escape_should_unfocus(.Source_Search))
 	testing.expect(t, escape_should_unfocus(.Transcript_Search))
-	testing.expect(t, escape_should_unfocus(.Exercise_Search))
-	testing.expect(t, escape_should_unfocus(.Exercise_Name))
+	testing.expect(t, escape_should_unfocus(.Clip_Search))
+	testing.expect(t, escape_should_unfocus(.Clip_Name))
 }
 
 @(test)
@@ -4759,7 +5176,7 @@ ui_background_comparison_accepts_disabling_and_rejects_structural_changes_test :
 	baseline_controls := []UI_Diagnostic_Control{
 		{
 			id = 1,
-			functional_name = "save exercise",
+			functional_name = "save clip",
 			action_kind = "Save",
 			rect = {x=10, y=20, w=30, h=40},
 			flags = enabled_flags,
@@ -4769,7 +5186,7 @@ ui_background_comparison_accepts_disabling_and_rejects_structural_changes_test :
 	current_controls := []UI_Diagnostic_Control{
 		{
 			id = 1,
-			functional_name = "save exercise",
+			functional_name = "save clip",
 			action_kind = "Save",
 			rect = {x=10, y=20, w=30, h=40},
 			flags = disabled_flags,

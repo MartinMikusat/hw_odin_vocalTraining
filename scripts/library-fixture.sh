@@ -4,25 +4,26 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 CANONICAL="$ROOT/testdata/library.sqlite3"
 DUMP="$ROOT/testdata/library.sql"
-DEV_SUPPORT=${VT_APP_SUPPORT_DIR:-"$ROOT/build/dev-support"}
+DEV_SUPPORT=${HW_VIDEO_CLIPS_APP_SUPPORT_DIR:-"$ROOT/build/dev-support"}
 DEV_DATABASE="$DEV_SUPPORT/library.sqlite3"
 
 validate_database() {
   database=$1
   [ -f "$database" ] || {
-    echo "[vocal-training] database does not exist: $database" >&2
+    echo "[hw_videoClips] database does not exist: $database" >&2
     return 1
   }
   [ "$(sqlite3 "$database" "PRAGMA integrity_check")" = "ok" ] || {
-    echo "[vocal-training] database integrity check failed: $database" >&2
+    echo "[hw_videoClips] database integrity check failed: $database" >&2
     return 1
   }
   [ -z "$(sqlite3 "$database" "PRAGMA foreign_key_check")" ] || {
-    echo "[vocal-training] database foreign-key check failed: $database" >&2
+    echo "[hw_videoClips] database foreign-key check failed: $database" >&2
     return 1
   }
-  [ "$(sqlite3 "$database" "PRAGMA user_version")" = "2" ] || {
-    echo "[vocal-training] unsupported database schema: $database" >&2
+  schema_version=$(sqlite3 "$database" "PRAGMA user_version")
+  [ "$schema_version" = "2" ] || [ "$schema_version" = "6" ] || {
+    echo "[hw_videoClips] unsupported database schema: $database" >&2
     return 1
   }
 }
@@ -38,7 +39,7 @@ initialize_database() {
   mkdir -p "$DEV_SUPPORT"
   if [ ! -f "$DEV_DATABASE" ]; then
     sqlite3 "$CANONICAL" ".backup '$DEV_DATABASE'"
-    printf '[vocal-training] initialized development library: %s\n' "$DEV_DATABASE"
+    printf '[hw_videoClips] initialized development library: %s\n' "$DEV_DATABASE"
   fi
 }
 
@@ -51,7 +52,7 @@ case "${1:-}" in
     validate_database "$CANONICAL"
     mkdir -p "$DEV_SUPPORT"
     sqlite3 "$CANONICAL" ".backup '$DEV_DATABASE'"
-    printf '[vocal-training] reset development library: %s\n' "$DEV_DATABASE"
+    printf '[hw_videoClips] reset development library: %s\n' "$DEV_DATABASE"
     ;;
   validate)
     validate_database "${2:-$DEV_DATABASE}"
@@ -65,7 +66,7 @@ case "${1:-}" in
     mv "$temporary_database" "$CANONICAL"
     trap - EXIT
     write_dump
-    printf '[vocal-training] promoted development library: %s\n' "$CANONICAL"
+    printf '[hw_videoClips] promoted development library: %s\n' "$CANONICAL"
     ;;
   dump)
     validate_database "$CANONICAL"

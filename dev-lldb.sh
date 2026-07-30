@@ -4,18 +4,18 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT"
 
-VT_APP_SUPPORT_DIR=${VT_APP_SUPPORT_DIR:-"$ROOT/build/dev-support"}
-export VT_APP_SUPPORT_DIR
+HW_VIDEO_CLIPS_APP_SUPPORT_DIR=${HW_VIDEO_CLIPS_APP_SUPPORT_DIR:-"$ROOT/build/dev-support"}
+export HW_VIDEO_CLIPS_APP_SUPPORT_DIR
 "$ROOT/scripts/library-fixture.sh" init
 
 ./build.sh debug
-APP="$ROOT/build/VocalTraining.app"
-EXECUTABLE="$APP/Contents/MacOS/VocalTraining"
+APP="$ROOT/build/hw_videoClips.app"
+EXECUTABLE="$APP/Contents/MacOS/hw_videoClips"
 TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
 SESSION="$ROOT/build/lldb-sessions/$TIMESTAMP"
 mkdir -p "$SESSION"
-cp "$EXECUTABLE" "$SESSION/VocalTraining"
-cp -R "$APP.dSYM" "$SESSION/VocalTraining.app.dSYM"
+cp "$EXECUTABLE" "$SESSION/hw_videoClips"
+cp -R "$APP.dSYM" "$SESSION/hw_videoClips.app.dSYM"
 {
   printf 'git_revision=%s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)"
   xcrun dwarfdump --uuid "$EXECUTABLE"
@@ -29,4 +29,4 @@ script -q -F "$SESSION/lldb.log" env MTL_DEBUG_LAYER=1 lldb --batch \
   -k 'disassemble --frame --bytes' \
   -- "$EXECUTABLE" "$@"
 
-printf '[vocal-training] LLDB session artifacts: %s\n' "$SESSION"
+printf '[hw_videoClips] LLDB session artifacts: %s\n' "$SESSION"

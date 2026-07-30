@@ -484,8 +484,8 @@ notification_simulation_apply :: proc(scenario: string) -> (
 	switch scenario {
 	case "parallel":
 		_ = notification_begin_simulated(
-			"Exporting exercise clip...",
-			"Simulated FFmpeg exercise export.",
+			"Exporting clip...",
+			"Simulated FFmpeg clip export.",
 		)
 		_ = notification_begin_simulated(
 			"Downloading source 42%...",
@@ -494,8 +494,8 @@ notification_simulation_apply :: proc(scenario: string) -> (
 		return 2, 2, true
 	case "completed":
 		_ = notification_begin_simulated(
-			"Exporting exercise clip...",
-			"Simulated FFmpeg exercise export.",
+			"Exporting clip...",
+			"Simulated FFmpeg clip export.",
 		)
 		import_id := notification_begin_simulated(
 			"Downloading source 100%...",
@@ -510,10 +510,10 @@ notification_simulation_apply :: proc(scenario: string) -> (
 		return 1, 1, true
 	case "overflow":
 		summaries := [7]string{
-			"Exporting exercise clip...",
+			"Exporting clip...",
 			"Downloading source 42%...",
 			"Checking YouTube metadata...",
-			"Rebuilding missing exercise...",
+			"Rebuilding missing clip...",
 			"Validating downloaded media...",
 			"Recovering imported source...",
 			"Preparing range preview...",

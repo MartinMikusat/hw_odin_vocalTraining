@@ -107,9 +107,9 @@ UI_Focus :: enum {
 	URL,
 	Source_Search,
 	Transcript_Search,
-	Exercise_Search,
-	Exercise_Name,
-	Exercise_Rename,
+	Clip_Search,
+	Clip_Name,
+	Clip_Rename,
 }
 
 UI_Mode :: enum {
@@ -117,11 +117,17 @@ UI_Mode :: enum {
 	Play,
 }
 
+WORKFLOW_COUNT :: 2
+
 Numbered_Action_Code :: struct {
 	section, action: int,
 }
 
 PITCH_ACTION_INDEX :: 11
+DANCE_MIRROR_ACTION_INDEX :: 15
+DANCE_LOOP_ACTION_INDEX :: 16
+DANCE_COUNT_IN_ACTION_INDEX :: 17
+DANCE_COUNT_EACH_LOOP_ACTION_INDEX :: 18
 
 Source_Hint_Control :: enum {
 	None,
@@ -165,31 +171,32 @@ UI_State :: struct {
 	using input_state:  text_input.State,
 	palette_previous_input: text_input.Focus_Snapshot,
 	mode:               UI_Mode,
+	workflow:           Workflow_Kind,
 	number_prefix:      int,
 	number_prefix_deadline_ms: i64,
 	dark_theme:         bool,
-	flash_leader:       Vocal_Shortcut,
+	flash_leader:       Video_Clips_Shortcut,
 	settings_search:    command_palette.State,
 	settings_open:      bool,
-	settings_category:  Vocal_Settings_Category,
+	settings_category:  Video_Clips_Settings_Category,
 	settings_query:     string,
 	settings_query_focused: bool,
 	settings_error:     string,
 	shortcut_open:      bool,
 	shortcut_listening: bool,
-	shortcut_candidate: Vocal_Shortcut,
+	shortcut_candidate: Video_Clips_Shortcut,
 	shortcut_candidate_valid: bool,
 	shortcut_collision: string,
 	shortcut_error:     string,
-	shortcut_live_modifiers: Vocal_Shortcut_Modifiers,
+	shortcut_live_modifiers: Video_Clips_Shortcut_Modifiers,
 	source_modal_open:  bool,
 	source_modal_refetch_index: int,
 	source_details_open: bool,
 	source_details_index: int,
-	exercise_rename_open: bool,
-	exercise_rename_index: int,
-	exercise_metadata_open: bool,
-	exercise_metadata_index: int,
+	clip_rename_open: bool,
+	clip_rename_index: int,
+	clip_metadata_open: bool,
+	clip_metadata_index: int,
 	randomize_help_open: bool,
 	data_modal_open: bool,
 	notification_modal_open: bool,
@@ -198,9 +205,9 @@ UI_State :: struct {
 	url_input:          string,
 	source_search:      string,
 	transcript_search:  string,
-	exercise_search:    string,
-	exercise_name:      string,
-	exercise_rename:    string,
+	clip_search:    string,
+	clip_name:      string,
+	clip_rename:    string,
 	command_palette_query: string,
 	command_palette_scroll: f64,
 	notification_scroll: f64,
@@ -219,14 +226,20 @@ UI_State :: struct {
 	transcript_follow_target_seconds: f64,
 	transcript_follow_target_deadline: uint,
 	transcript_has_follow_target: bool,
-	exercise_scroll:    f64,
-	active_exercise:    int,
-	exercise_shuffle:   bool,
-	exercise_autoplay:  bool,
+	clip_scroll:    f64,
+	active_clip:    int,
+	clip_shuffle:   bool,
+	clip_autoplay:  bool,
 	player_item:        Id,
 	playback_completion_pending: bool,
 	player_volume:      f32,
 	playback_rate:      f32,
+	vocal_playback_rate: f32,
+	count_in_active:    bool,
+	count_in_value:     int,
+	count_in_remaining: int,
+	count_in_deadline_ms: i64,
+	count_in_for_loop:  bool,
 	player_duration:    f64,
 	source_playback_active: bool,
 	source_scrubbing:   bool,
@@ -353,7 +366,7 @@ WINDOW_RESIZE_INSET :: 6.0
 WINDOW_MIN_WIDTH :: 1100.0
 WINDOW_MIN_HEIGHT :: 720.0
 ACCENT_EDGE_WIDTH :: 4.0
-TRACE_FOREIGN_LIFETIMES :: #config(VT_TRACE_FOREIGN_LIFETIMES, false)
+TRACE_FOREIGN_LIFETIMES :: #config(HW_VIDEO_CLIPS_TRACE_FOREIGN_LIFETIMES, false)
 
 Text_Align :: enum {
 	Start,
@@ -391,6 +404,7 @@ UI_Action_Kind :: enum {
 	Shortcut_Save,
 	Shortcut_Reset,
 	Shortcut_Cancel,
+	Workflow_Toggle,
 	Mode_Toggle,
 	Open_Source_Modal,
 	Cancel_Source_Modal,
@@ -412,8 +426,8 @@ UI_Action_Kind :: enum {
 	Transcript_Search,
 	Source,
 	Transcript,
-	Exercise_Search,
-	Exercise,
+	Clip_Search,
+	Clip,
 	Randomize,
 	Open_Randomize_Help,
 	Close_Randomize_Help,
@@ -430,12 +444,18 @@ UI_Action_Kind :: enum {
 	Pitch_Chart,
 	Open_Pitch_Help,
 	Close_Pitch_Help,
-	Exercise_Name,
-	Cancel_Exercise_Rename,
-	Confirm_Exercise_Rename,
-	Exercise_Rename,
-	Close_Exercise_Metadata,
-	View_Exercise_Source,
+	Dance_Mirror_Toggle,
+	Dance_Loop_Toggle,
+	Dance_Count_In,
+	Dance_Count_Each_Loop_Toggle,
+	Dance_BPM_Down,
+	Dance_BPM_Up,
+	Clip_Name,
+	Cancel_Clip_Rename,
+	Confirm_Clip_Rename,
+	Clip_Rename,
+	Close_Clip_Metadata,
+	View_Clip_Source,
 	Volume_Down,
 	Volume_Up,
 	Speed_Down,
@@ -460,6 +480,7 @@ UI_Action_Kind :: enum {
 	Close_Data_Modal,
 	Open_Data_Folder,
 	Export_Library,
+	Export_Current_Workflow,
 	Import_Library,
 	Cancel_Library_Import,
 	Confirm_Library_Import,
@@ -516,7 +537,16 @@ UI_Build_Output :: struct {
 	frame:              int,
 }
 
-ui := UI_State{player_volume = 1, playback_rate = 1, source_details_index = -1, source_modal_refetch_index = -1, exercise_rename_index = -1, exercise_metadata_index = -1, transcript_active_match = -1}
+ui := UI_State{
+	player_volume = 1,
+	playback_rate = 1,
+	vocal_playback_rate = 1,
+	source_details_index = -1,
+	source_modal_refetch_index = -1,
+	clip_rename_index = -1,
+	clip_metadata_index = -1,
+	transcript_active_match = -1,
+}
 ui_event_tag: int
 ax_actions: [dynamic]AX_Action
 ui_build: UI_Build_Output
@@ -543,8 +573,8 @@ PALETTE_CONTEXT_PITCH        :: command_palette.Context_Mask(1 << 13)
 CONTROL_URL :: Id(rawptr(uintptr(1)))
 CONTROL_STATUS :: Id(rawptr(uintptr(2)))
 CONTROL_SOURCE :: Id(rawptr(uintptr(3)))
-CONTROL_EXERCISE :: Id(rawptr(uintptr(4)))
-CONTROL_EXERCISE_NAME :: Id(rawptr(uintptr(5)))
+CONTROL_CLIP :: Id(rawptr(uintptr(4)))
+CONTROL_CLIP_NAME :: Id(rawptr(uintptr(5)))
 
 trace_foreign_lifetime :: proc(action, kind: string, value: rawptr, owner: string) {
 	when TRACE_FOREIGN_LIFETIMES {
@@ -939,12 +969,12 @@ focused_text :: proc() -> ^string {
 		return &ui.source_search
 	case .Transcript_Search:
 		return &ui.transcript_search
-	case .Exercise_Search:
-		return &ui.exercise_search
-	case .Exercise_Name:
-		return &ui.exercise_name
-	case .Exercise_Rename:
-		return &ui.exercise_rename
+	case .Clip_Search:
+		return &ui.clip_search
+	case .Clip_Name:
+		return &ui.clip_name
+	case .Clip_Rename:
+		return &ui.clip_rename
 	}
 	return nil
 }
@@ -1047,6 +1077,15 @@ mode_button_rect_for_size :: proc(width, height: f64) -> UI_Rect {
 	return UI_Rect{max(18, width - 214), height - 31, 196, 24}
 }
 
+workflow_button_rect_for_size :: proc(width, height: f64) -> UI_Rect {
+	mode := mode_button_rect_for_size(width, height)
+	return UI_Rect{max(18, mode.x - 166), height - 31, 156, 24}
+}
+
+workflow_button_rect :: proc() -> UI_Rect {
+	return workflow_button_rect_for_size(ui.width, ui.height)
+}
+
 settings_button_rect_for_size :: proc(height: f64) -> UI_Rect {
 	return window_control_rect_for_size(3, height)
 }
@@ -1087,18 +1126,37 @@ window_icon_rect :: proc(index: int) -> UI_Rect {
 }
 
 app_title_rect_for_size :: proc(width, height: f64) -> UI_Rect {
-	mode := mode_button_rect_for_size(width, height)
+	workflow := workflow_button_rect_for_size(width, height)
 	x := 160.0
 	return UI_Rect{
 		x,
 		height-APP_HEADER_HEIGHT+2,
-		max(0, mode.x-x-12),
+		max(0, workflow.x-x-12),
 		APP_HEADER_HEIGHT-2,
 	}
 }
 
 app_title_rect :: proc() -> UI_Rect {
 	return app_title_rect_for_size(ui.width, ui.height)
+}
+
+active_view_label :: proc(
+	workflow: Workflow_Kind,
+	mode: UI_Mode,
+) -> string {
+	switch workflow {
+	case .Vocal:
+		switch mode {
+		case .Create: return "VOCAL SOURCES"
+		case .Play: return "VOCAL CLIPS"
+		}
+	case .Dancing:
+		switch mode {
+		case .Create: return "DANCING SOURCES"
+		case .Play: return "DANCING CLIPS"
+		}
+	}
+	return ""
 }
 
 window_resize_edges_for_size :: proc(
@@ -1340,43 +1398,43 @@ source_details_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + modal.h - 142 - f64(row) * 31, modal.w - 48, 30}
 }
 
-exercise_rename_modal_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
+clip_rename_modal_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
 	width := min(max(560, view_width * 0.52), 720)
 	height := min(max(300, view_height * 0.42), 380)
 	return UI_Rect{(view_width - width) / 2, (view_height - height) / 2, width, height}
 }
 
-exercise_rename_modal_rect :: proc() -> UI_Rect {
-	return exercise_rename_modal_rect_for_size(ui.width, ui.height)
+clip_rename_modal_rect :: proc() -> UI_Rect {
+	return clip_rename_modal_rect_for_size(ui.width, ui.height)
 }
 
-exercise_rename_input_rect :: proc(modal: UI_Rect) -> UI_Rect {
+clip_rename_input_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 82, modal.w - 48, 36}
 }
 
-exercise_rename_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
+clip_rename_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 24, 124, 34}
 }
 
-exercise_rename_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
+clip_rename_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + modal.w - 180, modal.y + 24, 156, 34}
 }
 
-exercise_metadata_modal_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
+clip_metadata_modal_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
 	width := min(max(620, view_width * 0.58), 780)
 	height := min(max(500, view_height * 0.68), 580)
 	return UI_Rect{(view_width - width) / 2, (view_height - height) / 2, width, height}
 }
 
-exercise_metadata_modal_rect :: proc() -> UI_Rect {
-	return exercise_metadata_modal_rect_for_size(ui.width, ui.height)
+clip_metadata_modal_rect :: proc() -> UI_Rect {
+	return clip_metadata_modal_rect_for_size(ui.width, ui.height)
 }
 
-exercise_metadata_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
+clip_metadata_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + modal.h - 142 - f64(row) * 32, modal.w - 48, 30}
 }
 
-exercise_metadata_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
+clip_metadata_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
 }
 
@@ -1411,7 +1469,7 @@ randomize_help_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 
 data_modal_rect :: proc() -> UI_Rect {
 	width := min(max(560, ui.width * 0.5), 680)
-	height := min(max(330, ui.height * 0.42), 390)
+	height := min(max(430, ui.height * 0.52), 500)
 	return UI_Rect{(ui.width - width) / 2, (ui.height - height) / 2, width, height}
 }
 
@@ -1570,8 +1628,8 @@ notification_action_available :: proc(notification: ^Notification) -> bool {
 open_notification_history :: proc(notification_id: i64 = 0) {
 	cancel_ui_flash()
 	if ui.data_modal_open {close_data_modal()}
-	if ui.exercise_rename_open {close_exercise_rename()}
-	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.clip_rename_open {close_clip_rename()}
+	if ui.clip_metadata_open {close_clip_metadata()}
 	if ui.randomize_help_open {close_randomize_help()}
 	if ui.pitch.help_open {close_pitch_help()}
 	if ui.source_details_open {close_source_details()}
@@ -1646,14 +1704,14 @@ activate_notification_action :: proc() -> bool {
 }
 
 library_import_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
-	return UI_Rect{modal.x + 24, modal.y + 22, 124, 34}
+	return UI_Rect{modal.x + modal.w - 148, modal.y + 22, 124, 34}
 }
 
 library_import_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
-	return UI_Rect{modal.x + modal.w - 230, modal.y + 22, 206, 34}
+	return UI_Rect{modal.x + 24, modal.y + 22, 206, 34}
 }
 
-exercise_metadata_source_rect :: proc(modal: UI_Rect) -> UI_Rect {
+clip_metadata_source_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + modal.w - 204, modal.y + 22, 180, 34}
 }
 
@@ -1668,7 +1726,7 @@ source_details_metadata_changed :: proc() {
 	ui.needs_redraw = true
 	if !ui.source_details_open || ui.source_details_index < 0 || ui.source_details_index >= len(state.sources) {return}
 	source := &state.sources[ui.source_details_index]
-	request_source_metadata(source.video_id, source.media_path)
+	request_source_metadata(source.video_id, source.media_path, source.workflow)
 }
 
 open_source_details :: proc(source_index: int) {
@@ -1682,66 +1740,66 @@ open_source_details :: proc(source_index: int) {
 	clear_marked_text()
 	ui.needs_redraw = true
 	source := &state.sources[source_index]
-	request_source_metadata(source.video_id, source.media_path)
+	request_source_metadata(source.video_id, source.media_path, source.workflow)
 }
 
-open_exercise_rename :: proc() {
+open_clip_rename :: proc() {
 	cancel_ui_flash()
-	if ui.active_exercise < 0 || ui.active_exercise >= len(state.exercises) {return}
-	ui.exercise_rename_index = ui.active_exercise
-	ui.exercise_rename_open = true
-	ui_set_string(&ui.exercise_rename, state.exercises[ui.exercise_rename_index].name)
-	focus_text_input(.Exercise_Rename)
+	if ui.active_clip < 0 || ui.active_clip >= len(state.clips) {return}
+	ui.clip_rename_index = ui.active_clip
+	ui.clip_rename_open = true
+	ui_set_string(&ui.clip_rename, state.clips[ui.clip_rename_index].name)
+	focus_text_input(.Clip_Rename)
 }
 
-close_exercise_rename :: proc() {
+close_clip_rename :: proc() {
 	cancel_ui_flash()
-	ui.exercise_rename_open = false
-	ui.exercise_rename_index = -1
+	ui.clip_rename_open = false
+	ui.clip_rename_index = -1
 	ui.focus = .None
 	text_input.end_pointer_selection(&ui.input_state)
 	clear_marked_text()
-	ui_set_string(&ui.exercise_rename, "")
+	ui_set_string(&ui.clip_rename, "")
 	ui.needs_redraw = true
 }
 
-confirm_exercise_rename :: proc() {
-	name := strings.trim_space(ui.exercise_rename)
+confirm_clip_rename :: proc() {
+	name := strings.trim_space(ui.clip_rename)
 	if len(name) == 0 {
-		set_error_status("Enter a name for the exercise")
+		set_error_status("Enter a name for the clip")
 		return
 	}
-	index := ui.exercise_rename_index
-	if !rename_exercise(index, name) {
-		set_error_status("Unable to rename the exercise")
+	index := ui.clip_rename_index
+	if !rename_clip(index, name) {
+		set_error_status("Unable to rename the clip")
 		return
 	}
-	renamed := state.exercises[index].name
-	close_exercise_rename()
-	set_success_status(fmt.tprintf("Renamed exercise to %s", renamed))
+	renamed := state.clips[index].name
+	close_clip_rename()
+	set_success_status(fmt.tprintf("Renamed clip to %s", renamed))
 }
 
-open_exercise_metadata :: proc() {
+open_clip_metadata :: proc() {
 	cancel_ui_flash()
-	if ui.active_exercise < 0 || ui.active_exercise >= len(state.exercises) {return}
-	ui.exercise_metadata_index = ui.active_exercise
-	ui.exercise_metadata_open = true
+	if ui.active_clip < 0 || ui.active_clip >= len(state.clips) {return}
+	ui.clip_metadata_index = ui.active_clip
+	ui.clip_metadata_open = true
 	ui.focus = .None
 	text_input.end_pointer_selection(&ui.input_state)
 	ui.needs_redraw = true
 }
 
-close_exercise_metadata :: proc() {
+close_clip_metadata :: proc() {
 	cancel_ui_flash()
-	ui.exercise_metadata_open = false
-	ui.exercise_metadata_index = -1
+	ui.clip_metadata_open = false
+	ui.clip_metadata_index = -1
 	ui.needs_redraw = true
 }
 
 open_randomize_help :: proc() {
 	cancel_ui_flash()
-	if ui.exercise_rename_open {close_exercise_rename()}
-	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.clip_rename_open {close_clip_rename()}
+	if ui.clip_metadata_open {close_clip_metadata()}
 	if ui.data_modal_open {close_data_modal()}
 	if ui.notification_modal_open {close_notification_history()}
 	if ui.source_details_open {close_source_details()}
@@ -1775,7 +1833,7 @@ close_pitch_help :: proc() {
 
 save_pitch_settings :: proc() {
 	if !database_pitch_settings_save(library_database, ui.pitch.settings) {
-		fmt.eprintln("[vocal-training] could not persist pitch settings")
+		fmt.eprintln("[hw_videoClips] could not persist pitch settings")
 	}
 	ui.needs_redraw = true
 }
@@ -1800,18 +1858,18 @@ close_data_modal :: proc() {
 	ui.needs_redraw = true
 }
 
-view_exercise_source :: proc() {
-	if ui.exercise_metadata_index < 0 ||
-	   ui.exercise_metadata_index >= len(state.exercises) {
+view_clip_source :: proc() {
+	if ui.clip_metadata_index < 0 ||
+	   ui.clip_metadata_index >= len(state.clips) {
 		return
 	}
-	source_index := source_index_for_exercise(
+	source_index := source_index_for_clip(
 		state.sources[:],
-		state.exercises[:],
-		ui.exercise_metadata_index,
+		state.clips[:],
+		ui.clip_metadata_index,
 	)
 	if source_index < 0 {
-		set_error_status("The exercise source is no longer in the source register")
+		set_error_status("The clip source is no longer in the source register")
 		return
 	}
 	set_ui_mode(.Create)
@@ -1861,14 +1919,24 @@ schedule_source_probe :: proc(delay_frames: uint) {
 	ui.url_probe_due_tick = ui.frame_tick + delay_frames
 }
 
+persist_active_view_preference :: proc() {
+	if library_database == nil {return}
+	if !database_active_view_save(
+		library_database,
+		{workflow = ui.workflow, mode = ui.mode},
+	) {
+		set_error_status("The current workflow and workspace could not be saved")
+	}
+}
+
 set_ui_mode :: proc(mode: UI_Mode) {
 	if ui.mode == mode {return}
 	cancel_ui_flash()
 	clear_number_prefix()
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
-	if ui.exercise_rename_open {close_exercise_rename()}
-	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.clip_rename_open {close_clip_rename()}
+	if ui.clip_metadata_open {close_clip_metadata()}
 	if ui.randomize_help_open {close_randomize_help()}
 	if ui.pitch.help_open {close_pitch_help()}
 	if ui.data_modal_open {close_data_modal()}
@@ -1879,7 +1947,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 		metal_player_clear()
 	} else {
 		pitch_monitor_stop(&ui.pitch)
-		ui.active_exercise = -1
+		ui.active_clip = -1
 		if state.active_source >= 0 && state.active_source < len(state.sources) {
 			_ = load_source_player(state.active_source)
 		}
@@ -1890,6 +1958,52 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	clear_marked_text()
 	normalize_scroll_offsets()
 	ui.needs_redraw = true
+	persist_active_view_preference()
+}
+
+last_source_index_for_workflow :: proc(workflow: Workflow_Kind) -> int {
+	for index := len(state.sources)-1; index >= 0; index -= 1 {
+		if state.sources[index].workflow == workflow {return index}
+	}
+	return -1
+}
+
+set_ui_workflow :: proc(workflow: Workflow_Kind) {
+	if ui.workflow == workflow {return}
+	cancel_ui_flash()
+	clear_number_prefix()
+	if ui.source_modal_open {close_source_modal()}
+	if ui.source_details_open {close_source_details()}
+	if ui.clip_rename_open {close_clip_rename()}
+	if ui.clip_metadata_open {close_clip_metadata()}
+	if ui.randomize_help_open {close_randomize_help()}
+	if ui.pitch.help_open {close_pitch_help()}
+	if ui.data_modal_open {close_data_modal()}
+	if ui.notification_modal_open {close_notification_history()}
+	pitch_monitor_stop(&ui.pitch)
+	metal_player_clear()
+	ui.workflow = workflow
+	ui.active_clip = -1
+	state.active_source = -1
+	ui.source_scroll = 0
+	ui.transcript_scroll = 0
+	ui.clip_scroll = 0
+	ui_set_string(&ui.source_search, "")
+	ui_set_string(&ui.transcript_search, "")
+	ui_set_string(&ui.clip_search, "")
+	ui.playback_rate = workflow == .Vocal ? ui.vocal_playback_rate : 1
+	if ui.mode == .Create {
+		if source_index := last_source_index_for_workflow(workflow);
+		   source_index >= 0 {
+			_ = load_source_player(source_index)
+		}
+	}
+	ui.focus = .None
+	text_input.end_pointer_selection(&ui.input_state)
+	clear_marked_text()
+	normalize_scroll_offsets()
+	ui.needs_redraw = true
+	persist_active_view_preference()
 }
 
 layout_rects :: proc(
@@ -1900,9 +2014,9 @@ layout_rects :: proc(
 	source_panel,
 	player,
 	transcript,
-	exercise_search,
-	exercise_panel,
-	exercise_name,
+	clip_search,
+	clip_panel,
+	clip_name,
 	pitch_panel,
 	controls: UI_Rect,
 ) {
@@ -1928,20 +2042,22 @@ layout_rects :: proc(
 	if ui.mode == .Create {
 		source_search = UI_Rect{margin + 8, body_top - 72, left_w - 16, 28}
 		source_panel = UI_Rect{margin, body_y, left_w, body_h}
-		exercise_name = UI_Rect{right_x + 8, body_top - 72, right_w - 16, 30}
-		exercise_panel = UI_Rect{right_x, body_y, right_w, body_h}
+		clip_name = UI_Rect{right_x + 8, body_top - 72, right_w - 16, 30}
+		clip_panel = UI_Rect{right_x, body_y, right_w, body_h}
 		player_h := max(180, body_h * 0.55)
 		player = UI_Rect{center_x, body_top - player_h, center_w, player_h}
 		transcript = UI_Rect{center_x, body_y, center_w, max(80, body_h - player_h - gap)}
 	} else {
 		available_w := w - margin * 2 - gap * 2
 		left_w = available_w * 0.20
-		center_w = available_w * 0.30
+		center_w = available_w * (
+			ui.workflow == .Vocal ? 0.30 : 0.60
+		)
 		pitch_w := available_w - left_w - center_w
 		center_x = margin + left_w + gap
 		right_x = center_x + center_w + gap
-		exercise_search = UI_Rect{margin + 8, body_top - 72, left_w - 16, 28}
-		exercise_panel = UI_Rect{margin, body_y, left_w, body_h}
+		clip_search = UI_Rect{margin + 8, body_top - 72, left_w - 16, 28}
+		clip_panel = UI_Rect{margin, body_y, left_w, body_h}
 		player = UI_Rect{center_x, body_y, center_w, body_h}
 		pitch_panel = UI_Rect{right_x, body_y, pitch_w, body_h}
 	}
@@ -1950,7 +2066,8 @@ layout_rects :: proc(
 }
 
 control_slot_count :: proc(mode: UI_Mode) -> int {
-	return mode == .Create ? 8 : 10
+	if mode == .Create {return 8}
+	return ui.workflow == .Vocal ? 10 : 13
 }
 
 control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
@@ -1977,7 +2094,12 @@ control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
 	case 6: return 4
 	case 7: return 13
 	case 8: return 14
-	case 9: return PITCH_ACTION_INDEX
+	case 9:
+		if ui.workflow == .Vocal {return PITCH_ACTION_INDEX}
+		return DANCE_MIRROR_ACTION_INDEX
+	case 10: return DANCE_LOOP_ACTION_INDEX
+	case 11: return DANCE_COUNT_IN_ACTION_INDEX
+	case 12: return DANCE_COUNT_EACH_LOOP_ACTION_INDEX
 	}
 	return -1
 }
@@ -2017,6 +2139,10 @@ numbered_action_code_for_action :: proc(
 	case 13: return {2, 3}, true
 	case 14: return {2, 4}, true
 	case PITCH_ACTION_INDEX: return {3, 1}, true
+	case DANCE_MIRROR_ACTION_INDEX: return {3, 1}, true
+	case DANCE_LOOP_ACTION_INDEX: return {3, 2}, true
+	case DANCE_COUNT_IN_ACTION_INDEX: return {3, 3}, true
+	case DANCE_COUNT_EACH_LOOP_ACTION_INDEX: return {3, 4}, true
 	}
 	return {}, false
 }
@@ -2210,7 +2336,7 @@ flash_leader_allowed :: proc(
 	text: string,
 ) -> bool {
 	return focus == .None &&
-	       vocal_shortcut_matches_event(
+	       video_clips_shortcut_matches_event(
 			ui.flash_leader,
 			key_code,
 			text,
@@ -2389,6 +2515,30 @@ pitch_help_rect :: proc(panel: UI_Rect) -> UI_Rect {
 
 pitch_content_rect :: proc(panel: UI_Rect) -> UI_Rect {
 	return UI_Rect{panel.x + 8, panel.y + 8, panel.w - 16, panel.h - 50}
+}
+
+dance_content_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	return UI_Rect{panel.x + 12, panel.y + 12, panel.w - 24, panel.h - 58}
+}
+
+dance_bpm_down_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	content := dance_content_rect(panel)
+	return UI_Rect{
+		content.x,
+		content.y + content.h - 196,
+		34,
+		30,
+	}
+}
+
+dance_bpm_value_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	down := dance_bpm_down_rect(panel)
+	return UI_Rect{down.x + down.w + 4, down.y, 72, down.h}
+}
+
+dance_bpm_up_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	value := dance_bpm_value_rect(panel)
+	return UI_Rect{value.x + value.w + 4, value.y, 34, value.h}
 }
 
 pitch_settings_rect :: proc(panel: UI_Rect) -> UI_Rect {
@@ -2597,10 +2747,68 @@ clamp_playback_rate :: proc(value: f32) -> f32 {
 	return min(max(value, 0.1), 2)
 }
 
+active_dance_clip :: proc() -> ^Clip {
+	if ui.workflow != .Dancing ||
+	   ui.mode != .Play ||
+	   ui.active_clip < 0 ||
+	   ui.active_clip >= len(state.clips) ||
+	   state.clips[ui.active_clip].workflow != .Dancing {
+		return nil
+	}
+	return &state.clips[ui.active_clip]
+}
+
+active_dance_clip_mirrored :: proc() -> bool {
+	clip := active_dance_clip()
+	return clip != nil && clip.dance_mirrored
+}
+
+active_dance_clip_looping :: proc() -> bool {
+	clip := active_dance_clip()
+	return clip != nil && clip.dance_loop
+}
+
+active_dance_clip_counts_each_loop :: proc() -> bool {
+	clip := active_dance_clip()
+	return clip != nil && clip.dance_count_each_loop
+}
+
+dance_count_in_action_label :: proc() -> string {
+	clip := active_dance_clip()
+	if clip == nil || clip.dance_count_in_beats == 0 {
+		return "COUNT-IN OFF"
+	}
+	return fmt.tprintf("COUNT-IN %d", clip.dance_count_in_beats)
+}
+
+save_active_dance_clip :: proc() -> bool {
+	if active_dance_clip() == nil {return false}
+	if save_library() {return true}
+	set_error_status("Unable to save the Dancing clip settings")
+	return false
+}
+
 adjust_playback_rate :: proc(delta: f32) {
 	audio_seconds, has_audio_time := metal_audio_current_seconds()
 	value := clamp_playback_rate(ui.playback_rate + delta)
 	ui.playback_rate = f32(int(value * 10 + 0.5)) / 10
+	if ui.workflow == .Vocal {
+		ui.vocal_playback_rate = ui.playback_rate
+		if !database_vocal_playback_rate_save(
+			library_database,
+			ui.vocal_playback_rate,
+		) {
+			set_error_status("Unable to save the Vocal playback speed")
+		}
+	} else if !ui.source_playback_active &&
+	          ui.active_clip >= 0 &&
+	          ui.active_clip < len(state.clips) &&
+	          state.clips[ui.active_clip].workflow == .Dancing {
+		state.clips[ui.active_clip].dance_playback_rate = ui.playback_rate
+		if !save_library() {
+			set_error_status("Unable to save the Dancing clip speed")
+		}
+	}
 	if ui.audio_pitch != nil {
 		msg_void_f32(ui.audio_pitch, sel_registerName("setRate:"), ui.playback_rate)
 	}
@@ -2611,16 +2819,16 @@ adjust_playback_rate :: proc(delta: f32) {
 	ui.needs_redraw = true
 }
 
-exercise_content_rect :: proc(exercise_search, exercise_panel, exercise_name: UI_Rect) -> UI_Rect {
-	bottom := exercise_panel.y + 8
-	if exercise_name.h > 0 {bottom = exercise_name.y + exercise_name.h + 8}
-	top := exercise_search.y - 8
-	if exercise_search.h <= 0 {top = exercise_panel.y + exercise_panel.h - 43}
-	return UI_Rect{exercise_panel.x + 6, bottom, exercise_panel.w - 12, max(0, top - bottom)}
+clip_content_rect :: proc(clip_search, clip_panel, clip_name: UI_Rect) -> UI_Rect {
+	bottom := clip_panel.y + 8
+	if clip_name.h > 0 {bottom = clip_name.y + clip_name.h + 8}
+	top := clip_search.y - 8
+	if clip_search.h <= 0 {top = clip_panel.y + clip_panel.h - 43}
+	return UI_Rect{clip_panel.x + 6, bottom, clip_panel.w - 12, max(0, top - bottom)}
 }
 
-exercise_output_commit_rect :: proc(exercise_name: UI_Rect) -> UI_Rect {
-	return UI_Rect{exercise_name.x, exercise_name.y - 36, exercise_name.w, 28}
+clip_output_commit_rect :: proc(clip_name: UI_Rect) -> UI_Rect {
+	return UI_Rect{clip_name.x, clip_name.y - 36, clip_name.w, 28}
 }
 
 bounded_scroll :: proc(
@@ -2646,6 +2854,7 @@ filtered_source_count :: proc() -> int {
 }
 
 source_matches_search :: proc(source: Source_Video, query: string) -> bool {
+	if source.workflow != ui.workflow {return false}
 	if len(query) == 0 {return true}
 	lower_query := strings.to_lower(query, context.temp_allocator)
 	lower_title := strings.to_lower(source.title, context.temp_allocator)
@@ -2864,15 +3073,15 @@ sync_transcript_playback :: proc() {
 	if previous_match != ui.transcript_active_match {ui.needs_redraw = true}
 }
 
-filtered_exercise_count :: proc() -> int {
-	return filtered_exercise_count_for(
-		state.exercises[:],
-		ui.exercise_search,
+filtered_clip_count :: proc() -> int {
+	return filtered_clip_count_for(
+		state.clips[:],
+		ui.clip_search,
 	)
 }
 
 normalize_scroll_offsets :: proc() {
-	_, _, source_search, source_panel, _, transcript, exercise_search, exercise_panel, exercise_name, _, _ :=
+	_, _, source_search, source_panel, _, transcript, clip_search, clip_panel, clip_name, _, _ :=
 		layout_rects()
 	if ui.mode == .Create {
 		source_content := source_content_rect(source_search, source_panel)
@@ -2894,14 +3103,14 @@ normalize_scroll_offsets :: proc() {
 			transcript_content.h,
 		)
 	} else {
-		exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
-		ui.exercise_scroll = bounded_scroll(
-			ui.exercise_scroll,
+		clip_content := clip_content_rect(clip_search, clip_panel, clip_name)
+		ui.clip_scroll = bounded_scroll(
+			ui.clip_scroll,
 			0,
-			filtered_exercise_count(),
+			filtered_clip_count(),
 			29,
 			30,
-			exercise_content.h,
+			clip_content.h,
 		)
 	}
 }
@@ -2965,15 +3174,21 @@ push_border :: proc(vertices: ^[dynamic]Solid_Vertex, rect: UI_Rect, color: [4]f
 	push_rect(vertices, UI_Rect{rect.x + rect.w - 1, rect.y, 1, rect.h}, color)
 }
 
-texture_rect_vertices :: proc(rect: UI_Rect, color: [4]f32) -> [6]Texture_Vertex {
+texture_rect_vertices :: proc(
+	rect: UI_Rect,
+	color: [4]f32,
+	mirror_x := false,
+) -> [6]Texture_Vertex {
 	x0 := f32(rect.x / ui.width * 2 - 1)
 	x1 := f32((rect.x + rect.w) / ui.width * 2 - 1)
 	y0 := f32(rect.y / ui.height * 2 - 1)
 	y1 := f32((rect.y + rect.h) / ui.height * 2 - 1)
-	v0 := Texture_Vertex{x0, y0, 0, 1, color[0], color[1], color[2], color[3]}
-	v1 := Texture_Vertex{x1, y0, 1, 1, color[0], color[1], color[2], color[3]}
-	v2 := Texture_Vertex{x1, y1, 1, 0, color[0], color[1], color[2], color[3]}
-	v3 := Texture_Vertex{x0, y1, 0, 0, color[0], color[1], color[2], color[3]}
+	u0, u1 := f32(0), f32(1)
+	if mirror_x {u0, u1 = u1, u0}
+	v0 := Texture_Vertex{x0, y0, u0, 1, color[0], color[1], color[2], color[3]}
+	v1 := Texture_Vertex{x1, y0, u1, 1, color[0], color[1], color[2], color[3]}
+	v2 := Texture_Vertex{x1, y1, u1, 0, color[0], color[1], color[2], color[3]}
+	v3 := Texture_Vertex{x0, y1, u0, 0, color[0], color[1], color[2], color[3]}
 	return [6]Texture_Vertex{v0, v1, v2, v0, v2, v3}
 }
 
@@ -3125,6 +3340,58 @@ draw_text_in_rect :: proc(
 	draw_text_run(ctx, draw_run, text_origin(rect, draw_run, horizontal, vertical, inset), color)
 	if clip {CGContextRestoreGState(ctx)}
 	delete_text_run(&truncated)
+}
+
+draw_header_identity :: proc(
+	ctx, font: rawptr,
+	rect: UI_Rect,
+	name_color, mode_color: [4]f64,
+) {
+	if ctx == nil || font == nil || rect.w <= 0 || rect.h <= 0 {return}
+	name_run := make_text_run(font, "hw_videoClips")
+	defer delete_text_run(&name_run)
+	if name_run.line == nil {return}
+	mode_text := fmt.tprintf(" / %s", active_view_label(ui.workflow, ui.mode))
+	mode_run := make_text_run(font, mode_text)
+	defer delete_text_run(&mode_run)
+
+	CGContextSaveGState(ctx)
+	defer CGContextRestoreGState(ctx)
+	CGContextClipToRect(
+		ctx,
+		Rect{
+			Point{rect.x * ui.scale, rect.y * ui.scale},
+			Size{rect.w * ui.scale, rect.h * ui.scale},
+		},
+	)
+	draw_text_run(
+		ctx,
+		name_run,
+		text_origin(rect, name_run, .Start, .Center),
+		name_color,
+	)
+	available_width := rect.w * ui.scale - name_run.advance
+	if mode_run.line == nil || available_width <= 0 {return}
+	draw_mode := mode_run
+	truncated: Text_Run
+	if mode_run.advance > available_width {
+		truncated = truncated_text_run(mode_run, font, available_width)
+		if truncated.line == nil {return}
+		draw_mode = truncated
+	}
+	defer delete_text_run(&truncated)
+	mode_rect := UI_Rect{
+		rect.x + name_run.advance / ui.scale,
+		rect.y,
+		available_width / ui.scale,
+		rect.h,
+	}
+	draw_text_run(
+		ctx,
+		draw_mode,
+		text_origin(mode_rect, draw_mode, .Start, .Center),
+		mode_color,
+	)
 }
 
 draw_editable_text_field :: proc(
@@ -3652,7 +3919,7 @@ draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan
 		ctx,
 		font,
 		ui.command_palette_query,
-		"Search commands, sources, and exercises",
+		"Search commands, sources, and clips",
 		search,
 		.Command_Palette,
 		bright,
@@ -3733,34 +4000,34 @@ draw_command_palette :: proc(ctx, font: rawptr, bright, muted, dim, orange, cyan
 	)
 }
 
-draw_exercise_rename :: proc(ctx, font: rawptr, bright, muted, dim, orange: [4]f64) {
-	if !ui.exercise_rename_open ||
-	   ui.exercise_rename_index < 0 ||
-	   ui.exercise_rename_index >= len(state.exercises) {
+draw_clip_rename :: proc(ctx, font: rawptr, bright, muted, dim, orange: [4]f64) {
+	if !ui.clip_rename_open ||
+	   ui.clip_rename_index < 0 ||
+	   ui.clip_rename_index >= len(state.clips) {
 		return
 	}
-	modal := exercise_rename_modal_rect()
-	input := ui_control_rect(.Exercise_Rename)
-	cancel := ui_control_rect(.Cancel_Exercise_Rename)
-	confirm := ui_control_rect(.Confirm_Exercise_Rename)
-	exercise := &state.exercises[ui.exercise_rename_index]
+	modal := clip_rename_modal_rect()
+	input := ui_control_rect(.Clip_Rename)
+	cancel := ui_control_rect(.Cancel_Clip_Rename)
+	confirm := ui_control_rect(.Confirm_Clip_Rename)
+	clip := &state.clips[ui.clip_rename_index]
 	theme := ui_theme_colors()
 	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, theme.backdrop)
 	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
 	fill_overlay_rect(ctx, header, theme.panel_alt)
-	draw_text_in_rect(ctx, font, "RENAME EXERCISE", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
+	draw_text_in_rect(ctx, font, "RENAME CLIP", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
 	draw_text_in_rect(ctx, font, "ORIGINAL NAME", UI_Rect{modal.x + 24, modal.y + modal.h - 96, modal.w - 48, 22}, .Start, .Center, muted)
-	draw_text_in_rect(ctx, font, exercise.name, UI_Rect{modal.x + 24, modal.y + modal.h - 130, modal.w - 48, 28}, .Start, .Center, bright)
+	draw_text_in_rect(ctx, font, clip.name, UI_Rect{modal.x + 24, modal.y + modal.h - 130, modal.w - 48, 28}, .Start, .Center, bright)
 	draw_text_in_rect(ctx, font, "NEW NAME", UI_Rect{input.x, input.y + input.h + 8, input.w, 22}, .Start, .Center, muted)
 	fill_overlay_rect(ctx, input, theme.field)
-	if ui.focus == .Exercise_Rename {fill_overlay_border(ctx, input, orange)}
-	draw_editable_text_field(ctx, font, ui.exercise_rename, "Enter a new exercise name", input, .Exercise_Rename, bright, dim, orange, 10)
+	if ui.focus == .Clip_Rename {fill_overlay_border(ctx, input, orange)}
+	draw_editable_text_field(ctx, font, ui.clip_rename, "Enter a new clip name", input, .Clip_Rename, bright, dim, orange, 10)
 	cancel_color := theme.panel_alt
 	if contains(cancel, ui.mouse) {cancel_color = theme.row_hover}
 	fill_overlay_rect(ctx, cancel, cancel_color)
 	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
-	confirm_control := find_ui_control_by_action(.Confirm_Exercise_Rename)
+	confirm_control := find_ui_control_by_action(.Confirm_Clip_Rename)
 	confirm_enabled := confirm_control != nil && .Enabled in confirm_control.flags
 	confirm_color := confirm_enabled ? UI_COLOR_OCHRE_64 : theme.panel_alt
 	if confirm_enabled && contains(confirm, ui.mouse) {confirm_color = [4]f64{1.0, 0.42, 0.10, 1}}
@@ -3768,26 +4035,26 @@ draw_exercise_rename :: proc(ctx, font: rawptr, bright, muted, dim, orange: [4]f
 	draw_text_in_rect(ctx, font, "RENAME", confirm, .Center, .Center, confirm_enabled ? UI_COLOR_SAND_64 : dim)
 }
 
-draw_exercise_metadata :: proc(
+draw_clip_metadata :: proc(
 	ctx, font: rawptr,
 	bright, muted, dim, orange, cyan, danger: [4]f64,
 ) {
-	if !ui.exercise_metadata_open ||
-	   ui.exercise_metadata_index < 0 ||
-	   ui.exercise_metadata_index >= len(state.exercises) {
+	if !ui.clip_metadata_open ||
+	   ui.clip_metadata_index < 0 ||
+	   ui.clip_metadata_index >= len(state.clips) {
 		return
 	}
-	modal := exercise_metadata_modal_rect()
-	close_button := ui_control_rect(.Close_Exercise_Metadata)
-	source_button := ui_control_rect(.View_Exercise_Source)
-	exercise := &state.exercises[ui.exercise_metadata_index]
-	source_index := source_index_for_exercise(
+	modal := clip_metadata_modal_rect()
+	close_button := ui_control_rect(.Close_Clip_Metadata)
+	source_button := ui_control_rect(.View_Clip_Source)
+	clip := &state.clips[ui.clip_metadata_index]
+	source_index := source_index_for_clip(
 		state.sources[:],
-		state.exercises[:],
-		ui.exercise_metadata_index,
+		state.clips[:],
+		ui.clip_metadata_index,
 	)
 	source_title := "SOURCE RECORD MISSING"
-	source_id := exercise.source_id
+	source_id := clip.source_id
 	video_id := "UNAVAILABLE"
 	source_url := "UNAVAILABLE"
 	if source_index >= 0 {
@@ -3802,11 +4069,11 @@ draw_exercise_metadata :: proc(
 	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
 	fill_overlay_rect(ctx, header, theme.panel_alt)
-	draw_text_in_rect(ctx, font, "EXERCISE METADATA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
-	draw_text_in_rect(ctx, font, exercise.name, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - 48, 28}, .Start, .Center, cyan)
-	clip_available := os.exists(exercise.clip_path)
+	draw_text_in_rect(ctx, font, "CLIP METADATA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
+	draw_text_in_rect(ctx, font, clip.name, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - 48, 28}, .Start, .Center, cyan)
+	clip_available := os.exists(clip.clip_path)
 	labels := [10]string{
-		"EXERCISE ID",
+		"CLIP ID",
 		"SOURCE TITLE",
 		"SOURCE ID",
 		"VIDEO ID",
@@ -3818,19 +4085,19 @@ draw_exercise_metadata :: proc(
 		"CLIP STATUS",
 	}
 	values := [10]string{
-		exercise.id,
+		clip.id,
 		source_title,
 		source_id,
 		video_id,
-		format_timestamp(exercise.start_seconds),
-		format_timestamp(exercise.end_seconds),
-		format_timestamp(exercise.end_seconds - exercise.start_seconds),
+		format_timestamp(clip.start_seconds),
+		format_timestamp(clip.end_seconds),
+		format_timestamp(clip.end_seconds - clip.start_seconds),
 		source_url,
-		exercise.clip_path,
+		clip.clip_path,
 		clip_available ? "AVAILABLE" : "MISSING",
 	}
 	for label, row_index in labels {
-		row := exercise_metadata_row_rect(modal, row_index)
+		row := clip_metadata_row_rect(modal, row_index)
 		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, theme.row)}
 		draw_text_in_rect(ctx, font, label, UI_Rect{row.x + 10, row.y, 128, row.h}, .Start, .Center, muted)
 		value_color := bright
@@ -3849,7 +4116,7 @@ draw_exercise_metadata :: proc(
 	if contains(close_button, ui.mouse) {close_color = theme.row_hover}
 	fill_overlay_rect(ctx, close_button, close_color)
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
-	source_control := find_ui_control_by_action(.View_Exercise_Source)
+	source_control := find_ui_control_by_action(.View_Clip_Source)
 	source_enabled := source_control != nil && .Enabled in source_control.flags
 	source_color := source_enabled ? UI_COLOR_FOREST_64 : theme.panel_alt
 	if source_enabled && contains(source_button, ui.mouse) {source_color = [4]f64{0.06, 0.24, 0.24, 1}}
@@ -3876,18 +4143,18 @@ draw_randomize_help :: proc(
 	draw_text_in_rect(
 		ctx,
 		font,
-		"HOW RANDOMIZE SELECTS AN EXERCISE",
+		"HOW RANDOMIZE SELECTS A CLIP",
 		UI_Rect{header.x + 20, header.y, header.w - 40, header.h},
 		.Start,
 		.Center,
 		bright,
 	)
 	explanation := [8]string{
-		"Randomize draws from the complete exercise library. Search text does not limit the draw.",
-		"The active exercise is skipped when another exercise is available.",
-		"A selected exercise returns to weight 2.",
+		"Randomize draws from the complete clip library. Search text does not limit the draw.",
+		"The active clip is skipped when another clip is available.",
+		"A selected clip returns to weight 2.",
 		"Each skipped Randomize draw adds 1, up to weight 6.",
-		"Never-selected exercises start at weight 6. Manual playback does not change the history.",
+		"Never-selected clips start at weight 6. Manual playback does not change the history.",
 		"Weight 6 has three times the chance of weight 2, but each draw remains random.",
 		"Randomize history stays on this device and is not included in library exports.",
 		"Shuffle applies the same weights to filtered Play Next selections and updates this history.",
@@ -3918,15 +4185,15 @@ draw_randomize_help :: proc(
 		.Center,
 		cyan,
 	)
-	if len(state.exercises) > 1 &&
-	   ui.active_exercise >= 0 &&
-	   ui.active_exercise < len(state.exercises) {
+	if filtered_clip_count() > 1 &&
+	   ui.active_clip >= 0 &&
+	   ui.active_clip < len(state.clips) {
 		draw_text_in_rect(
 			ctx,
 			font,
 			fmt.tprintf(
 				"ACTIVE EXCLUDED: %s",
-				state.exercises[ui.active_exercise].name,
+				state.clips[ui.active_clip].name,
 			),
 			UI_Rect{modal.x + 310, modal.y + modal.h - 272, modal.w - 334, 24},
 			.End,
@@ -3938,7 +4205,7 @@ draw_randomize_help :: proc(
 	draw_text_in_rect(
 		ctx,
 		font,
-		"EXERCISE",
+		"CLIP",
 		UI_Rect{modal.x + 34, modal.y + modal.h - 296, modal.w - 250, 22},
 		.Start,
 		.Center,
@@ -3962,17 +4229,17 @@ draw_randomize_help :: proc(
 		.Center,
 		muted,
 	)
-	candidates: [RANDOM_EXERCISE_HELP_LIMIT]Random_Exercise_Candidate
-	candidate_count, total_weight := random_exercise_ranked_candidates(
-		state.exercises[:],
-		ui.active_exercise,
+	candidates: [RANDOM_CLIP_HELP_LIMIT]Random_Clip_Candidate
+	candidate_count, total_weight := random_clip_ranked_candidates(
+		state.clips[:],
+		ui.active_clip,
 		candidates[:],
 	)
 	if candidate_count == 0 {
 		draw_text_in_rect(
 			ctx,
 			font,
-			"NO EXERCISES ARE AVAILABLE",
+			"NO CLIPS ARE AVAILABLE",
 			randomize_help_row_rect(modal, 0),
 			.Center,
 			.Center,
@@ -3984,11 +4251,11 @@ draw_randomize_help :: proc(
 		if row_index % 2 == 0 {
 			fill_overlay_rect(ctx, row, theme.row)
 		}
-		exercise := &state.exercises[candidate.exercise_index]
+		clip := &state.clips[candidate.clip_index]
 		draw_text_in_rect(
 			ctx,
 			font,
-			exercise.name,
+			clip.name,
 			UI_Rect{row.x + 10, row.y, row.w - 230, row.h},
 			.Start,
 			.Center,
@@ -4226,6 +4493,98 @@ draw_pitch_monitor :: proc(
 	)
 }
 
+draw_dance_tools :: proc(
+	ctx, font: rawptr,
+	panel: UI_Rect,
+	bright, muted, dim, accent, cool: [4]f64,
+) {
+	if ui.mode != .Play || ui.workflow != .Dancing || panel.w <= 0 {return}
+	header := UI_Rect{panel.x, panel.y + panel.h - 35, panel.w, 35}
+	draw_text_in_rect(
+		ctx,
+		font,
+		"03 / DANCE TOOLS",
+		UI_Rect{header.x + 10, header.y, header.w - 20, header.h},
+		.Start,
+		.Center,
+		muted,
+	)
+	content := dance_content_rect(panel)
+	clip := active_dance_clip()
+	if clip == nil {
+		draw_text_in_rect(
+			ctx,
+			font,
+			"SELECT A DANCING CLIP",
+			UI_Rect{content.x, content.y + content.h / 2, content.w, 24},
+			.Center,
+			.Center,
+			dim,
+		)
+		return
+	}
+	top := content.y + content.h
+	rows := [5]string{
+		fmt.tprintf("CLIP / %s", clip.name),
+		clip.dance_mirrored ? "MIRROR / ON" : "MIRROR / OFF",
+		clip.dance_loop ? "LOOP / ON" : "LOOP / OFF",
+		fmt.tprintf("COUNT-IN / %d", clip.dance_count_in_beats),
+		clip.dance_count_each_loop ? "COUNT EACH LOOP / ON" : "COUNT EACH LOOP / OFF",
+	}
+	for text, index in rows {
+		color := muted
+		if index > 0 {
+			active :=
+				(index == 1 && clip.dance_mirrored) ||
+				(index == 2 && clip.dance_loop) ||
+				(index == 3 && clip.dance_count_in_beats > 0) ||
+				(index == 4 && clip.dance_count_each_loop)
+			if active {color = cool}
+		}
+		draw_text_in_rect(
+			ctx,
+			font,
+			text,
+			UI_Rect{content.x, top - 32 - f64(index) * 32, content.w, 24},
+			.Start,
+			.Center,
+			color,
+		)
+	}
+	bpm_down := ui_control_rect(.Dance_BPM_Down)
+	bpm_up := ui_control_rect(.Dance_BPM_Up)
+	bpm_value := dance_bpm_value_rect(panel)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"COUNT-IN BPM",
+		UI_Rect{content.x, bpm_value.y + bpm_value.h + 8, content.w, 20},
+		.Start,
+		.Center,
+		muted,
+	)
+	draw_text_in_rect(ctx, font, "-", bpm_down, .Center, .Center, clip.dance_count_in_bpm > 40 ? accent : dim)
+	draw_text_in_rect(
+		ctx,
+		font,
+		fmt.tprintf("%d", clip.dance_count_in_bpm),
+		bpm_value,
+		.Center,
+		.Center,
+		bright,
+	)
+	draw_text_in_rect(ctx, font, "+", bpm_up, .Center, .Center, clip.dance_count_in_bpm < 240 ? accent : dim)
+	draw_text_in_rect(
+		ctx,
+		font,
+		fmt.tprintf("SAVED SPEED / %.1fx", clip.dance_playback_rate),
+		UI_Rect{content.x, bpm_value.y - 42, content.w, 24},
+		.Start,
+		.Center,
+		muted,
+	)
+}
+
 draw_pitch_help :: proc(
 	ctx, font: rawptr,
 	bright, muted, cool: [4]f64,
@@ -4298,7 +4657,7 @@ draw_data_modal :: proc(
 	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
 	fill_overlay_rect(ctx, header, theme.panel_alt)
-	title := ui.library_import_confirm_open ? "REPLACE LIBRARY" : "LIBRARY DATA"
+	title := ui.library_import_confirm_open ? "IMPORT LIBRARY DATA" : "LIBRARY DATA"
 	draw_text_in_rect(
 		ctx,
 		font,
@@ -4312,7 +4671,10 @@ draw_data_modal :: proc(
 		draw_text_in_rect(
 			ctx,
 			font,
-			"The imported records will replace the current source and exercise library.",
+			fmt.tprintf(
+				"The imported records will replace the %s library scope.",
+				portable_library_scope_name(pending_library_import_scope),
+			),
 			UI_Rect{modal.x + 24, modal.y + modal.h - 112, modal.w - 48, 28},
 			.Start,
 			.Center,
@@ -4322,9 +4684,9 @@ draw_data_modal :: proc(
 			ctx,
 			font,
 			fmt.tprintf(
-				"%03d SOURCES   %03d EXERCISES   %04d TRANSCRIPT SEGMENTS",
+				"%03d SOURCES   %03d CLIPS   %04d TRANSCRIPT SEGMENTS",
 				len(pending_library_import.sources),
-				len(pending_library_import.exercises),
+				len(pending_library_import.clips),
 				len(pending_library_import.transcripts.segments),
 			),
 			UI_Rect{modal.x + 24, modal.y + modal.h - 158, modal.w - 48, 30},
@@ -4346,7 +4708,7 @@ draw_data_modal :: proc(
 		cancel_color := theme.panel_alt
 		if contains(cancel, ui.mouse) {cancel_color = theme.row_hover}
 		fill_overlay_rect(ctx, cancel, cancel_color)
-		draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
+		draw_text_in_rect(ctx, font, "02  CANCEL", cancel, .Center, .Center, muted)
 		confirm_control := find_ui_control_by_action(.Confirm_Library_Import)
 		confirm_enabled := confirm_control != nil && .Enabled in confirm_control.flags
 		confirm_color := confirm_enabled ? UI_COLOR_OCHRE_64 : theme.panel_alt
@@ -4358,7 +4720,7 @@ draw_data_modal :: proc(
 		draw_text_in_rect(
 			ctx,
 			font,
-			"REPLACE AND RECOVER",
+			"01  REPLACE AND RECOVER",
 			confirm,
 			.Center,
 			.Center,
@@ -4367,12 +4729,26 @@ draw_data_modal :: proc(
 		return
 	}
 
-	actions := [3]UI_Action_Kind{.Open_Data_Folder, .Export_Library, .Import_Library}
-	labels := [3]string{"OPEN DATA FOLDER", "EXPORT LIBRARY METADATA", "IMPORT LIBRARY METADATA"}
-	details := [3]string{
+	actions := [5]UI_Action_Kind{
+		.Export_Library,
+		.Export_Current_Workflow,
+		.Import_Library,
+		.Open_Data_Folder,
+		.Close_Data_Modal,
+	}
+	labels := [5]string{
+		"01  EXPORT ALL",
+		fmt.tprintf("02  EXPORT %s", ui.workflow == .Vocal ? "VOCAL" : "DANCING"),
+		"03  IMPORT",
+		"04  OPEN DATA FOLDER",
+		"05  CLOSE",
+	}
+	details := [5]string{
+		"Save both workflows as portable metadata",
+		"Save only the current workflow as portable metadata",
+		"Replace the scope stored by a portable metadata file",
 		"Show the active application-support directory in Finder",
-		"Save portable source, transcript, quality, and exercise records",
-		"Replace this library and recover media at each saved resolution",
+		"Return to the application",
 	}
 	for kind, index in actions {
 		rect := ui_control_rect(kind)
@@ -4400,11 +4776,6 @@ draw_data_modal :: proc(
 			enabled ? muted : dim,
 		)
 	}
-	close_button := ui_control_rect(.Close_Data_Modal)
-	close_color := theme.panel_alt
-	if contains(close_button, ui.mouse) {close_color = theme.row_hover}
-	fill_overlay_rect(ctx, close_button, close_color)
-	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
 }
 
 draw_library_recovery :: proc(
@@ -4483,11 +4854,11 @@ draw_library_recovery :: proc(
 		ctx,
 		font,
 		fmt.tprintf(
-			"%03d SOURCES   %04d SEGMENTS   %03d HINTS   %03d EXERCISES",
+			"%03d SOURCES   %04d SEGMENTS   %03d HINTS   %03d CLIPS",
 			report.recovered_sources,
 			report.recovered_segments,
 			report.recovered_hints,
-			report.recovered_exercises,
+			report.recovered_clips,
 		),
 		UI_Rect{modal.x + 24, modal.y + modal.h - 184, modal.w - 48, 26},
 		.Start,
@@ -4937,7 +5308,7 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 }
 
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
-	_, _, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, pitch_panel, _ :=
+	_, _, source_search, source_panel, player, transcript, clip_search, clip_panel, clip_name, pitch_panel, _ :=
 		layout_rects()
 	theme := ui_theme_colors()
 	chassis := ui_color_32(theme.chassis)
@@ -4950,19 +5321,25 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	orange := UI_COLOR_COFFEE_32
 	push_rect(vertices, UI_Rect{0, 0, ui.width, ui.height}, chassis)
 	push_rect(vertices, app_header_rect(), ui_color_32(theme.header))
+	workflow_rect := ui_control_rect(.Workflow_Toggle)
+	workflow_color := panel_alt
+	if contains(workflow_rect, ui.mouse) {workflow_color = row_hover}
+	push_rect(vertices, workflow_rect, workflow_color)
+	push_border(vertices, workflow_rect, orange)
+	push_rect(vertices, left_accent_edge_rect(workflow_rect), orange)
 	mode_rect := ui_control_rect(.Mode_Toggle)
 	mode_color := panel_alt
 	if contains(mode_rect, ui.mouse) {mode_color = row_hover}
 	push_rect(vertices, mode_rect, mode_color)
 	push_border(vertices, mode_rect, orange)
 	push_rect(vertices, left_accent_edge_rect(mode_rect), orange)
-	panels := [5]UI_Rect{source_panel, player, transcript, exercise_panel, pitch_panel}
+	panels := [5]UI_Rect{source_panel, player, transcript, clip_panel, pitch_panel}
 	for rect in panels {
 		if rect.w <= 0 || rect.h <= 0 {continue}
 		push_rect(vertices, rect, panel)
 		push_rect(vertices, UI_Rect{rect.x, rect.y + rect.h - 34, rect.w, 34}, panel_alt)
 	}
-	if ui.mode == .Play {
+	if ui.mode == .Play && ui.workflow == .Vocal {
 		chart := pitch_chart_rect(pitch_panel)
 		settings := pitch_settings_rect(pitch_panel)
 		plot := pitch_plot_rect(pitch_panel)
@@ -5092,12 +5469,26 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		if contains(help_rect, ui.mouse) {
 			push_rect(vertices, help_rect, row_hover)
 		}
+	} else if ui.mode == .Play && ui.workflow == .Dancing {
+		bpm_kinds := [2]UI_Action_Kind{.Dance_BPM_Down, .Dance_BPM_Up}
+		for kind in bpm_kinds {
+			rect := ui_control_rect(kind)
+			if rect.w <= 0 {continue}
+			control := find_ui_control_by_action(kind)
+			enabled := control != nil && .Enabled in control.flags
+			color := enabled ? panel_alt : field
+			if enabled && contains(rect, ui.mouse) {color = row_hover}
+			push_rect(vertices, rect, color)
+			if enabled {push_border(vertices, rect, orange)}
+		}
+		value := dance_bpm_value_rect(pitch_panel)
+		push_rect(vertices, value, field)
 	}
 	field_kinds := [4]UI_Action_Kind{
 		.Source_Search,
 		.Transcript_Search,
-		.Exercise_Search,
-		.Exercise_Name,
+		.Clip_Search,
+		.Clip_Name,
 	}
 	for kind in field_kinds {
 		rect := ui_control_rect(kind)
@@ -5143,7 +5534,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		push_rect(vertices, add_rect, add_color)
 		if add_enabled {push_border(vertices, add_rect, orange)}
 
-		commit_control := find_ui_control(ui_control_id("commit exercise output"))
+		commit_control := find_ui_control(ui_control_id("commit clip output"))
 		if commit_control != nil {
 			commit_color := field
 			if .Enabled in commit_control.flags {
@@ -5213,23 +5604,23 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	}
 
 	if ui.mode == .Play {
-		exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+		clip_content := clip_content_rect(clip_search, clip_panel, clip_name)
 		row := UI_Rect {
-			exercise_content.x,
-			exercise_content.y + exercise_content.h - 29 + ui.exercise_scroll,
-			exercise_content.w,
+			clip_content.x,
+			clip_content.y + clip_content.h - 29 + ui.clip_scroll,
+			clip_content.w,
 			29,
 		}
-		for exercise, index in state.exercises {
-			if !exercise_matches_filter(exercise, ui.exercise_search) {continue}
-			control := find_ui_control_by_action_and_index(.Exercise, index)
+		for clip, index in state.clips {
+			if !clip_matches_filter(clip, ui.clip_search) {continue}
+			control := find_ui_control_by_action_and_index(.Clip, index)
 			if control != nil {
 				row = control.rect
 				color := row_color
 				if contains(row, ui.mouse) {color = row_hover}
 				push_rect(vertices, row, color)
 				push_rect(vertices, UI_Rect{row.x, row.y, row.w, 1}, rule)
-				if index == ui.active_exercise {
+				if index == ui.active_clip {
 					push_rect(vertices, left_accent_edge_rect(row), orange)
 				}
 			}
@@ -5237,8 +5628,8 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 	}
 
-	control_kinds := [15]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle}
-	valid_range := active_exercise_range_is_valid()
+	control_kinds := [19]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle}
+	valid_range := active_clip_range_is_valid()
 	number_prefix_active :=
 		ui.number_prefix > 0 &&
 		numbered_action_time_ms() < ui.number_prefix_deadline_ms
@@ -5263,9 +5654,18 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		if enabled && kind == .Pitch_Toggle && ui.pitch.tracking {
 			push_border(vertices, rect, UI_COLOR_GUM_32)
 		}
+		if enabled &&
+		   ((kind == .Dance_Mirror_Toggle &&
+		     active_dance_clip_mirrored()) ||
+		    (kind == .Dance_Loop_Toggle &&
+		     active_dance_clip_looping()) ||
+		    (kind == .Dance_Count_Each_Loop_Toggle &&
+		     active_dance_clip_counts_each_loop())) {
+			push_border(vertices, rect, UI_COLOR_GUM_32)
+		}
 		toggle_active :=
-			(kind == .Shuffle_Toggle && ui.exercise_shuffle) ||
-			(kind == .Autoplay_Toggle && ui.exercise_autoplay)
+			(kind == .Shuffle_Toggle && ui.clip_shuffle) ||
+			(kind == .Autoplay_Toggle && ui.clip_autoplay)
 		if enabled && toggle_active {
 			push_border(vertices, rect, UI_COLOR_GUM_32)
 			push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
@@ -5295,10 +5695,10 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		focus_rect = ui_control_rect(.Source_Search)
 	case .Transcript_Search:
 		focus_rect = ui_control_rect(.Transcript_Search)
-	case .Exercise_Search:
-		focus_rect = ui_control_rect(.Exercise_Search)
-	case .Exercise_Name:
-		focus_rect = ui_control_rect(.Exercise_Name)
+	case .Clip_Search:
+		focus_rect = ui_control_rect(.Clip_Search)
+	case .Clip_Name:
+		focus_rect = ui_control_rect(.Clip_Name)
 	}
 	if focus_rect.w > 0 {
 		push_border(vertices, focus_rect, orange)
@@ -5310,27 +5710,27 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			{0, 0, ui.width, ui.height},
 			ui_color_32(theme.backdrop),
 		)
-		push_rect(vertices, vocal_settings_rect(), ui_color_32(theme.modal))
-		search := vocal_settings_search_rect()
+		push_rect(vertices, video_clips_settings_rect(), ui_color_32(theme.modal))
+		search := video_clips_settings_search_rect()
 		push_rect(vertices, search, field)
 		if ui.focus == .Settings_Search {
 			push_border(vertices, search, UI_COLOR_GUM_32)
 		}
-		push_rect(vertices, vocal_settings_close_rect(), panel_alt)
-		categories := [2]Vocal_Settings_Category{.Styling, .Shortcuts}
+		push_rect(vertices, video_clips_settings_close_rect(), panel_alt)
+		categories := [2]Video_Clips_Settings_Category{.Styling, .Shortcuts}
 		for category, index in categories {
-			rect := vocal_settings_category_rect(index)
+			rect := video_clips_settings_category_rect(index)
 			color := panel_alt
 			if contains(rect, ui.mouse) {color = row_hover}
 			push_rect(vertices, rect, color)
-			if !vocal_settings_search_active() &&
+			if !video_clips_settings_search_active() &&
 			   category == ui.settings_category {
 				push_border(vertices, rect, UI_COLOR_GUM_32)
 				push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
 			}
 		}
-		for descriptor, index in vocal_settings_result_descriptors() {
-			rect := vocal_settings_result_rect(index)
+		for descriptor, index in video_clips_settings_result_descriptors() {
+			rect := video_clips_settings_result_rect(index)
 			color := panel_alt
 			if contains(rect, ui.mouse) {color = row_hover}
 			push_rect(vertices, rect, color)
@@ -5349,16 +5749,16 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		)
 		push_rect(
 			vertices,
-			vocal_shortcut_modal_rect(),
+			video_clips_shortcut_modal_rect(),
 			ui_color_32(theme.modal),
 		)
-		record := vocal_shortcut_record_rect()
+		record := video_clips_shortcut_record_rect()
 		push_rect(vertices, record, field)
 		if ui.shortcut_listening {
 			push_border(vertices, record, UI_COLOR_GUM_32)
 		}
 		for index in 0..<3 {
-			rect := vocal_shortcut_action_rect(index)
+			rect := video_clips_shortcut_action_rect(index)
 			color := panel_alt
 			if contains(rect, ui.mouse) {color = row_hover}
 			push_rect(vertices, rect, color)
@@ -5367,7 +5767,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		   len(ui.shortcut_collision) == 0 {
 			push_border(
 				vertices,
-				vocal_shortcut_action_rect(0),
+				video_clips_shortcut_action_rect(0),
 				UI_COLOR_COFFEE_32,
 			)
 		}
@@ -5381,31 +5781,31 @@ draw_settings_overlays :: proc(
 	if ui.settings_open {
 		theme := ui_theme_colors()
 		fill_overlay_rect(ctx, {0, 0, ui.width, ui.height}, theme.backdrop)
-		modal := vocal_settings_rect()
+		modal := video_clips_settings_rect()
 		fill_overlay_rect(ctx, modal, theme.modal)
 		draw_editable_text_field(
 			ctx,
 			font,
 			ui.settings_query,
 			"SEARCH SETTINGS",
-			vocal_settings_search_rect(),
+			video_clips_settings_search_rect(),
 			.Settings_Search,
 			ink,
 			muted,
 			cyan,
 		)
 		xmark := window_icon_xmark_points()
-		close := vocal_settings_close_rect()
+		close := video_clips_settings_close_rect()
 		draw_window_icon_path(
 			ctx,
 			{close.x+5, close.y+8, 18, 18},
 			muted,
 			xmark[:],
 		)
-		categories := [2]Vocal_Settings_Category{.Styling, .Shortcuts}
+		categories := [2]Video_Clips_Settings_Category{.Styling, .Shortcuts}
 		for category, index in categories {
 			color := muted
-			if !vocal_settings_search_active() &&
+			if !video_clips_settings_search_active() &&
 			   category == ui.settings_category {
 				color = ink
 			}
@@ -5414,18 +5814,18 @@ draw_settings_overlays :: proc(
 				font,
 				fmt.tprintf(
 					"%s  %02d",
-					vocal_settings_category_name(category),
-					vocal_settings_category_match_count(category),
+					video_clips_settings_category_name(category),
+					video_clips_settings_category_match_count(category),
 				),
-				vocal_settings_category_rect(index),
+				video_clips_settings_category_rect(index),
 				.Start,
 				.Center,
 				color,
 				8,
 			)
 		}
-		for descriptor, index in vocal_settings_result_descriptors() {
-			rect := vocal_settings_result_rect(index)
+		for descriptor, index in video_clips_settings_result_descriptors() {
+			rect := video_clips_settings_result_rect(index)
 			draw_text_in_rect(
 				ctx,
 				font,
@@ -5442,7 +5842,7 @@ draw_settings_overlays :: proc(
 				value = "CURRENT"
 				value_color = cyan
 			} else if descriptor.action.kind == .Configure_Flash {
-				value = vocal_shortcut_display(ui.flash_leader)
+				value = video_clips_shortcut_display(ui.flash_leader)
 			}
 			draw_text_in_rect(
 				ctx,
@@ -5455,7 +5855,7 @@ draw_settings_overlays :: proc(
 			)
 		}
 		if len(ui.settings_error) > 0 {
-			content := vocal_settings_content_rect()
+			content := video_clips_settings_content_rect()
 			draw_text_in_rect(
 				ctx,
 				font,
@@ -5470,7 +5870,7 @@ draw_settings_overlays :: proc(
 	if ui.shortcut_open {
 		theme := ui_theme_colors()
 		fill_overlay_rect(ctx, {0, 0, ui.width, ui.height}, theme.backdrop)
-		modal := vocal_shortcut_modal_rect()
+		modal := video_clips_shortcut_modal_rect()
 		fill_overlay_rect(ctx, modal, theme.modal)
 		draw_text_in_rect(
 			ctx,
@@ -5492,10 +5892,10 @@ draw_settings_overlays :: proc(
 		)
 		record_text := "PRESS A KEY…"
 		if ui.shortcut_candidate_valid {
-			record_text = vocal_shortcut_display(ui.shortcut_candidate)
+			record_text = video_clips_shortcut_display(ui.shortcut_candidate)
 		} else if ui.shortcut_listening &&
 		          ui.shortcut_live_modifiers != {} {
-			record_text = vocal_shortcut_display(Vocal_Shortcut{
+			record_text = video_clips_shortcut_display(Video_Clips_Shortcut{
 				kind = .Character,
 				key = "…",
 				modifiers = ui.shortcut_live_modifiers,
@@ -5505,7 +5905,7 @@ draw_settings_overlays :: proc(
 			ctx,
 			font,
 			record_text,
-			vocal_shortcut_record_rect(),
+			video_clips_shortcut_record_rect(),
 			.Center,
 			.Center,
 			ui.shortcut_listening ? cyan : ink,
@@ -5532,7 +5932,7 @@ draw_settings_overlays :: proc(
 			ctx,
 			font,
 			"01  SAVE",
-			vocal_shortcut_action_rect(0),
+			video_clips_shortcut_action_rect(0),
 			.Start,
 			.Center,
 			save_color,
@@ -5542,7 +5942,7 @@ draw_settings_overlays :: proc(
 			ctx,
 			font,
 			"02  RESET DEFAULT",
-			vocal_shortcut_action_rect(1),
+			video_clips_shortcut_action_rect(1),
 			.Start,
 			.Center,
 			ink,
@@ -5552,7 +5952,7 @@ draw_settings_overlays :: proc(
 			ctx,
 			font,
 			"03  CANCEL",
-			vocal_shortcut_action_rect(2),
+			video_clips_shortcut_action_rect(2),
 			.Start,
 			.Center,
 			muted,
@@ -5584,8 +5984,11 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	if font_name == nil {return pixels}
 	small_font := CTFontCreateWithName(font_name, SMALL_FONT_SIZE * ui.scale, nil)
 	assert_foreign(small_font, "Unable to create the small UI font")
+	count_font := CTFontCreateWithName(font_name, 96 * ui.scale, nil)
+	assert_foreign(count_font, "Unable to create the count-in font")
 	CFRelease(font_name)
 	defer foreign_release(small_font, "CTFont", "build_text_overlay")
+	defer foreign_release(count_font, "CTFont", "build_text_overlay")
 	s := ui.scale
 	theme := ui_theme_colors()
 	ink := theme.ink
@@ -5597,22 +6000,31 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	cyan := ui.dark_theme ? UI_COLOR_GUM_64 : UI_COLOR_FOREST_64
 	danger := ui.dark_theme ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
 
-	_, _, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, pitch_panel, _ :=
+	_, _, source_search, source_panel, player, transcript, clip_search, clip_panel, clip_name, pitch_panel, _ :=
 		layout_rects()
 
+	draw_header_identity(
+		ctx,
+		small_font,
+		app_title_rect(),
+		bright,
+		orange,
+	)
+	mode_rect := ui_control_rect(.Mode_Toggle)
+	workflow_rect := ui_control_rect(.Workflow_Toggle)
+	workflow_text := "WORKFLOW / VOCAL"
+	if ui.workflow == .Dancing {workflow_text = "WORKFLOW / DANCING"}
 	draw_text_in_rect(
 		ctx,
 		small_font,
-		"VOCAL TRAINING",
-		app_title_rect(),
-		.Start,
+		workflow_text,
+		workflow_rect,
 		.Center,
-		bright,
-		86,
+		.Center,
+		orange,
 	)
-	mode_rect := ui_control_rect(.Mode_Toggle)
-	mode_text := "MODE / BUILD EXERCISES"
-	if ui.mode == .Play {mode_text = "MODE / PRACTICE LIBRARY"}
+	mode_text := "WORKSPACE / SOURCES"
+	if ui.mode == .Play {mode_text = "WORKSPACE / CLIPS"}
 	draw_text_in_rect(ctx, small_font, mode_text, mode_rect, .Center, .Center, orange)
 	source_header := UI_Rect {
 		source_panel.x,
@@ -5622,10 +6034,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	}
 	player_header := UI_Rect{player.x, player.y + player.h - 35, player.w, 35}
 	transcript_header := UI_Rect{transcript.x, transcript.y + transcript.h - 35, transcript.w, 35}
-	exercise_header := UI_Rect {
-		exercise_panel.x,
-		exercise_panel.y + exercise_panel.h - 35,
-		exercise_panel.w,
+	clip_header := UI_Rect {
+		clip_panel.x,
+		clip_panel.y + clip_panel.h - 35,
+		clip_panel.w,
 		35,
 	}
 	if ui.mode == .Create {
@@ -5667,8 +6079,8 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"04 / EXERCISE OUTPUT",
-			UI_Rect{exercise_header.x, exercise_header.y, 158, exercise_header.h},
+			"04 / CLIP OUTPUT",
+			UI_Rect{clip_header.x, clip_header.y, 158, clip_header.h},
 			.Start,
 			.Center,
 			muted,
@@ -5678,8 +6090,8 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"01 / EXERCISE LIBRARY",
-			UI_Rect{exercise_header.x, exercise_header.y, 158, exercise_header.h},
+			"01 / CLIP LIBRARY",
+			UI_Rect{clip_header.x, clip_header.y, 158, clip_header.h},
 			.Start,
 			.Center,
 			muted,
@@ -5688,8 +6100,8 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			fmt.tprintf("%03d SAVED", len(state.exercises)),
-			UI_Rect{exercise_header.x + 164, exercise_header.y, 92, exercise_header.h},
+			fmt.tprintf("%03d SAVED", filtered_clip_count()),
+			UI_Rect{clip_header.x + 164, clip_header.y, 92, clip_header.h},
 			.Start,
 			.Center,
 			cyan,
@@ -5709,19 +6121,32 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	if ui.mode == .Create {
 		draw_editable_text_field(ctx, small_font, ui.source_search, "/ filter source register", ui_control_rect(.Source_Search), .Source_Search, ink, dim, orange)
 		draw_editable_text_field(ctx, small_font, ui.transcript_search, "/ search timed transcript", ui_control_rect(.Transcript_Search), .Transcript_Search, ink, dim, orange)
-		draw_editable_text_field(ctx, small_font, ui.exercise_name, "NAME / optional designation", ui_control_rect(.Exercise_Name), .Exercise_Name, ink, dim, orange)
+		draw_editable_text_field(ctx, small_font, ui.clip_name, "NAME / optional designation", ui_control_rect(.Clip_Name), .Clip_Name, ink, dim, orange)
 	} else {
-		draw_editable_text_field(ctx, small_font, ui.exercise_search, "/ filter exercise library", ui_control_rect(.Exercise_Search), .Exercise_Search, ink, dim, orange)
-		draw_pitch_monitor(
-			ctx,
-			small_font,
-			pitch_panel,
-			bright,
-			muted,
-			dim,
-			orange,
-			cyan,
-		)
+		draw_editable_text_field(ctx, small_font, ui.clip_search, "/ filter clip library", ui_control_rect(.Clip_Search), .Clip_Search, ink, dim, orange)
+		if ui.workflow == .Vocal {
+			draw_pitch_monitor(
+				ctx,
+				small_font,
+				pitch_panel,
+				bright,
+				muted,
+				dim,
+				orange,
+				cyan,
+			)
+		} else {
+			draw_dance_tools(
+				ctx,
+				small_font,
+				pitch_panel,
+				bright,
+				muted,
+				dim,
+				orange,
+				cyan,
+			)
+		}
 	}
 
 	if ui.mode == .Create {
@@ -5775,7 +6200,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			row.y -= 30
 			visible_source_index += 1
 		}
-		if len(state.sources) == 0 {
+		if filtered_source_count() == 0 {
 			draw_text_in_rect(
 				ctx,
 				small_font,
@@ -5885,7 +6310,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			ui.source_playback_active ? "MEDIA READY" : "EXERCISE READY",
+			ui.source_playback_active ? "MEDIA READY" : "CLIP READY",
 			UI_Rect{timestamp_rect.x + timestamp_rect.w + 12, player.y, 100, 30},
 			.Start,
 			.Center,
@@ -5901,14 +6326,14 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				draw_timestamp_text_in_rect(ctx, small_font, format_timestamp(seconds), option, .Center, .Center, seconds == selected ? cyan : bright)
 			}
 		}
-	} else if ui.active_exercise >= 0 && ui.active_exercise < len(state.exercises) {
-		exercise := &state.exercises[ui.active_exercise]
+	} else if ui.active_clip >= 0 && ui.active_clip < len(state.clips) {
+		clip := &state.clips[ui.active_clip]
 		metadata := UI_Rect{player.x, player.y, player.w, 30}
 		name_rect := UI_Rect{metadata.x, metadata.y, min(280, max(0, metadata.w - 160)), metadata.h}
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			exercise.name,
+			clip.name,
 			name_rect,
 			.Start,
 			.Center,
@@ -5918,7 +6343,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_timestamp_text_in_rect(
 			ctx,
 			small_font,
-			format_timestamp(exercise.end_seconds - exercise.start_seconds),
+			format_timestamp(clip.end_seconds - clip.start_seconds),
 			UI_Rect{name_rect.x + name_rect.w + 12, metadata.y, 120, metadata.h},
 			.Start,
 			.Center,
@@ -5930,7 +6355,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"NO EXERCISE SELECTED",
+			"NO CLIP SELECTED",
 			UI_Rect {
 				player_content.x,
 				player_content.y + player_content.h / 2,
@@ -5944,7 +6369,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"SELECT AN EXERCISE FROM THE LIBRARY",
+			"SELECT A CLIP FROM THE LIBRARY",
 			UI_Rect {
 				player_content.x,
 				player_content.y + player_content.h / 2 - 24,
@@ -5954,6 +6379,18 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			.Center,
 			.Center,
 			muted,
+		)
+	}
+	if ui.count_in_active && count_font != nil {
+		player_content := player_content_rect(player)
+		draw_text_in_rect(
+			ctx,
+			count_font,
+			fmt.tprintf("%d", ui.count_in_value),
+			player_content,
+			.Center,
+			.Center,
+			orange,
 		)
 	}
 
@@ -6029,8 +6466,8 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		}
 		CGContextRestoreGState(ctx)
 
-		output_commit := find_ui_control(ui_control_id("commit exercise output"))
-		output_top := exercise_name.y - 8
+		output_commit := find_ui_control(ui_control_id("commit clip output"))
+		output_top := clip_name.y - 8
 		if output_commit != nil {
 			output_top = output_commit.rect.y - 8
 			commit_color := dim
@@ -6046,10 +6483,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			)
 		}
 		output_content := UI_Rect {
-			exercise_panel.x + 6,
-			exercise_panel.y + 8,
-			exercise_panel.w - 12,
-			max(0, output_top - exercise_panel.y - 8),
+			clip_panel.x + 6,
+			clip_panel.y + 8,
+			clip_panel.w - 12,
+			max(0, output_top - clip_panel.y - 8),
 		}
 		draw_text_in_rect(
 			ctx,
@@ -6096,33 +6533,33 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	}
 
 	if ui.mode == .Play {
-		exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+		clip_content := clip_content_rect(clip_search, clip_panel, clip_name)
 		CGContextSaveGState(ctx)
 		CGContextClipToRect(
 			ctx,
 			Rect {
-				Point{exercise_content.x * s, exercise_content.y * s},
-				Size{exercise_content.w * s, exercise_content.h * s},
+				Point{clip_content.x * s, clip_content.y * s},
+				Size{clip_content.w * s, clip_content.h * s},
 			},
 		)
 		row := UI_Rect {
-			exercise_content.x,
-			exercise_content.y + exercise_content.h - 29 + ui.exercise_scroll,
-			exercise_content.w,
+			clip_content.x,
+			clip_content.y + clip_content.h - 29 + ui.clip_scroll,
+			clip_content.w,
 			29,
 		}
-		exercise_index := 1
-		for exercise, index in state.exercises {
-			if !exercise_matches_filter(exercise, ui.exercise_search) {continue}
-			control := find_ui_control_by_action_and_index(.Exercise, index)
+		clip_index := 1
+		for clip, index in state.clips {
+			if !clip_matches_filter(clip, ui.clip_search) {continue}
+			control := find_ui_control_by_action_and_index(.Clip, index)
 			if control != nil {
 				row = control.rect
 				row_color := ink
-				if index == ui.active_exercise {row_color = orange}
+				if index == ui.active_clip {row_color = orange}
 				draw_text_in_rect(
 					ctx,
 					small_font,
-					fmt.tprintf("E%02d", exercise_index),
+					fmt.tprintf("E%02d", clip_index),
 					UI_Rect{row.x + 8, row.y, 34, row.h},
 					.Start,
 					.Center,
@@ -6131,7 +6568,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				draw_text_in_rect(
 					ctx,
 					small_font,
-					exercise.name,
+					clip.name,
 					UI_Rect{row.x + 46, row.y, row.w - 52, row.h},
 					.Start,
 					.Center,
@@ -6139,17 +6576,17 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				)
 			}
 			row.y -= 30
-			exercise_index += 1
+			clip_index += 1
 		}
-		if len(state.exercises) == 0 {
+		if filtered_clip_count() == 0 {
 			draw_text_in_rect(
 				ctx,
 				small_font,
 				"E00  LIBRARY EMPTY",
 				UI_Rect {
-					exercise_content.x,
-					exercise_content.y + exercise_content.h - 29,
-					exercise_content.w,
+					clip_content.x,
+					clip_content.y + clip_content.h - 29,
+					clip_content.w,
 					29,
 				},
 				.Start,
@@ -6161,7 +6598,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		CGContextRestoreGState(ctx)
 	}
 
-	labels := [15]string {
+	labels := [19]string {
 		"MARK IN",
 		"MARK OUT",
 		"COMMIT",
@@ -6177,17 +6614,29 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		"PLAY NEXT",
 		"SHUFFLE",
 		"AUTOPLAY",
+		"MIRROR",
+		"LOOP",
+		"COUNT-IN",
+		"COUNT EACH LOOP",
 	}
-	control_kinds := [15]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle}
-	valid_range := active_exercise_range_is_valid()
+	control_kinds := [19]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle}
+	valid_range := active_clip_range_is_valid()
 	for label, i in labels {
 		button_label := label
 		if control_kinds[i] == .Pitch_Toggle {
 			button_label = ui.pitch.tracking ? "STOP PITCH" : "START PITCH"
 		} else if control_kinds[i] == .Shuffle_Toggle {
-			button_label = ui.exercise_shuffle ? "SHUFFLE ON" : "SHUFFLE OFF"
+			button_label = ui.clip_shuffle ? "SHUFFLE ON" : "SHUFFLE OFF"
 		} else if control_kinds[i] == .Autoplay_Toggle {
-			button_label = ui.exercise_autoplay ? "AUTOPLAY ON" : "AUTOPLAY OFF"
+			button_label = ui.clip_autoplay ? "AUTOPLAY ON" : "AUTOPLAY OFF"
+		} else if control_kinds[i] == .Dance_Mirror_Toggle {
+			button_label = active_dance_clip_mirrored() ? "MIRROR ON" : "MIRROR OFF"
+		} else if control_kinds[i] == .Dance_Loop_Toggle {
+			button_label = active_dance_clip_looping() ? "LOOP ON" : "LOOP OFF"
+		} else if control_kinds[i] == .Dance_Count_In {
+			button_label = dance_count_in_action_label()
+		} else if control_kinds[i] == .Dance_Count_Each_Loop_Toggle {
+			button_label = active_dance_clip_counts_each_loop() ? "LOOP COUNT ON" : "LOOP COUNT OFF"
 		}
 		rect := ui_control_rect(control_kinds[i])
 		code, has_code := numbered_action_code_for_action(ui.mode, i)
@@ -6252,7 +6701,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		)
 	}
 	if ui.mode ==
-	   .Play {range_text = fmt.tprintf("LIBRARY / %03d EXERCISES", len(state.exercises))}
+	   .Play {range_text = fmt.tprintf("LIBRARY / %03d CLIPS", filtered_clip_count())}
 	footer := UI_Rect{18, 0, ui.width - 36, 30}
 	draw_timestamp_text_in_rect(
 		ctx,
@@ -6400,8 +6849,8 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		}
 	}
 	draw_source_details(ctx, small_font, bright, muted, cyan)
-	draw_exercise_rename(ctx, small_font, bright, muted, dim, orange)
-	draw_exercise_metadata(ctx, small_font, bright, muted, dim, orange, cyan, danger)
+	draw_clip_rename(ctx, small_font, bright, muted, dim, orange)
+	draw_clip_metadata(ctx, small_font, bright, muted, dim, orange, cyan, danger)
 	draw_randomize_help(ctx, small_font, bright, muted, dim, cyan)
 	draw_pitch_help(ctx, small_font, bright, muted, cyan)
 	draw_data_modal(ctx, small_font, bright, muted, dim, orange, cyan)
@@ -6713,9 +7162,19 @@ ensure_text_texture :: proc(width, height: uint) -> bool {
 	return true
 }
 
-encode_texture :: proc(encoder, texture: Id, rect: UI_Rect, alpha: f32) {
+encode_texture :: proc(
+	encoder,
+	texture: Id,
+	rect: UI_Rect,
+	alpha: f32,
+	mirror_x := false,
+) {
 	if texture == nil {return}
-	vertices := texture_rect_vertices(rect, [4]f32{1, 1, 1, alpha})
+	vertices := texture_rect_vertices(
+		rect,
+		[4]f32{1, 1, 1, alpha},
+		mirror_x,
+	)
 	msg_void_id(encoder, sel_registerName("setRenderPipelineState:"), ui.texture_pipeline)
 	msg_void_ptr_u_u(
 		encoder,
@@ -6867,7 +7326,7 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	   kind == .Configure_Flash ||
 	   kind == .Shortcut_Record ||
 	   kind == .Set_Theme {
-		return vocal_settings_commands_available()
+		return video_clips_settings_commands_available()
 	}
 	if kind == .Shortcut_Save {
 		return ui.shortcut_candidate_valid &&
@@ -6876,7 +7335,9 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Activate_Notification_Action {
 		return notification_action_available(notification_selected())
 	}
-	if kind == .Export_Library || kind == .Import_Library {
+	if kind == .Export_Library ||
+	   kind == .Export_Current_Workflow ||
+	   kind == .Import_Library {
 		return !library_transfer_busy()
 	}
 	if kind == .Confirm_Library_Import {
@@ -6890,13 +7351,13 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Save {
 		return import_job == nil &&
 		       export_job == nil &&
-		       active_exercise_range_is_valid()
+		       active_clip_range_is_valid()
 	}
 	if kind == .Randomize {
-		return ui.mode == .Play && len(state.exercises) > 0
+		return ui.mode == .Play && filtered_clip_count() > 0
 	}
 	if kind == .Play_Next {
-		return ui.mode == .Play && filtered_exercise_count() > 0
+		return ui.mode == .Play && filtered_clip_count() > 0
 	}
 	if kind == .Shuffle_Toggle || kind == .Autoplay_Toggle {
 		return ui.mode == .Play
@@ -6905,47 +7366,73 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		return ui.mode == .Play
 	}
 	if kind == .Pitch_Toggle {
-		if ui.mode != .Play || ui.pitch.permission_pending {return false}
+		if ui.mode != .Play ||
+		   ui.workflow != .Vocal ||
+		   ui.pitch.permission_pending {
+			return false
+		}
 		if ui.pitch.tracking {return true}
 		return ui.pitch.permission != .Denied &&
 		       ui.pitch.permission != .Restricted
 	}
 	if kind == .Pitch_Reference_Down {
-		return ui.mode == .Play && ui.pitch.settings.reference_hz > 400
+		return ui.mode == .Play &&
+		       ui.workflow == .Vocal &&
+		       ui.pitch.settings.reference_hz > 400
 	}
 	if kind == .Pitch_Reference_Up {
-		return ui.mode == .Play && ui.pitch.settings.reference_hz < 480
+		return ui.mode == .Play &&
+		       ui.workflow == .Vocal &&
+		       ui.pitch.settings.reference_hz < 480
 	}
 	if kind == .Pitch_Range ||
 	   kind == .Pitch_Labels ||
 	   kind == .Pitch_Transpose ||
 	   kind == .Pitch_Highlight ||
 	   kind == .Open_Pitch_Help {
-		return ui.mode == .Play
+		return ui.mode == .Play && ui.workflow == .Vocal
+	}
+	if kind == .Dance_Mirror_Toggle ||
+	   kind == .Dance_Loop_Toggle ||
+	   kind == .Dance_Count_In ||
+	   kind == .Dance_Count_Each_Loop_Toggle {
+		return active_dance_clip() != nil
+	}
+	if kind == .Dance_BPM_Down {
+		if clip := active_dance_clip(); clip != nil {
+			return clip.dance_count_in_bpm > 40
+		}
+		return false
+	}
+	if kind == .Dance_BPM_Up {
+		if clip := active_dance_clip(); clip != nil {
+			return clip.dance_count_in_bpm < 240
+		}
+		return false
 	}
 	if kind == .Close_Pitch_Help {
 		return ui.pitch.help_open
 	}
 	if kind == .Rename || kind == .Metadata {
 		return import_job == nil &&
-		       ui.active_exercise >= 0 &&
-		       ui.active_exercise < len(state.exercises)
+		       ui.active_clip >= 0 &&
+		       ui.active_clip < len(state.clips)
 	}
-	if kind == .View_Exercise_Source {
-		if ui.exercise_metadata_index < 0 ||
-		   ui.exercise_metadata_index >= len(state.exercises) {
+	if kind == .View_Clip_Source {
+		if ui.clip_metadata_index < 0 ||
+		   ui.clip_metadata_index >= len(state.clips) {
 			return false
 		}
-		return source_index_for_exercise(
+		return source_index_for_clip(
 			state.sources[:],
-			state.exercises[:],
-			ui.exercise_metadata_index,
+			state.clips[:],
+			ui.clip_metadata_index,
 		) >= 0
 	}
-	if kind == .Confirm_Exercise_Rename {
-		return ui.exercise_rename_index >= 0 &&
-		       ui.exercise_rename_index < len(state.exercises) &&
-		       len(strings.trim_space(ui.exercise_rename)) > 0
+	if kind == .Confirm_Clip_Rename {
+		return ui.clip_rename_index >= 0 &&
+		       ui.clip_rename_index < len(state.clips) &&
+		       len(strings.trim_space(ui.clip_rename)) > 0
 	}
 	if import_job == nil {return true}
 	#partial switch kind {
@@ -7000,7 +7487,7 @@ add_ax_element :: proc(
 		flags += {.Secondary_Press}
 	}
 	#partial switch kind {
-	case .Command_Palette_Search, .Settings_Search, .URL, .Source_Search, .Transcript_Search, .Exercise_Search, .Exercise_Name, .Exercise_Rename:
+	case .Command_Palette_Search, .Settings_Search, .URL, .Source_Search, .Transcript_Search, .Clip_Search, .Clip_Name, .Clip_Rename:
 		flags += {.Editable, .Drag}
 	}
 	control := UI_Control {
@@ -7040,9 +7527,9 @@ add_ax_element :: proc(
 		case .Pitch_Transpose:
 			if value == int(ui.pitch.settings.transpose) {checked = 1}
 		case .Shuffle_Toggle:
-			if ui.exercise_shuffle {checked = 1}
+			if ui.clip_shuffle {checked = 1}
 		case .Autoplay_Toggle:
-			if ui.exercise_autoplay {checked = 1}
+			if ui.clip_autoplay {checked = 1}
 		case:
 		}
 		value := msg_id_uint(
@@ -7076,7 +7563,7 @@ add_ax_element :: proc(
 		msg_void_id(
 			element,
 			sel_registerName("setAccessibilityValue:"),
-			nsstring(vocal_shortcut_display(ui.flash_leader)),
+			nsstring(video_clips_shortcut_display(ui.flash_leader)),
 		)
 	}
 	msg_void_bool(element, sel_registerName("setAccessibilityEnabled:"), enabled)
@@ -7169,7 +7656,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		array = temporary
 	}
 	element_class := objc_getClass("VocalAccessibilityElement")
-	import_field, import_button, source_search, source_panel, player, transcript, exercise_search, exercise_panel, exercise_name, pitch_panel, controls :=
+	import_field, import_button, source_search, source_panel, player, transcript, clip_search, clip_panel, clip_name, pitch_panel, controls :=
 		layout_rects()
 	add_window_controls(array, element_class)
 	if library_recovery_state.required {
@@ -7254,7 +7741,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		return
 	}
 	if ui.shortcut_open {
-		record := vocal_shortcut_record_rect()
+		record := video_clips_shortcut_record_rect()
 		if !ui.shortcut_listening {
 			add_ax_element(
 				array,
@@ -7274,7 +7761,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				element_class,
 				"01 Save Flash leader",
 				"AXButton",
-				vocal_shortcut_action_rect(0),
+				video_clips_shortcut_action_rect(0),
 				.Shortcut_Save,
 				flash_label = "save shortcut",
 			)
@@ -7284,7 +7771,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				element_class,
 				"01 Save Flash leader, unavailable",
 				"AXStaticText",
-				vocal_shortcut_action_rect(0),
+				video_clips_shortcut_action_rect(0),
 				.Command_Palette_Disabled,
 				flash_label = "save shortcut",
 				functional_name = "shortcut save disabled",
@@ -7295,7 +7782,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			element_class,
 			"02 Reset Flash leader to slash",
 			"AXButton",
-			vocal_shortcut_action_rect(1),
+			video_clips_shortcut_action_rect(1),
 			.Shortcut_Reset,
 			flash_label = "reset shortcut",
 		)
@@ -7304,7 +7791,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			element_class,
 			"03 Cancel Flash leader configuration",
 			"AXButton",
-			vocal_shortcut_action_rect(2),
+			video_clips_shortcut_action_rect(2),
 			.Shortcut_Cancel,
 			flash_label = "cancel shortcut",
 		)
@@ -7317,7 +7804,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			element_class,
 			"Search Settings",
 			"AXTextField",
-			vocal_settings_search_rect(),
+			video_clips_settings_search_rect(),
 			.Settings_Search,
 			flash_label = "search settings",
 		)
@@ -7326,34 +7813,34 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			element_class,
 			"Close Settings",
 			"AXButton",
-			vocal_settings_close_rect(),
+			video_clips_settings_close_rect(),
 			.Settings_Close,
 			flash_label = "close settings",
 		)
-		categories := [2]Vocal_Settings_Category{.Styling, .Shortcuts}
+		categories := [2]Video_Clips_Settings_Category{.Styling, .Shortcuts}
 		for category, index in categories {
 			add_ax_element(
 				array,
 				element_class,
 				fmt.tprintf(
 					"Show %s settings",
-					vocal_settings_category_name(category),
+					video_clips_settings_category_name(category),
 				),
 				"AXRadioButton",
-				vocal_settings_category_rect(index),
+				video_clips_settings_category_rect(index),
 				.Settings_Category,
 				index,
 				flash_label = fmt.tprintf(
 					"%s settings",
-					vocal_settings_category_name(category),
+					video_clips_settings_category_name(category),
 				),
 				functional_name = fmt.tprintf(
 					"settings category %s",
-					vocal_settings_category_name(category),
+					video_clips_settings_category_name(category),
 				),
 			)
 		}
-		for descriptor, index in vocal_settings_result_descriptors() {
+		for descriptor, index in video_clips_settings_result_descriptors() {
 			role := "AXButton"
 			if descriptor.action.kind == .Set_Theme {role = "AXRadioButton"}
 			add_ax_element(
@@ -7361,7 +7848,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				element_class,
 				descriptor.title,
 				role,
-				vocal_settings_result_rect(index),
+				video_clips_settings_result_rect(index),
 				descriptor.action.kind,
 				value = descriptor.action.value,
 				flash_label = strings.to_lower(
@@ -7581,7 +8068,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		add_ax_element(
 			array,
 			element_class,
-			"Search commands, sources, and exercises",
+			"Search commands, sources, and clips",
 			"AXTextField",
 			command_palette_search_rect(modal),
 			.Command_Palette_Search,
@@ -7635,20 +8122,23 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			add_ax_element(
 				array,
 				element_class,
-				"Open data folder",
+				"Export all library metadata",
 				"AXButton",
 				data_modal_action_rect(modal, 0),
-				.Open_Data_Folder,
-				flash_label = "open data folder",
+				.Export_Library,
+				flash_label = "export all",
 			)
 			add_ax_element(
 				array,
 				element_class,
-				"Export library metadata",
+				fmt.tprintf(
+					"Export %s workflow metadata",
+					ui.workflow == .Vocal ? "Vocal" : "Dancing",
+				),
 				"AXButton",
 				data_modal_action_rect(modal, 1),
-				.Export_Library,
-				flash_label = "export library",
+				.Export_Current_Workflow,
+				flash_label = "export current workflow",
 			)
 			add_ax_element(
 				array,
@@ -7662,9 +8152,18 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			add_ax_element(
 				array,
 				element_class,
+				"Open data folder",
+				"AXButton",
+				data_modal_action_rect(modal, 3),
+				.Open_Data_Folder,
+				flash_label = "open data folder",
+			)
+			add_ax_element(
+				array,
+				element_class,
 				"Close library data",
 				"AXButton",
-				data_modal_close_rect(modal),
+				data_modal_action_rect(modal, 4),
 				.Close_Data_Modal,
 				flash_label = "close data",
 			)
@@ -7672,56 +8171,56 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.exercise_metadata_open {
-		modal := exercise_metadata_modal_rect()
+	if ui.clip_metadata_open {
+		modal := clip_metadata_modal_rect()
 		add_ax_element(
 			array,
 			element_class,
-			"Close exercise metadata",
+			"Close clip metadata",
 			"AXButton",
-			exercise_metadata_close_rect(modal),
-			.Close_Exercise_Metadata,
+			clip_metadata_close_rect(modal),
+			.Close_Clip_Metadata,
 			flash_label = "close metadata",
 		)
 		add_ax_element(
 			array,
 			element_class,
-			"View exercise source",
+			"View clip source",
 			"AXButton",
-			exercise_metadata_source_rect(modal),
-			.View_Exercise_Source,
-			flash_label = "view exercise source",
+			clip_metadata_source_rect(modal),
+			.View_Clip_Source,
+			flash_label = "view clip source",
 		)
 		validate_ui_controls()
 		return
 	}
-	if ui.exercise_rename_open {
-		modal := exercise_rename_modal_rect()
+	if ui.clip_rename_open {
+		modal := clip_rename_modal_rect()
 		add_ax_element(
 			array,
 			element_class,
-			"New exercise name",
+			"New clip name",
 			"AXTextField",
-			exercise_rename_input_rect(modal),
-			.Exercise_Rename,
-			flash_label = "new exercise name",
+			clip_rename_input_rect(modal),
+			.Clip_Rename,
+			flash_label = "new clip name",
 		)
 		add_ax_element(
 			array,
 			element_class,
-			"Cancel exercise rename",
+			"Cancel clip rename",
 			"AXButton",
-			exercise_rename_cancel_rect(modal),
-			.Cancel_Exercise_Rename,
+			clip_rename_cancel_rect(modal),
+			.Cancel_Clip_Rename,
 			flash_label = "cancel rename",
 		)
 		add_ax_element(
 			array,
 			element_class,
-			"Rename exercise",
+			"Rename clip",
 			"AXButton",
-			exercise_rename_confirm_rect(modal),
-			.Confirm_Exercise_Rename,
+			clip_rename_confirm_rect(modal),
+			.Confirm_Clip_Rename,
 			flash_label = "confirm rename",
 		)
 		validate_ui_controls()
@@ -7818,8 +8317,19 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	toggle_label := "Switch to Play mode"
-	if ui.mode == .Play {toggle_label = "Switch to Create mode"}
+	workflow_label := "Switch to Dancing workflow"
+	if ui.workflow == .Dancing {workflow_label = "Switch to Vocal workflow"}
+	add_ax_element(
+		array,
+		element_class,
+		workflow_label,
+		"AXButton",
+		workflow_button_rect(),
+		.Workflow_Toggle,
+		flash_label = "switch workflow",
+	)
+	toggle_label := "Switch to Clips workspace"
+	if ui.mode == .Play {toggle_label = "Switch to Sources workspace"}
 	add_ax_element(
 		array,
 		element_class,
@@ -7827,7 +8337,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		"AXButton",
 		mode_button_rect(),
 		.Mode_Toggle,
-		flash_label = "switch application mode",
+		flash_label = "switch workspace",
 	)
 	if ui.mode == .Create {
 		add_ax_element(
@@ -7916,56 +8426,57 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		add_ax_element(
 			array,
 			element_class,
-			"Exercise name",
+			"Clip name",
 			"AXTextField",
-			exercise_name,
-			.Exercise_Name,
-			flash_label = "exercise name",
+			clip_name,
+			.Clip_Name,
+			flash_label = "clip name",
 		)
 	} else {
 		add_ax_element(
 			array,
 			element_class,
-			"Filter exercises",
+			"Filter clips",
 			"AXTextField",
-			exercise_search,
-			.Exercise_Search,
-			flash_label = "filter exercises",
+			clip_search,
+			.Clip_Search,
+			flash_label = "filter clips",
 		)
-		exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+		clip_content := clip_content_rect(clip_search, clip_panel, clip_name)
 		row := UI_Rect {
-			exercise_content.x,
-			exercise_content.y + exercise_content.h - 29 + ui.exercise_scroll,
-			exercise_content.w,
+			clip_content.x,
+			clip_content.y + clip_content.h - 29 + ui.clip_scroll,
+			clip_content.w,
 			29,
 		}
-		for exercise, index in state.exercises {
-			if !exercise_matches_filter(exercise, ui.exercise_search) {continue}
-			if row.y >= exercise_content.y &&
-			   row.y + row.h <= exercise_content.y + exercise_content.h {
+		for clip, index in state.clips {
+			if !clip_matches_filter(clip, ui.clip_search) {continue}
+			if row.y >= clip_content.y &&
+			   row.y + row.h <= clip_content.y + clip_content.h {
 				add_ax_element(
 					array,
 					element_class,
-					exercise.name,
+					clip.name,
 					"AXButton",
 					row,
-					.Exercise,
+					.Clip,
 					index,
-					flash_label = "select exercise",
-					functional_name = fmt.tprintf("select exercise %s", exercise.id),
+					flash_label = "select clip",
+					functional_name = fmt.tprintf("select clip %s", clip.id),
 				)
 			}
 			row.y -= 30
 		}
-		add_ax_element(
-			array,
-			element_class,
-			"Decrease pitch reference frequency",
-			"AXButton",
-			pitch_reference_rect(pitch_panel, 0),
-			.Pitch_Reference_Down,
-			flash_label = "lower pitch reference",
-		)
+		if ui.workflow == .Vocal {
+			add_ax_element(
+				array,
+				element_class,
+				"Decrease pitch reference frequency",
+				"AXButton",
+				pitch_reference_rect(pitch_panel, 0),
+				.Pitch_Reference_Down,
+				flash_label = "lower pitch reference",
+			)
 		add_ax_element(
 			array,
 			element_class,
@@ -8050,19 +8561,39 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			flash_label = "pitch chart",
 			functional_name = "pitch chart",
 		)
-		add_ax_element(
-			array,
-			element_class,
-			"Explain pitch monitor",
-			"AXButton",
-			pitch_help_rect(pitch_panel),
-			.Open_Pitch_Help,
-			flash_label = "pitch monitor help",
-		)
+			add_ax_element(
+				array,
+				element_class,
+				"Explain pitch monitor",
+				"AXButton",
+				pitch_help_rect(pitch_panel),
+				.Open_Pitch_Help,
+				flash_label = "pitch monitor help",
+			)
+		} else {
+			add_ax_element(
+				array,
+				element_class,
+				"Decrease count-in BPM",
+				"AXButton",
+				dance_bpm_down_rect(pitch_panel),
+				.Dance_BPM_Down,
+				flash_label = "lower count in bpm",
+			)
+			add_ax_element(
+				array,
+				element_class,
+				"Increase count-in BPM",
+				"AXButton",
+				dance_bpm_up_rect(pitch_panel),
+				.Dance_BPM_Up,
+				flash_label = "raise count in bpm",
+			)
+		}
 	}
 	if state.player != nil {
 		playing := msg_f32(state.player, sel_registerName("rate")) > 0
-		media_name := ui.source_playback_active ? "source" : "exercise"
+		media_name := ui.source_playback_active ? "source" : "clip"
 		add_pointer_control(fmt.tprintf("toggle %s playback from player surface", media_name), player, .Player_Surface, {.Primary_Press})
 		add_pointer_control(fmt.tprintf("scrub %s timeline", media_name), source_timeline_rect(player), .Source_Timeline, {.Primary_Press, .Drag})
 		add_ax_element(array, element_class, fmt.tprintf("%s %s", playing ? "Pause" : "Play", media_name), "AXButton", source_play_pause_rect(player), .Source_Play_Pause, flash_label = fmt.tprintf("play pause %s", media_name))
@@ -8094,8 +8625,8 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		reset_label := "Return to the imported source timestamp"
 		reset_flash_label := "reset source timestamp"
 		if !ui.source_playback_active {
-			reset_label = "Return to the start of the exercise"
-			reset_flash_label = "reset exercise"
+			reset_label = "Return to the start of the clip"
+			reset_flash_label = "reset clip"
 		}
 		if hint_control == .Reset || !ui.source_playback_active {
 			add_ax_element(array, element_class, reset_label, "AXButton", source_reset_rect(player), .Source_Reset, flash_label = reset_flash_label)
@@ -8122,25 +8653,29 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			flash_label = "louder",
 		)
 	}
-	kinds := [15]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle}
-	labels := [15]string {
+	kinds := [19]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle}
+	labels := [19]string {
 		"Set start",
 		"Set end",
-		"Save exercise",
+		"Save clip",
 		"Play",
 		"Pause",
 		"Load captions",
 		"Preview range",
 		"Open library data",
-		"Rename exercise",
-		"Show exercise metadata",
-		"Play a random exercise",
+		"Rename clip",
+		"Show clip metadata",
+		"Play a random clip",
 		"Toggle pitch tracking",
-		"Play the next filtered exercise",
+		"Play the next filtered clip",
 		"Toggle shuffled Play Next",
 		"Toggle automatic Play Next",
+		"Toggle horizontal mirror",
+		"Toggle clip loop",
+		"Cycle visual count in",
+		"Toggle count in before each loop",
 	}
-	flash_labels := [15]string{"mark in", "mark out", "commit", "play", "pause", "captions", "audition", "data", "rename exercise", "exercise metadata", "randomize exercise", "toggle pitch tracking", "play next exercise", "toggle shuffle", "toggle autoplay"}
+	flash_labels := [19]string{"mark in", "mark out", "commit", "play", "pause", "captions", "audition", "data", "rename clip", "clip metadata", "randomize clip", "toggle pitch tracking", "play next clip", "toggle shuffle", "toggle autoplay", "toggle mirror", "toggle loop", "cycle count in", "toggle count each loop"}
 	slot_count := control_slot_count(ui.mode)
 	for slot in 0 ..< slot_count {
 		action_index := control_action_for_slot(ui.mode, slot)
@@ -8154,11 +8689,20 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			if kind == .Shuffle_Toggle {
 				role = "AXCheckBox"
 				accessibility_label =
-					ui.exercise_shuffle ? "Shuffle on" : "Shuffle off"
+					ui.clip_shuffle ? "Shuffle on" : "Shuffle off"
 			} else if kind == .Autoplay_Toggle {
 				role = "AXCheckBox"
 				accessibility_label =
-					ui.exercise_autoplay ? "Autoplay on" : "Autoplay off"
+					ui.clip_autoplay ? "Autoplay on" : "Autoplay off"
+			} else if kind == .Dance_Mirror_Toggle {
+				role = "AXCheckBox"
+				accessibility_label = active_dance_clip_mirrored() ? "Mirror on" : "Mirror off"
+			} else if kind == .Dance_Loop_Toggle {
+				role = "AXCheckBox"
+				accessibility_label = active_dance_clip_looping() ? "Loop on" : "Loop off"
+			} else if kind == .Dance_Count_Each_Loop_Toggle {
+				role = "AXCheckBox"
+				accessibility_label = active_dance_clip_counts_each_loop() ? "Count before each loop on" : "Count before each loop off"
 			}
 			add_ax_element(
 				array,
@@ -8186,12 +8730,12 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		add_ax_element(
 			array,
 			element_class,
-			"Save exercise",
+			"Save clip",
 			"AXButton",
-			exercise_output_commit_rect(exercise_name),
+			clip_output_commit_rect(clip_name),
 			.Save,
 			flash_label = "commit",
-			functional_name = "commit exercise output",
+			functional_name = "commit clip output",
 		)
 	}
 	validate_ui_controls()
@@ -8280,13 +8824,13 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		if command_palette.is_open(&command_palette_state) {
 			close_command_palette(false)
 		}
-		return vocal_settings_open()
+		return video_clips_settings_open()
 	case .Settings_Close:
-		vocal_settings_close()
+		video_clips_settings_close()
 	case .Settings_Category:
 		if action.index >= 0 &&
-		   action.index <= int(Vocal_Settings_Category.Shortcuts) {
-			ui.settings_category = Vocal_Settings_Category(action.index)
+		   action.index <= int(Video_Clips_Settings_Category.Shortcuts) {
+			ui.settings_category = Video_Clips_Settings_Category(action.index)
 			ui.settings_query_focused = false
 			if ui.focus == .Settings_Search {_ = unfocus_text_input()}
 		}
@@ -8294,17 +8838,21 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		ui.settings_query_focused = true
 		focus_text_input(.Settings_Search)
 	case .Set_Theme:
-		return vocal_settings_apply_theme(action.value != 0)
+		return video_clips_settings_apply_theme(action.value != 0)
 	case .Configure_Flash:
-		return vocal_shortcut_recorder_open()
+		return video_clips_shortcut_recorder_open()
 	case .Shortcut_Record:
-		return vocal_shortcut_recorder_open()
+		return video_clips_shortcut_recorder_open()
 	case .Shortcut_Save:
-		return vocal_shortcut_recorder_save()
+		return video_clips_shortcut_recorder_save()
 	case .Shortcut_Reset:
-		return vocal_shortcut_recorder_reset()
+		return video_clips_shortcut_recorder_reset()
 	case .Shortcut_Cancel:
-		vocal_shortcut_recorder_close()
+		video_clips_shortcut_recorder_close()
+	case .Workflow_Toggle:
+		set_ui_workflow(
+			ui.workflow == .Vocal ? .Dancing : .Vocal,
+		)
 	case .Mode_Toggle:
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 	case .Open_Source_Modal:
@@ -8361,33 +8909,81 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		on_select_source(nil, nil, nil)
 	case .Transcript:
 		seek_seconds(action.seconds)
-	case .Exercise_Search:
-		focus_text_input(.Exercise_Search)
-	case .Exercise:
+	case .Clip_Search:
+		focus_text_input(.Clip_Search)
+	case .Clip:
 		ui_event_tag = action.index
-		on_play_exercise(nil, nil, nil)
+		on_play_clip(nil, nil, nil)
 	case .Randomize:
-		return randomize_exercise()
+		return randomize_clip()
 	case .Open_Randomize_Help:
 		open_randomize_help()
 	case .Close_Randomize_Help:
 		close_randomize_help()
 	case .Play_Next:
-		return play_next_exercise()
+		return play_next_clip()
 	case .Shuffle_Toggle:
-		ui.exercise_shuffle = !ui.exercise_shuffle
+		ui.clip_shuffle = !ui.clip_shuffle
 		set_success_status(
-			ui.exercise_shuffle ? "Shuffle enabled" : "Shuffle disabled",
+			ui.clip_shuffle ? "Shuffle enabled" : "Shuffle disabled",
 		)
 	case .Autoplay_Toggle:
-		ui.exercise_autoplay = !ui.exercise_autoplay
+		ui.clip_autoplay = !ui.clip_autoplay
 		set_success_status(
-			ui.exercise_autoplay ? "Autoplay enabled" : "Autoplay disabled",
+			ui.clip_autoplay ? "Autoplay enabled" : "Autoplay disabled",
 		)
 	case .Pitch_Toggle:
 		if !pitch_monitor_toggle(&ui.pitch) {
-			ui.pitch.permission = Pitch_Permission(vt_pitch_permission_status())
+			ui.pitch.permission = Pitch_Permission(hw_video_clips_pitch_permission_status())
 		}
+	case .Dance_Mirror_Toggle:
+		if clip := active_dance_clip(); clip != nil {
+			clip.dance_mirrored = !clip.dance_mirrored
+			ui.needs_redraw = true
+			return save_active_dance_clip()
+		}
+		return false
+	case .Dance_Loop_Toggle:
+		if clip := active_dance_clip(); clip != nil {
+			clip.dance_loop = !clip.dance_loop
+			ui.needs_redraw = true
+			return save_active_dance_clip()
+		}
+		return false
+	case .Dance_Count_In:
+		if clip := active_dance_clip(); clip != nil {
+			switch clip.dance_count_in_beats {
+			case 0: clip.dance_count_in_beats = 4
+			case 4: clip.dance_count_in_beats = 8
+			case: clip.dance_count_in_beats = 0
+			}
+			ui.needs_redraw = true
+			return save_active_dance_clip()
+		}
+		return false
+	case .Dance_Count_Each_Loop_Toggle:
+		if clip := active_dance_clip(); clip != nil {
+			clip.dance_count_each_loop = !clip.dance_count_each_loop
+			ui.needs_redraw = true
+			return save_active_dance_clip()
+		}
+		return false
+	case .Dance_BPM_Down:
+		if clip := active_dance_clip(); clip != nil {
+			clip.dance_count_in_bpm =
+				max(40, clip.dance_count_in_bpm - 1)
+			ui.needs_redraw = true
+			return save_active_dance_clip()
+		}
+		return false
+	case .Dance_BPM_Up:
+		if clip := active_dance_clip(); clip != nil {
+			clip.dance_count_in_bpm =
+				min(240, clip.dance_count_in_bpm + 1)
+			ui.needs_redraw = true
+			return save_active_dance_clip()
+		}
+		return false
 	case .Pitch_Reference_Down:
 		ui.pitch.settings.reference_hz =
 			max(400, ui.pitch.settings.reference_hz - 1)
@@ -8416,18 +9012,18 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		open_pitch_help()
 	case .Close_Pitch_Help:
 		close_pitch_help()
-	case .Exercise_Name:
-		focus_text_input(.Exercise_Name)
-	case .Cancel_Exercise_Rename:
-		close_exercise_rename()
-	case .Confirm_Exercise_Rename:
-		confirm_exercise_rename()
-	case .Exercise_Rename:
-		focus_text_input(.Exercise_Rename)
-	case .Close_Exercise_Metadata:
-		close_exercise_metadata()
-	case .View_Exercise_Source:
-		view_exercise_source()
+	case .Clip_Name:
+		focus_text_input(.Clip_Name)
+	case .Cancel_Clip_Rename:
+		close_clip_rename()
+	case .Confirm_Clip_Rename:
+		confirm_clip_rename()
+	case .Clip_Rename:
+		focus_text_input(.Clip_Rename)
+	case .Close_Clip_Metadata:
+		close_clip_metadata()
+	case .View_Clip_Source:
+		view_clip_source()
 	case .Volume_Down:
 		adjust_player_volume(-0.1)
 	case .Volume_Up:
@@ -8473,6 +9069,10 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		on_open_data_folder(nil, nil, nil)
 	case .Export_Library:
 		export_library_with_panel()
+	case .Export_Current_Workflow:
+		export_library_with_panel(
+			ui.workflow == .Vocal ? .Vocal : .Dancing,
+		)
 	case .Import_Library:
 		prepare_library_import_with_panel()
 	case .Cancel_Library_Import:
@@ -8509,9 +9109,9 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 	case .Backup_Warning_Continue:
 		major_change_backup_continue()
 	case .Rename:
-		open_exercise_rename()
+		open_clip_rename()
 	case .Metadata:
-		open_exercise_metadata()
+		open_clip_metadata()
 	}
 	ui.needs_redraw = true
 	return true
@@ -8525,7 +9125,7 @@ palette_active_context :: proc() -> command_palette.Context_Mask {
 		bits |= u64(PALETTE_CONTEXT_SOURCE)
 		if source_hint_count(state.active_source) > 0 {bits |= u64(PALETTE_CONTEXT_TIMESTAMPS)}
 		if state.has_start && state.has_end &&
-		   valid_exercise_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
+		   valid_clip_range(state.range_start, state.range_end, state.sources[state.active_source].duration) {
 			bits |= u64(PALETTE_CONTEXT_RANGE)
 		}
 	}
@@ -8609,7 +9209,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"Configure leader key for Flash",
 		fmt.tprintf(
 			"Current shortcut: %s",
-			vocal_shortcut_display(ui.flash_leader),
+			video_clips_shortcut_display(ui.flash_leader),
 		),
 		"Shortcut",
 		[]string{"keyboard", "shortcut", "leader", "jump", "navigation"},
@@ -8647,13 +9247,26 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"Unavailable for the current theme or modal state",
 	)
 	mode_context := PALETTE_CONTEXT_CREATE
-	mode_title := "Switch to Play mode"
-	mode_subtitle := "Open the saved exercise library"
+	mode_title := "Switch to Clips"
+	mode_subtitle := "Open the saved clip library"
 	if ui.mode == .Play {
 		mode_context = PALETTE_CONTEXT_PLAY
-		mode_title = "Switch to Create mode"
+		mode_title = "Switch to Sources"
 		mode_subtitle = "Open source editing and clip creation"
 	}
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Workflow_Toggle},
+		fmt.tprintf(
+			"Switch to %s workflow",
+			ui.workflow == .Vocal ? "Dancing" : "Vocal",
+		),
+		"Open the independent source and clip library for that workflow",
+		"Command",
+		[]string{"workflow", "vocal", "dancing"},
+		palette_condition(none = busy),
+		"Wait for the active media operation to finish",
+	)
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Mode_Toggle},
@@ -8681,7 +9294,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		&entries,
 		UI_Action{kind = .Start},
 		"Mark In",
-		"Set the exercise start at the current playhead",
+		"Set the clip start at the current playhead",
 		"Command",
 		[]string{"start", "range"},
 		palette_condition(create_player),
@@ -8691,7 +9304,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		&entries,
 		UI_Action{kind = .End},
 		"Mark Out",
-		"Set the exercise end at the current playhead",
+		"Set the clip end at the current playhead",
 		"Command",
 		[]string{"end", "range"},
 		palette_condition(create_player),
@@ -8703,8 +9316,8 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Save},
-		"Commit exercise",
-		"Export the marked range as a saved exercise",
+		"Commit clip",
+		"Export the marked range as a saved clip",
 		"Command",
 		[]string{"save", "clip", "range"},
 		palette_condition(create_range, busy),
@@ -8737,31 +9350,31 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		&entries,
 		UI_Action{kind = .Play},
 		"Play",
-		"Start the loaded source or exercise",
+		"Start the loaded source or clip",
 		"Command",
 		[]string{"run", "resume"},
 		palette_condition(PALETTE_CONTEXT_PLAYER),
-		"Available after loading a source or exercise",
+		"Available after loading a source or clip",
 	)
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Pause},
 		"Pause",
-		"Pause the loaded source or exercise",
+		"Pause the loaded source or clip",
 		"Command",
 		[]string{"hold"},
 		palette_condition(PALETTE_CONTEXT_PLAYER),
-		"Available after loading a source or exercise",
+		"Available after loading a source or clip",
 	)
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Source_Stop},
 		"Stop playback",
-		"Stop the loaded source or exercise and seek to zero",
+		"Stop the loaded source or clip and seek to zero",
 		"Command",
 		[]string{"transport", "zero"},
 		palette_condition(PALETTE_CONTEXT_PLAYER),
-		"Available after loading a source or exercise",
+		"Available after loading a source or clip",
 	)
 	create_timestamps := command_palette.Context_Mask(
 		u64(create_player) | u64(PALETTE_CONTEXT_TIMESTAMPS),
@@ -8782,12 +9395,12 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Source_Reset},
-		"Reset exercise",
-		"Seek to the start of the loaded exercise",
+		"Reset clip",
+		"Seek to the start of the loaded clip",
 		"Command",
 		[]string{"transport", "zero"},
 		palette_condition(play_player),
-		"Available after loading an exercise in Play mode",
+		"Available after loading a clip in Clips",
 	)
 	transport_actions := [4]UI_Action{
 		{kind = .Speed_Down},
@@ -8811,7 +9424,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 			"Command",
 			nil,
 			palette_condition(PALETTE_CONTEXT_PLAYER),
-			"Available after loading a source or exercise",
+			"Available after loading a source or clip",
 		)
 	}
 	append_command_palette_entry(
@@ -8832,35 +9445,35 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Play_Next},
-		"Play next exercise",
-		"Play the next filtered exercise or a weighted shuffled exercise",
+		"Play next clip",
+		"Play the next filtered clip or a weighted shuffled clip",
 		"Command",
-		[]string{"exercise", "next", "shuffle"},
+		[]string{"clip", "next", "shuffle"},
 		palette_condition(
 			command_palette.Context_Mask(
 				u64(PALETTE_CONTEXT_PLAY) |
 					u64(PALETTE_CONTEXT_PLAY_NEXT),
 			),
 		),
-		"Available when the current exercise filter has a result",
+		"Available when the current clip filter has a result",
 	)
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Shuffle_Toggle},
-		ui.exercise_shuffle ? "Disable shuffle" : "Enable shuffle",
+		ui.clip_shuffle ? "Disable shuffle" : "Enable shuffle",
 		"Make Play Next use the weighted Randomize selection",
 		"Command",
-		[]string{"exercise", "next", "random"},
+		[]string{"clip", "next", "random"},
 		palette_condition(PALETTE_CONTEXT_PLAY),
 		"Available in Play mode",
 	)
 	append_command_palette_entry(
 		&entries,
 		UI_Action{kind = .Autoplay_Toggle},
-		ui.exercise_autoplay ? "Disable autoplay" : "Enable autoplay",
-		"Play the next filtered exercise when the current exercise finishes",
+		ui.clip_autoplay ? "Disable autoplay" : "Enable autoplay",
+		"Play the next filtered clip when the current clip finishes",
 		"Command",
-		[]string{"exercise", "next", "continuous"},
+		[]string{"clip", "next", "continuous"},
 		palette_condition(PALETTE_CONTEXT_PLAY),
 		"Available in Play mode",
 	)
@@ -8873,6 +9486,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		[]string{"finder", "logs", "storage", "export", "import", "migration"},
 	)
 	for source, index in state.sources {
+		if source.workflow != ui.workflow {continue}
 		resolution := ""
 		if source.metadata.width > 0 && source.metadata.height > 0 {
 			resolution = fmt.tprintf("%dx%d", source.metadata.width, source.metadata.height)
@@ -8901,31 +9515,32 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 			"Wait for the active media operation to finish",
 		)
 	}
-	for exercise, index in state.exercises {
-		source_title := exercise.source_id
+	for clip, index in state.clips {
+		if clip.workflow != ui.workflow {continue}
+		source_title := clip.source_id
 		for source in state.sources {
-			if source.id == exercise.source_id {source_title = source.title; break}
+			if source.id == clip.source_id {source_title = source.title; break}
 		}
 		subtitle := fmt.tprintf(
 			"%s · %s–%s",
 			source_title,
-			format_timestamp(exercise.start_seconds),
-			format_timestamp(exercise.end_seconds),
+			format_timestamp(clip.start_seconds),
+			format_timestamp(clip.end_seconds),
 		)
 		keywords := []string{
-			exercise.id,
-			exercise.source_id,
+			clip.id,
+			clip.source_id,
 			source_title,
-			exercise.clip_path,
-			format_timestamp(exercise.start_seconds),
-			format_timestamp(exercise.end_seconds),
+			clip.clip_path,
+			format_timestamp(clip.start_seconds),
+			format_timestamp(clip.end_seconds),
 		}
 		append_command_palette_entry(
 			&entries,
-			UI_Action{kind = .Exercise, index = index},
-			exercise.name,
+			UI_Action{kind = .Clip, index = index},
+			clip.name,
 			subtitle,
-			"Exercise",
+			"Clip",
 			keywords,
 			palette_condition(none = busy),
 			"Wait for the active media operation to finish",
@@ -8937,10 +9552,10 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 begin_command_palette :: proc() -> bool {
 	if command_palette.is_open(&command_palette_state) {return true}
 	if global_modal_blocks_commands() {return false}
-	if ui.settings_open {vocal_settings_close()}
+	if ui.settings_open {video_clips_settings_close()}
 	cancel_ui_flash()
-	if ui.exercise_rename_open {close_exercise_rename()}
-	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.clip_rename_open {close_clip_rename()}
+	if ui.clip_metadata_open {close_clip_metadata()}
 	if ui.randomize_help_open {close_randomize_help()}
 	if ui.pitch.help_open {close_pitch_help()}
 	if ui.data_modal_open {close_data_modal()}
@@ -9021,14 +9636,14 @@ activate_command_palette_result :: proc(result_index: int) -> bool {
 	text_input.end_pointer_selection(&ui.input_state)
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
-	if ui.exercise_rename_open {close_exercise_rename()}
-	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.clip_rename_open {close_clip_rename()}
+	if ui.clip_metadata_open {close_clip_metadata()}
 	if ui.randomize_help_open {close_randomize_help()}
 	if ui.pitch.help_open {close_pitch_help()}
 	if ui.data_modal_open {close_data_modal()}
 	if ui.notification_modal_open {close_notification_history()}
 	if action.kind == .Source {set_ui_mode(.Create)}
-	if action.kind == .Exercise {set_ui_mode(.Play)}
+	if action.kind == .Clip {set_ui_mode(.Play)}
 	return activate_ui_action(action)
 }
 
@@ -9061,9 +9676,9 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 	case .Shuffle_Toggle, .Autoplay_Toggle:
 		checked := uint(0)
 		if (control.action.kind == .Shuffle_Toggle &&
-		    ui.exercise_shuffle) ||
+		    ui.clip_shuffle) ||
 		   (control.action.kind == .Autoplay_Toggle &&
-		    ui.exercise_autoplay) {
+		    ui.clip_autoplay) {
 			checked = 1
 		}
 		return msg_id_uint(
@@ -9092,19 +9707,19 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 			checked,
 		)
 	case .Configure_Flash:
-		return nsstring(vocal_shortcut_display(ui.flash_leader))
+		return nsstring(video_clips_shortcut_display(ui.flash_leader))
 	case .URL:
 		return nsstring(ui.url_input)
 	case .Source_Search:
 		return nsstring(ui.source_search)
 	case .Transcript_Search:
 		return nsstring(ui.transcript_search)
-	case .Exercise_Search:
-		return nsstring(ui.exercise_search)
-	case .Exercise_Name:
-		return nsstring(ui.exercise_name)
-	case .Exercise_Rename:
-		return nsstring(ui.exercise_rename)
+	case .Clip_Search:
+		return nsstring(ui.clip_search)
+	case .Clip_Name:
+		return nsstring(ui.clip_name)
+	case .Clip_Rename:
+		return nsstring(ui.clip_rename)
 	}
 	return nil
 }
@@ -9146,12 +9761,12 @@ on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
 	case .Transcript_Search:
 		ui_set_string(&ui.transcript_search, text)
 		invalidate_transcript_matches()
-	case .Exercise_Search:
-		ui_set_string(&ui.exercise_search, text)
-	case .Exercise_Name:
-		ui_set_string(&ui.exercise_name, text)
-	case .Exercise_Rename:
-		ui_set_string(&ui.exercise_rename, text)
+	case .Clip_Search:
+		ui_set_string(&ui.clip_search, text)
+	case .Clip_Name:
+		ui_set_string(&ui.clip_name, text)
+	case .Clip_Rename:
+		ui_set_string(&ui.clip_rename, text)
 	case:
 		return
 	}
@@ -9292,7 +9907,13 @@ render_frame :: proc() {
 			draw_rect.h = draw_rect.w / aspect
 			draw_rect.y += (player_rect.h - draw_rect.h) / 2
 		}
-		encode_texture(encoder, video_texture, draw_rect, 1)
+		mirrored :=
+			ui.workflow == .Dancing &&
+			!ui.source_playback_active &&
+			ui.active_clip >= 0 &&
+			ui.active_clip < len(state.clips) &&
+			state.clips[ui.active_clip].dance_mirrored
+		encode_texture(encoder, video_texture, draw_rect, 1, mirrored)
 	}
 
 	encode_texture(encoder, ui.text_texture, UI_Rect{0, 0, ui.width, ui.height}, 1)
@@ -9320,16 +9941,16 @@ ui_memory_destroy :: proc() {
 	delete(ui.url_input)
 	delete(ui.source_search)
 	delete(ui.transcript_search)
-	delete(ui.exercise_search)
-	delete(ui.exercise_name)
-	delete(ui.exercise_rename)
+	delete(ui.clip_search)
+	delete(ui.clip_name)
+	delete(ui.clip_rename)
 	delete(ui.command_palette_query)
 	delete(ui.settings_query)
 	delete(ui.settings_error)
 	delete(ui.shortcut_collision)
 	delete(ui.shortcut_error)
-	vocal_shortcut_destroy(&ui.flash_leader)
-	vocal_shortcut_destroy(&ui.shortcut_candidate)
+	video_clips_shortcut_destroy(&ui.flash_leader)
+	video_clips_shortcut_destroy(&ui.shortcut_candidate)
 	delete(ui.status)
 	delete(ui.status_source_video_id)
 	text_input.destroy(&ui.input_state)
@@ -9675,6 +10296,7 @@ on_application_did_become_active :: proc "c" (
 
 metal_player_clear :: proc() {
 	set_source_playback_active(false)
+	cancel_dance_count_in()
 	ui.source_scrubbing = false
 	ui.source_hint_menu_open = false
 	metal_player_clear_texture()
@@ -9769,7 +10391,7 @@ metal_player_load :: proc(path: string) -> bool {
 }
 
 activate_control :: proc(index: int) {
-	kinds := [15]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle}
+	kinds := [19]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle}
 	if index < 0 || index >= len(kinds) {return}
 	control := find_ui_control_by_action(kinds[index])
 	if control != nil && .Enabled in control.flags {_ = activate_ui_action(control.action)}
@@ -9784,9 +10406,9 @@ editable_action_for_focus :: proc(
 	case .URL:              return .URL, true
 	case .Source_Search:    return .Source_Search, true
 	case .Transcript_Search:return .Transcript_Search, true
-	case .Exercise_Search:  return .Exercise_Search, true
-	case .Exercise_Name:    return .Exercise_Name, true
-	case .Exercise_Rename:  return .Exercise_Rename, true
+	case .Clip_Search:  return .Clip_Search, true
+	case .Clip_Name:    return .Clip_Name, true
+	case .Clip_Rename:  return .Clip_Rename, true
 	}
 	return .Command_Palette_Search, false
 }
@@ -9909,12 +10531,12 @@ activate_registered_target_at_point :: proc(
 		begin_text_pointer_selection(control, .Source_Search, point, click_count)
 	case .Transcript_Search:
 		begin_text_pointer_selection(control, .Transcript_Search, point, click_count)
-	case .Exercise_Search:
-		begin_text_pointer_selection(control, .Exercise_Search, point, click_count)
-	case .Exercise_Name:
-		begin_text_pointer_selection(control, .Exercise_Name, point, click_count)
-	case .Exercise_Rename:
-		begin_text_pointer_selection(control, .Exercise_Rename, point, click_count)
+	case .Clip_Search:
+		begin_text_pointer_selection(control, .Clip_Search, point, click_count)
+	case .Clip_Name:
+		begin_text_pointer_selection(control, .Clip_Name, point, click_count)
+	case .Clip_Rename:
+		begin_text_pointer_selection(control, .Clip_Rename, point, click_count)
 	case .Source_Timeline:
 		ui.source_scrubbing = true
 		seek_player_timeline_rect(point, control.rect)
@@ -9966,15 +10588,15 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
-	if ui.exercise_metadata_open {
-		modal := exercise_metadata_modal_rect()
-		if !contains(modal, point) {close_exercise_metadata(); return}
+	if ui.clip_metadata_open {
+		modal := clip_metadata_modal_rect()
+		if !contains(modal, point) {close_clip_metadata(); return}
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
-	if ui.exercise_rename_open {
-		modal := exercise_rename_modal_rect()
-		if !contains(modal, point) {close_exercise_rename(); return}
+	if ui.clip_rename_open {
+		modal := clip_rename_modal_rect()
+		if !contains(modal, point) {close_clip_rename(); return}
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
@@ -10080,7 +10702,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	click_count := msg_uint(event, sel_registerName("clickCount"))
 	if !command_palette.is_open(&command_palette_state) &&
 	   !ui.source_modal_open && !ui.source_details_open &&
-	   !ui.exercise_rename_open && !ui.exercise_metadata_open &&
+	   !ui.clip_rename_open && !ui.clip_metadata_open &&
 	   !ui.randomize_help_open && !ui.pitch.help_open &&
 	   !ui.data_modal_open && !ui.notification_modal_open &&
 	   header_window_gesture_allowed(
@@ -10106,7 +10728,7 @@ on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	cancel_ui_flash()
 	if command_palette.is_open(&command_palette_state) {return}
 	if ui.source_modal_open || ui.source_details_open ||
-	   ui.exercise_rename_open || ui.exercise_metadata_open ||
+	   ui.clip_rename_open || ui.clip_metadata_open ||
 	   ui.randomize_help_open || ui.pitch.help_open ||
 	   ui.data_modal_open || ui.notification_modal_open ||
 	   ui.mode != .Create {
@@ -10177,8 +10799,8 @@ modal_consumes_content_scroll :: proc() -> bool {
 	       ui.shortcut_open ||
 	       ui.source_modal_open ||
 	       ui.source_details_open ||
-	       ui.exercise_rename_open ||
-	       ui.exercise_metadata_open ||
+	       ui.clip_rename_open ||
+	       ui.clip_metadata_open ||
 	       ui.randomize_help_open ||
 	       ui.pitch.help_open ||
 	       ui.data_modal_open
@@ -10216,11 +10838,11 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 		window_point,
 		nil,
 	)
-	_, _, source_search, source_panel, _, transcript, exercise_search, exercise_panel, exercise_name, _, _ :=
+	_, _, source_search, source_panel, _, transcript, clip_search, clip_panel, clip_name, _, _ :=
 		layout_rects()
 	source_content := source_content_rect(source_search, source_panel)
 	transcript_content := transcript_content_rect(transcript)
-	exercise_content := exercise_content_rect(exercise_search, exercise_panel, exercise_name)
+	clip_content := clip_content_rect(clip_search, clip_panel, clip_name)
 	if ui.mode == .Create && contains(source_content, point) {
 		ui.source_scroll = bounded_scroll(
 			ui.source_scroll,
@@ -10244,14 +10866,14 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 			ui.transcript_follow_pending = false
 			ui.transcript_has_follow_target = false
 		}
-	} else if ui.mode == .Play && contains(exercise_content, point) {
-		ui.exercise_scroll = bounded_scroll(
-			ui.exercise_scroll,
+	} else if ui.mode == .Play && contains(clip_content, point) {
+		ui.clip_scroll = bounded_scroll(
+			ui.clip_scroll,
 			delta,
-			filtered_exercise_count(),
+			filtered_clip_count(),
 			29,
 			30,
-			exercise_content.h,
+			clip_content.h,
 		)
 	}
 	ui.needs_redraw = true
@@ -10468,22 +11090,22 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 		if ui.focus == .URL {
 			insert_text_at_caret(&ui.url_input, "\n")
 			schedule_source_probe(1)
-		} else if ui.focus == .Exercise_Rename {
-			confirm_exercise_rename()
+		} else if ui.focus == .Clip_Rename {
+			confirm_clip_rename()
 		} else if ui.focus == .Source_Search ||
 		          ui.focus == .Transcript_Search ||
-		          ui.focus == .Exercise_Search ||
-		          ui.focus == .Exercise_Name {
+		          ui.focus == .Clip_Search ||
+		          ui.focus == .Clip_Name {
 			ui.focus = .None
 			text_input.end_pointer_selection(&ui.input_state)
 		}
 	} else if selector == sel_registerName("insertTab:") {
-		if ui.exercise_rename_open {
-			focus_text_input(.Exercise_Rename)
+		if ui.clip_rename_open {
+			focus_text_input(.Clip_Rename)
 		} else if ui.source_modal_open {
 			focus_text_input(.URL)
 		} else if ui.mode == .Play {
-			focus_text_input(.Exercise_Search)
+			focus_text_input(.Clip_Search)
 		} else {
 			#partial switch ui.focus {
 			case .None:
@@ -10491,7 +11113,7 @@ on_metal_command :: proc "c" (self: Id, command: Sel, selector: Sel) {
 			case .Source_Search:
 				focus_text_input(.Transcript_Search)
 			case .Transcript_Search:
-				focus_text_input(.Exercise_Name)
+				focus_text_input(.Clip_Name)
 			case:
 				ui.focus = .None
 				text_input.end_pointer_selection(&ui.input_state)
@@ -10515,8 +11137,8 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	shortcut_text, has_shortcut_text :=
 		text_input_string(shortcut_characters)
 	if global_modal_blocks_commands() {
-		if ui.shortcut_open {vocal_shortcut_recorder_close()}
-		if ui.settings_open {vocal_settings_close()}
+		if ui.shortcut_open {video_clips_shortcut_recorder_close()}
+		if ui.settings_open {video_clips_settings_close()}
 		if command_palette.is_open(&command_palette_state) {
 			close_command_palette(false)
 		}
@@ -10524,7 +11146,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	if ui.shortcut_open {
 		if key == 53 {
-			vocal_shortcut_recorder_close()
+			video_clips_shortcut_recorder_close()
 			return
 		}
 		relevant :=
@@ -10537,24 +11159,24 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 				route := shortcut_digit_route(digit)
 				switch route {
 				case .Save:
-					_ = vocal_shortcut_recorder_save()
+					_ = video_clips_shortcut_recorder_save()
 				case .Reset:
-					_ = vocal_shortcut_recorder_reset()
+					_ = video_clips_shortcut_recorder_reset()
 				case .Cancel:
-					vocal_shortcut_recorder_close()
+					video_clips_shortcut_recorder_close()
 				case .Capture:
 				}
 				if route != .Capture {return}
 			}
 		}
 		if has_shortcut_text {
-			_ = vocal_shortcut_recorder_capture(
+			_ = video_clips_shortcut_recorder_capture(
 				key,
 				shortcut_text,
 				modifiers,
 			)
 		} else {
-			_ = vocal_shortcut_recorder_capture(key, "", modifiers)
+			_ = video_clips_shortcut_recorder_capture(key, "", modifiers)
 		}
 		return
 	}
@@ -10562,7 +11184,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		if command_palette.is_open(&command_palette_state) {
 			close_command_palette(false)
 		}
-		_ = vocal_settings_open()
+		_ = video_clips_settings_open()
 		return
 	}
 	palette_shortcut := event_opens_command_palette(event, modifiers)
@@ -10630,7 +11252,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 			}
 		} else {
 			if key == 53 {
-				vocal_settings_close()
+				video_clips_settings_close()
 			} else if key == 48 {
 				ui.settings_query_focused = true
 				focus_text_input(.Settings_Search)
@@ -10662,8 +11284,8 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		_ = begin_ui_flash()
 		return
 	}
-	if ui.exercise_metadata_open && key == 53 {close_exercise_metadata(); return}
-	if ui.exercise_rename_open && key == 53 {close_exercise_rename(); return}
+	if ui.clip_metadata_open && key == 53 {close_clip_metadata(); return}
+	if ui.clip_rename_open && key == 53 {close_clip_rename(); return}
 	if ui.randomize_help_open {
 		if key == 53 {close_randomize_help()}
 		return
@@ -10673,7 +11295,47 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		if key == 18 {close_pitch_help()}
 		return
 	}
-	if ui.data_modal_open && key == 53 {close_data_modal(); return}
+	if ui.data_modal_open {
+		if key == 53 {close_data_modal(); return}
+		modal_modifiers :=
+			NSEventModifierFlagShift |
+			NSEventModifierFlagControl |
+			NSEventModifierFlagOption |
+			NSEventModifierFlagCommand
+		if modifiers & modal_modifiers == 0 {
+			if digit, found := number_digit_for_key_code(key); found {
+				if ui.library_import_confirm_open {
+					if digit == 1 {
+						_ = activate_ui_action(
+							UI_Action{kind=.Confirm_Library_Import},
+						)
+						return
+					}
+					if digit == 2 {
+						_ = activate_ui_action(
+							UI_Action{kind=.Cancel_Library_Import},
+						)
+						return
+					}
+				} else {
+					actions := [5]UI_Action_Kind{
+						.Export_Library,
+						.Export_Current_Workflow,
+						.Import_Library,
+						.Open_Data_Folder,
+						.Close_Data_Modal,
+					}
+					if digit >= 1 && digit <= len(actions) {
+						_ = activate_ui_action(
+							UI_Action{kind=actions[digit - 1]},
+						)
+						return
+					}
+				}
+			}
+		}
+		return
+	}
 	if ui.notification_modal_open {
 		if key == 53 {close_notification_history(); return}
 		if key == 125 {_ = select_relative_notification(-1); return}
@@ -10722,8 +11384,8 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		numbered_actions_available :=
 		   !ui.source_modal_open &&
 		   !ui.source_details_open &&
-		   !ui.exercise_rename_open &&
-		   !ui.exercise_metadata_open &&
+		   !ui.clip_rename_open &&
+		   !ui.clip_metadata_open &&
 		   !ui.randomize_help_open &&
 		   !ui.pitch.help_open &&
 		   !ui.data_modal_open &&
@@ -10764,7 +11426,7 @@ on_metal_flags_changed :: proc "c" (self: Id, command: Sel, event: Id) {
 	if !ui.shortcut_open || !ui.shortcut_listening {return}
 	modifiers := msg_uint(event, sel_registerName("modifierFlags"))
 	ui.shortcut_live_modifiers =
-		vocal_shortcut_modifiers_from_event(modifiers)
+		video_clips_shortcut_modifiers_from_event(modifiers)
 	ui.needs_redraw = true
 }
 
@@ -10846,7 +11508,9 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	ui.frame_tick += 1
-	_ = expire_number_prefix_at(numbered_action_time_ms())
+	now_ms := numbered_action_time_ms()
+	_ = expire_number_prefix_at(now_ms)
+	_ = advance_dance_count_in(now_ms)
 	if pitch_monitor_poll(&ui.pitch, ui.frame_tick) {
 		ui.needs_redraw = true
 	}
@@ -10867,21 +11531,32 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	                   msg_f32(state.player, sel_registerName("rate")) > 0
 	completion_pending := ui.playback_completion_pending
 	ui.playback_completion_pending = false
-	if exercise_autoplay_should_advance(
-		ui.exercise_autoplay,
+	dance_looped := false
+	if completion_pending &&
+	   !ui.source_playback_active &&
+	   ui.mode == .Play {
+		if clip := active_dance_clip();
+		   clip != nil && clip.dance_loop {
+			start_active_clip_from_beginning(true)
+			dance_looped = true
+		}
+	}
+	if !dance_looped && clip_autoplay_should_advance(
+		ui.clip_autoplay,
 		completion_pending,
 		ui.source_playback_active,
 		ui.mode,
-		ui.active_exercise,
-		len(state.exercises),
+		ui.active_clip,
+		len(state.clips),
 	) {
-		_ = play_next_exercise()
+		_ = play_next_clip()
 		playback_active = state.player != nil &&
 		                  msg_f32(
 							state.player,
 							sel_registerName("rate"),
 		                  ) > 0
 	}
+	playback_active = playback_active || ui.count_in_active
 	frame := msg_rect(ui.view, sel_registerName("bounds"))
 	if ui.width != frame.size.width || ui.height != frame.size.height {
 		cancel_ui_flash()
@@ -10910,7 +11585,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 }
 
 register_delegate :: proc(app: Id) {
-	delegate_class := objc_allocateClassPair(objc_getClass("NSObject"), "VocalMetalDelegate", 0)
+	delegate_class := objc_allocateClassPair(objc_getClass("NSObject"), "HWVideoClipsMetalDelegate", 0)
 	class_addMethod(
 		delegate_class,
 		sel_registerName("importFinished:"),
@@ -10983,7 +11658,7 @@ register_delegate :: proc(app: Id) {
 }
 
 register_metal_view_class :: proc() -> Id {
-	class := objc_allocateClassPair(objc_getClass("NSView"), "VocalMetalView", 0)
+	class := objc_allocateClassPair(objc_getClass("NSView"), "HWVideoClipsMetalView", 0)
 	if protocol := objc_getProtocol("NSTextInputClient"); protocol != nil {
 		class_addProtocol(class, protocol)
 	}
@@ -11117,7 +11792,7 @@ window_can_become_key :: proc "c" (self: Id, command: Sel) -> bool {
 register_window_class :: proc() -> Id {
 	class := objc_allocateClassPair(
 		objc_getClass("NSWindow"),
-		"VocalTrainingWindow",
+		"HWVideoClipsWindow",
 		0,
 	)
 	class_addMethod(
@@ -11144,7 +11819,7 @@ launch_should_activate :: proc(
 	return !launch_in_background
 }
 
-vocal_gui_initialize :: proc() -> bool {
+video_clips_gui_initialize :: proc() -> bool {
 	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
 	msg_void_i(app, sel_registerName("setActivationPolicy:"), 0)
 	register_delegate(app)
@@ -11152,26 +11827,26 @@ vocal_gui_initialize :: proc() -> bool {
 	state.url_input = CONTROL_URL
 	state.status = CONTROL_STATUS
 	state.source_search_input = CONTROL_SOURCE
-	state.exercise_search_input = CONTROL_EXERCISE
-	state.exercise_name_input = CONTROL_EXERCISE_NAME
+	state.clip_search_input = CONTROL_CLIP
+	state.clip_name_input = CONTROL_CLIP_NAME
 	ui_set_string(&ui.status, "Ready")
 	ui.scale = 1
-	ui.active_exercise = -1
-	ui.exercise_rename_index = -1
-	ui.exercise_metadata_index = -1
+	ui.active_clip = -1
+	ui.clip_rename_index = -1
+	ui.clip_metadata_index = -1
 	ui.transcript_matches_dirty = true
 	ui.needs_redraw = true
 	pitch_monitor_initialize(
 		&ui.pitch,
 		database_pitch_settings_load(library_database),
 	)
-	ui.flash_leader = vocal_shortcut_clone(vocal_shortcut_default())
+	ui.flash_leader = video_clips_shortcut_clone(video_clips_shortcut_default())
 	if encoded, found := database_flash_leader_load(
 		library_database,
 		context.temp_allocator,
 	); found {
-		if decoded, valid := vocal_shortcut_deserialize(encoded); valid {
-			vocal_shortcut_destroy(&ui.flash_leader)
+		if decoded, valid := video_clips_shortcut_deserialize(encoded); valid {
+			video_clips_shortcut_destroy(&ui.flash_leader)
 			ui.flash_leader = decoded
 		}
 	}
@@ -11199,7 +11874,7 @@ vocal_gui_initialize :: proc() -> bool {
 		2,
 		false,
 	)
-	msg_void_id(state.window, sel_registerName("setTitle:"), nsstring("Vocal Training"))
+	msg_void_id(state.window, sel_registerName("setTitle:"), nsstring("hw_videoClips"))
 	msg_void_bool(state.window, sel_registerName("setOpaque:"), true)
 	msg_void_bool(state.window, sel_registerName("setHasShadow:"), false)
 	msg_void_size(
@@ -11240,7 +11915,11 @@ vocal_gui_initialize :: proc() -> bool {
 		return false
 	}
 
-	if len(state.sources) > 0 {load_source_player(len(state.sources) - 1)}
+	if ui.mode == .Create {
+		if index := last_source_index_for_workflow(ui.workflow); index >= 0 {
+			load_source_player(index)
+		}
+	}
 	// The Objective-C runtime requires the exact floating-point signature, so
 	// construct the repeating timer through a typed send.
 	timer_send := transmute(proc "c" (
@@ -11271,7 +11950,7 @@ vocal_gui_initialize :: proc() -> bool {
 	)
 	msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
 	if launch_should_activate(
-		getenv("VT_ACTIVATE_ON_LAUNCH"),
+		getenv("HW_VIDEO_CLIPS_ACTIVATE_ON_LAUNCH"),
 	) {
 		msg_void_id(state.window, sel_registerName("makeKeyAndOrderFront:"), nil)
 		msg_void_i(app, sel_registerName("activateIgnoringOtherApps:"), 1)
@@ -11285,7 +11964,7 @@ vocal_gui_initialize :: proc() -> bool {
 }
 
 build_metal_window :: proc() {
-	if !vocal_gui_initialize() {return}
+	if !video_clips_gui_initialize() {return}
 	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
 	msg_void(app, sel_registerName("run"))
 }

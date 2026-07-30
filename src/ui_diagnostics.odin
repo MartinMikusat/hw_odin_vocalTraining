@@ -102,8 +102,8 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 	case ui.notification_modal_open: overlay = "notification-history"
 	case ui.pitch.help_open: overlay = "pitch-help"
 	case ui.randomize_help_open: overlay = "randomize-help"
-	case ui.exercise_metadata_open: overlay = "exercise-metadata"
-	case ui.exercise_rename_open: overlay = "exercise-rename"
+	case ui.clip_metadata_open: overlay = "clip-metadata"
+	case ui.clip_rename_open: overlay = "clip-rename"
 	case ui.source_modal_open: overlay = "source-modal"
 	case ui.source_details_open: overlay = "source-details"
 	}

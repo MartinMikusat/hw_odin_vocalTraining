@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Vocal Training uses the microphone to show your live singing pitch. Audio is not recorded or stored.</string>
-  <key>CFBundleExecutable</key><string>VocalTraining</string>
-  <key>CFBundleIdentifier</key><string>local.vocal-training.app</string>
-  <key>CFBundleName</key><string>Vocal Training</string>
+	<string>hw_videoClips uses the microphone in Vocal Clips to show live singing pitch. Audio is not recorded or stored.</string>
+  <key>CFBundleExecutable</key><string>hw_videoClips</string>
+  <key>CFBundleIdentifier</key><string>local.hw-video-clips.app</string>
+  <key>CFBundleName</key><string>hw_videoClips</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>

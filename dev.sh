@@ -6,11 +6,11 @@ cd "$ROOT"
 
 MODE=${1:-debug}
 case "$MODE" in
-  debug) APP="$ROOT/build/VocalTraining.app" ;;
-  trace|asan) APP="$ROOT/build/$MODE/VocalTraining.app" ;;
+  debug) APP="$ROOT/build/hw_videoClips.app" ;;
+  trace|asan) APP="$ROOT/build/$MODE/hw_videoClips.app" ;;
   release)
     "$ROOT/build.sh" release
-    exec "$ROOT/build/release/VocalTraining.app/Contents/MacOS/VocalTraining"
+    exec "$ROOT/build/release/hw_videoClips.app/Contents/MacOS/hw_videoClips"
     ;;
   *)
     echo "usage: ./dev.sh [debug|trace|asan|release]" >&2
@@ -18,21 +18,21 @@ case "$MODE" in
     ;;
 esac
 
-EXECUTABLE="$APP/Contents/MacOS/VocalTraining"
+EXECUTABLE="$APP/Contents/MacOS/hw_videoClips"
 LOCK="$ROOT/build/dev-watcher.lock"
 APP_PID=""
 STOPPING_APP=0
-MEMORY_PROFILE=${VT_MEMORY_PROFILE:-none}
-MEMORY_WARN_KB=${VT_MEMORY_WARN_KB:-1048576}
+MEMORY_PROFILE=${HW_VIDEO_CLIPS_MEMORY_PROFILE:-none}
+MEMORY_WARN_KB=${HW_VIDEO_CLIPS_MEMORY_WARN_KB:-1048576}
 MEMORY_CHECK_TICK=0
 MEMORY_OVER_LIMIT_COUNT=0
 MEMORY_CAPTURED_PID=""
-VT_APP_SUPPORT_DIR=${VT_APP_SUPPORT_DIR:-"$ROOT/build/dev-support"}
-export VT_APP_SUPPORT_DIR
+HW_VIDEO_CLIPS_APP_SUPPORT_DIR=${HW_VIDEO_CLIPS_APP_SUPPORT_DIR:-"$ROOT/build/dev-support"}
+export HW_VIDEO_CLIPS_APP_SUPPORT_DIR
 
 case "$MEMORY_WARN_KB" in
   ''|*[!0-9]*|0)
-    echo "VT_MEMORY_WARN_KB must be a positive integer" >&2
+    echo "HW_VIDEO_CLIPS_MEMORY_WARN_KB must be a positive integer" >&2
     exit 2
     ;;
 esac
@@ -88,7 +88,7 @@ check_app() {
   exited_pid=$APP_PID
   APP_PID=""
   if [ "$STOPPING_APP" -eq 0 ] && [ "$exit_status" -ne 0 ]; then
-    printf '[vocal-training] app pid %s exited with status %s\n' \
+    printf '[hw_videoClips] app pid %s exited with status %s\n' \
       "$exited_pid" "$exit_status"
     archive_crash "$exit_status"
   fi
@@ -117,14 +117,14 @@ check_memory() {
     return
   fi
   MEMORY_CAPTURED_PID=$APP_PID
-  printf '[vocal-training] pid %s exceeded %s KB RSS twice; capturing memory diagnostics\n' \
+  printf '[hw_videoClips] pid %s exceeded %s KB RSS twice; capturing memory diagnostics\n' \
     "$APP_PID" "$MEMORY_WARN_KB"
   "$ROOT/scripts/capture-memory.sh" "$MODE" "$APP_PID" "$APP" "$rss_kb" &
 }
 
 launch_app() {
-  VT_ACTIVATE_ON_LAUNCH=0
-  export VT_ACTIVATE_ON_LAUNCH
+  HW_VIDEO_CLIPS_ACTIVATE_ON_LAUNCH=0
+  export HW_VIDEO_CLIPS_ACTIVATE_ON_LAUNCH
   case "$MEMORY_PROFILE" in
     none)
       env MTL_DEBUG_LAYER=1 "$EXECUTABLE" &
@@ -144,7 +144,7 @@ launch_app() {
         "$EXECUTABLE" &
       ;;
     *)
-      echo "unknown VT_MEMORY_PROFILE: $MEMORY_PROFILE" >&2
+      echo "unknown HW_VIDEO_CLIPS_MEMORY_PROFILE: $MEMORY_PROFILE" >&2
       return 2
       ;;
   esac
@@ -155,14 +155,14 @@ launch_app() {
 }
 
 rebuild_and_launch() {
-  printf '\n[vocal-training] rebuilding %s...\n' "$MODE"
+  printf '\n[hw_videoClips] rebuilding %s...\n' "$MODE"
   if ! "$ROOT/build.sh" "$MODE"; then
-    printf '[vocal-training] build failed; keeping the current app running\n'
+    printf '[hw_videoClips] build failed; keeping the current app running\n'
     return
   fi
   stop_app
   if launch_app; then
-    printf '[vocal-training] relaunched pid %s (%s, memory profile: %s)\n' \
+    printf '[hw_videoClips] relaunched pid %s (%s, memory profile: %s)\n' \
       "$APP_PID" "$MODE" "$MEMORY_PROFILE"
   fi
 }
@@ -171,7 +171,7 @@ mkdir -p "$ROOT/build"
 if ! mkdir "$LOCK" 2>/dev/null; then
   existing=$(sed -n '1p' "$LOCK/pid" 2>/dev/null || true)
   if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
-    printf '[vocal-training] dev watcher already running as pid %s\n' "$existing"
+    printf '[hw_videoClips] dev watcher already running as pid %s\n' "$existing"
     exit 0
   fi
   rm -f "$LOCK/pid"

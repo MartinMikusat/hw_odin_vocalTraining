@@ -7,20 +7,20 @@ import "core:strings"
 
 foreign import pitch_bridge "system:System.framework"
 foreign pitch_bridge {
-	vt_pitch_permission_status        :: proc "c" () -> i32 ---
-	vt_pitch_request_permission       :: proc "c" () -> bool ---
-	vt_pitch_permission_request_active:: proc "c" () -> bool ---
-	vt_pitch_capture_create           :: proc "c" () -> rawptr ---
-	vt_pitch_capture_start            :: proc "c" (capture: rawptr) -> bool ---
-	vt_pitch_capture_stop             :: proc "c" (capture: rawptr) ---
-	vt_pitch_capture_destroy          :: proc "c" (capture: rawptr) ---
-	vt_pitch_capture_read             :: proc "c" (
+	hw_video_clips_pitch_permission_status        :: proc "c" () -> i32 ---
+	hw_video_clips_pitch_request_permission       :: proc "c" () -> bool ---
+	hw_video_clips_pitch_permission_request_active:: proc "c" () -> bool ---
+	hw_video_clips_pitch_capture_create           :: proc "c" () -> rawptr ---
+	hw_video_clips_pitch_capture_start            :: proc "c" (capture: rawptr) -> bool ---
+	hw_video_clips_pitch_capture_stop             :: proc "c" (capture: rawptr) ---
+	hw_video_clips_pitch_capture_destroy          :: proc "c" (capture: rawptr) ---
+	hw_video_clips_pitch_capture_read             :: proc "c" (
 		capture: rawptr,
 		destination: [^]f32,
 		capacity: u32,
 		sample_rate: ^f64,
 	) -> u32 ---
-	vt_pitch_capture_status           :: proc "c" (capture: rawptr) -> i32 ---
+	hw_video_clips_pitch_capture_status           :: proc "c" (capture: rawptr) -> i32 ---
 }
 
 PITCH_ANALYSIS_RATE       :: 12000.0
@@ -384,7 +384,7 @@ pitch_monitor_initialize :: proc(
 	if !pitch_settings_valid(settings) {
 		state.settings = pitch_default_settings()
 	}
-	state.permission = Pitch_Permission(vt_pitch_permission_status())
+	state.permission = Pitch_Permission(hw_video_clips_pitch_permission_status())
 	state.capture_status = .Stopped
 }
 
@@ -392,7 +392,7 @@ pitch_monitor_refresh_permission :: proc(
 	state: ^Pitch_Monitor_State,
 ) -> bool {
 	if state == nil || state.permission_pending {return false}
-	permission := Pitch_Permission(vt_pitch_permission_status())
+	permission := Pitch_Permission(hw_video_clips_pitch_permission_status())
 	if permission == state.permission {return false}
 	state.permission = permission
 	if state.tracking && permission != .Authorized {
@@ -403,14 +403,14 @@ pitch_monitor_refresh_permission :: proc(
 
 pitch_monitor_start_capture :: proc(state: ^Pitch_Monitor_State) -> bool {
 	if state.tracking {return true}
-	capture := vt_pitch_capture_create()
+	capture := hw_video_clips_pitch_capture_create()
 	if capture == nil {
 		state.capture_status = .Start_Failed
 		return false
 	}
-	if !vt_pitch_capture_start(capture) {
-		state.capture_status = Pitch_Capture_Status(vt_pitch_capture_status(capture))
-		vt_pitch_capture_destroy(capture)
+	if !hw_video_clips_pitch_capture_start(capture) {
+		state.capture_status = Pitch_Capture_Status(hw_video_clips_pitch_capture_status(capture))
+		hw_video_clips_pitch_capture_destroy(capture)
 		return false
 	}
 	state.capture = capture
@@ -425,8 +425,8 @@ pitch_monitor_start_capture :: proc(state: ^Pitch_Monitor_State) -> bool {
 
 pitch_monitor_stop :: proc(state: ^Pitch_Monitor_State) {
 	if state.capture != nil {
-		vt_pitch_capture_stop(state.capture)
-		vt_pitch_capture_destroy(state.capture)
+		hw_video_clips_pitch_capture_stop(state.capture)
+		hw_video_clips_pitch_capture_destroy(state.capture)
 	}
 	state.capture = nil
 	state.tracking = false
@@ -441,12 +441,12 @@ pitch_monitor_toggle :: proc(state: ^Pitch_Monitor_State) -> bool {
 		pitch_monitor_stop(state)
 		return true
 	}
-	state.permission = Pitch_Permission(vt_pitch_permission_status())
+	state.permission = Pitch_Permission(hw_video_clips_pitch_permission_status())
 	#partial switch state.permission {
 	case .Authorized:
 		return pitch_monitor_start_capture(state)
 	case .Unknown:
-		if vt_pitch_request_permission() {
+		if hw_video_clips_pitch_request_permission() {
 			state.permission_pending = true
 			state.start_after_permission = true
 			return true
@@ -464,10 +464,10 @@ pitch_monitor_poll :: proc(
 ) -> bool {
 	changed := false
 	if state.permission_pending {
-		pending := vt_pitch_permission_request_active()
+		pending := hw_video_clips_pitch_permission_request_active()
 		if !pending {
 			state.permission_pending = false
-			state.permission = Pitch_Permission(vt_pitch_permission_status())
+			state.permission = Pitch_Permission(hw_video_clips_pitch_permission_status())
 			changed = true
 			if state.start_after_permission && state.permission == .Authorized {
 				_ = pitch_monitor_start_capture(state)
@@ -477,7 +477,7 @@ pitch_monitor_poll :: proc(
 	}
 	if !state.tracking || state.capture == nil {return changed}
 	for {
-		count := int(vt_pitch_capture_read(
+		count := int(hw_video_clips_pitch_capture_read(
 			state.capture,
 			raw_data(state.capture_chunk[:]),
 			u32(len(state.capture_chunk)),

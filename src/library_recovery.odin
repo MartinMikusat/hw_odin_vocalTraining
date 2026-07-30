@@ -11,7 +11,7 @@ import "core:strings"
 import "core:time"
 import "base:runtime"
 
-LIBRARY_SCHEMA_VERSION :: 5
+LIBRARY_SCHEMA_VERSION :: 6
 LIBRARY_BACKUP_RETENTION :: 10
 
 Library_Storage_Mode :: enum {
@@ -28,7 +28,7 @@ Library_Load_Stage :: enum {
 	Sources,
 	Transcripts,
 	Hints,
-	Exercises,
+	Clips,
 	Validation,
 	Migration,
 }
@@ -51,7 +51,7 @@ Library_Entity_Kind :: enum i32 {
 	Source,
 	Transcript,
 	Hint,
-	Exercise,
+	Clip,
 }
 
 Library_Change_Operation :: enum i32 {
@@ -86,7 +86,7 @@ Library_Recovery_Report :: struct {
 	recovered_sources: int,
 	recovered_segments: int,
 	recovered_hints: int,
-	recovered_exercises: int,
+	recovered_clips: int,
 	replayed_deletions: int,
 	rejected_records: int,
 	incomplete_tables: int,
@@ -194,6 +194,7 @@ library_database_user_version :: proc(database: ^SQLite_DB) -> (int, bool) {
 
 source_storage_equal :: proc(a, b: Source_Video) -> bool {
 	return a.id == b.id &&
+	       a.workflow == b.workflow &&
 	       a.video_id == b.video_id &&
 	       a.title == b.title &&
 	       a.url == b.url &&
@@ -222,13 +223,20 @@ hint_storage_equal :: proc(a, b: Import_Hint) -> bool {
 	return a.source_id == b.source_id && a.seconds == b.seconds
 }
 
-exercise_storage_equal :: proc(a, b: Exercise) -> bool {
+clip_storage_equal :: proc(a, b: Clip) -> bool {
 	return a.id == b.id &&
 	       a.source_id == b.source_id &&
+	       a.workflow == b.workflow &&
 	       a.name == b.name &&
 	       a.start_seconds == b.start_seconds &&
 	       a.end_seconds == b.end_seconds &&
-	       a.clip_path == b.clip_path
+	       a.clip_path == b.clip_path &&
+	       a.dance_mirrored == b.dance_mirrored &&
+	       a.dance_loop == b.dance_loop &&
+	       a.dance_count_in_beats == b.dance_count_in_beats &&
+	       a.dance_count_each_loop == b.dance_count_each_loop &&
+	       a.dance_count_in_bpm == b.dance_count_in_bpm &&
+	       a.dance_playback_rate == b.dance_playback_rate
 }
 
 library_source_index :: proc(values: []Source_Video, id: string) -> int {
@@ -248,7 +256,7 @@ library_hint_index :: proc(values: []Import_Hint, source_id: string, seconds: f6
 	return -1
 }
 
-library_exercise_index :: proc(values: []Exercise, id: string) -> int {
+library_clip_index :: proc(values: []Clip, id: string) -> int {
 	for value, index in values {if value.id == id {return index}}
 	return -1
 }
@@ -264,12 +272,17 @@ library_hint_key :: proc(source_id: string, seconds: f64) -> Library_Hint_Key {
 	return {source_id=source_id, seconds_bits=seconds_bits}
 }
 
+Library_Source_Video_Key :: struct {
+	workflow: Workflow_Kind,
+	video_id: string,
+}
+
 Library_State_Index :: struct {
 	sources: map[string]int,
-	source_videos: map[string]int,
+	source_videos: map[Library_Source_Video_Key]int,
 	segments: map[string]int,
 	hints: map[Library_Hint_Key]int,
-	exercises: map[string]int,
+	clips: map[string]int,
 }
 
 library_state_index_destroy :: proc(index: ^Library_State_Index) {
@@ -278,7 +291,7 @@ library_state_index_destroy :: proc(index: ^Library_State_Index) {
 	delete(index.source_videos)
 	delete(index.segments)
 	delete(index.hints)
-	delete(index.exercises)
+	delete(index.clips)
 	index^ = {}
 }
 
@@ -288,20 +301,24 @@ library_state_index_build :: proc(
 	if value == nil {return {}, false}
 	result := Library_State_Index{
 		sources = make(map[string]int, context.temp_allocator),
-		source_videos = make(map[string]int, context.temp_allocator),
+		source_videos = make(map[Library_Source_Video_Key]int, context.temp_allocator),
 		segments = make(map[string]int, context.temp_allocator),
 		hints = make(map[Library_Hint_Key]int, context.temp_allocator),
-		exercises = make(map[string]int, context.temp_allocator),
+		clips = make(map[string]int, context.temp_allocator),
 	}
 	valid := false
 	defer if !valid {library_state_index_destroy(&result)}
 	for source, position in value.sources {
 		if _, found := result.sources[source.id]; found {return {}, false}
-		if _, found := result.source_videos[source.video_id]; found {
+		video_key := Library_Source_Video_Key{
+			workflow = source.workflow,
+			video_id = source.video_id,
+		}
+		if _, found := result.source_videos[video_key]; found {
 			return {}, false
 		}
 		result.sources[source.id] = position
-		result.source_videos[source.video_id] = position
+		result.source_videos[video_key] = position
 	}
 	for segment, position in value.transcripts.segments {
 		if _, found := result.segments[segment.id]; found {return {}, false}
@@ -312,9 +329,9 @@ library_state_index_build :: proc(
 		if _, found := result.hints[key]; found {return {}, false}
 		result.hints[key] = position
 	}
-	for exercise, position in value.exercises {
-		if _, found := result.exercises[exercise.id]; found {return {}, false}
-		result.exercises[exercise.id] = position
+	for clip, position in value.clips {
+		if _, found := result.clips[clip.id]; found {return {}, false}
+		result.clips[clip.id] = position
 	}
 	valid = true
 	return result, true
@@ -386,15 +403,15 @@ library_change_count :: proc(
 			count += 1
 		}
 	}
-	for value, position in candidate.exercises {
-		index, found := previous_index.exercises[value.id]
+	for value, position in candidate.clips {
+		index, found := previous_index.clips[value.id]
 		if !found || index != position ||
-		   !exercise_storage_equal(previous.exercises[index], value) {
+		   !clip_storage_equal(previous.clips[index], value) {
 			count += 1
 		}
 	}
-	for value in previous.exercises {
-		if _, found := candidate_index.exercises[value.id]; !found {count += 1}
+	for value in previous.clips {
+		if _, found := candidate_index.clips[value.id]; !found {count += 1}
 	}
 	return count
 }
@@ -479,19 +496,19 @@ library_revision_record_changes :: proc(
 			}
 		}
 	}
-	for value, position in candidate.exercises {
-		index, found := previous_index.exercises[value.id]
+	for value, position in candidate.clips {
+		index, found := previous_index.clips[value.id]
 		if found && index == position &&
-		   exercise_storage_equal(previous.exercises[index], value) {
+		   clip_storage_equal(previous.clips[index], value) {
 			continue
 		}
-		if !library_change_insert(database, revision, .Exercise, value.id, 0, .Upsert) {
+		if !library_change_insert(database, revision, .Clip, value.id, 0, .Upsert) {
 			return 0, false
 		}
 	}
-	for value in previous.exercises {
-		if _, found := candidate_index.exercises[value.id]; !found &&
-		   !library_change_insert(database, revision, .Exercise, value.id, 0, .Delete) {
+	for value in previous.clips {
+		if _, found := candidate_index.clips[value.id]; !found &&
+		   !library_change_insert(database, revision, .Clip, value.id, 0, .Delete) {
 			return 0, false
 		}
 	}
@@ -709,7 +726,7 @@ database_salvage_state :: proc(
 	result: App_State
 	result.sources = make([dynamic]Source_Video)
 	result.hints = make([dynamic]Import_Hint)
-	result.exercises = make([dynamic]Exercise)
+	result.clips = make([dynamic]Clip)
 	transcripts, transcripts_created := transcript_generation_create(256)
 	if !transcripts_created {
 		app_state_collections_destroy(&result)
@@ -853,8 +870,8 @@ database_salvage_state :: proc(
 		`SELECT e.id, e.source_id, e.name, e.start_seconds,
 		        e.end_seconds, e.clip_path,
 		        COALESCE(r.last_sequence, 0)
-		 FROM exercises e
-		 LEFT JOIN exercise_randomization r ON r.exercise_id = e.id
+		 FROM clips e
+		 LEFT JOIN clip_randomization r ON r.clip_id = e.id
 		 ORDER BY e.position`,
 	)
 	if !prepared {
@@ -869,35 +886,35 @@ database_salvage_state :: proc(
 				complete = false
 				break
 			}
-			exercise := Exercise{
+			clip := Clip{
 				start_seconds = sqlite3_column_double(statement, 3),
 				end_seconds = sqlite3_column_double(statement, 4),
 				last_randomized_sequence = sqlite3_column_int64(statement, 6),
 			}
 			valid := true
-			exercise.id, valid = sqlite_column_required_string(statement, 0)
-			if valid {exercise.source_id, valid = sqlite_column_required_string(statement, 1)}
-			if valid {exercise.name, valid = sqlite_column_required_string(statement, 2)}
+			clip.id, valid = sqlite_column_required_string(statement, 0)
+			if valid {clip.source_id, valid = sqlite_column_required_string(statement, 1)}
+			if valid {clip.name, valid = sqlite_column_required_string(statement, 2)}
 			stored_path := ""
 			if valid {stored_path, valid = sqlite_column_required_string(statement, 5, context.temp_allocator)}
-			if valid {exercise.clip_path, valid = database_file_path_for_runtime(stored_path)}
-			source_index := source_index_for_id(result.sources[:], exercise.source_id)
+			if valid {clip.clip_path, valid = database_file_path_for_runtime(stored_path)}
+			source_index := source_index_for_id(result.sources[:], clip.source_id)
 			valid = valid &&
-			        portable_identifier_valid(exercise.id) &&
+			        portable_identifier_valid(clip.id) &&
 			        source_index >= 0 &&
-			        len(exercise.name) > 0 &&
-			        valid_exercise_range(
-						exercise.start_seconds,
-						exercise.end_seconds,
+			        len(clip.name) > 0 &&
+			        valid_clip_range(
+						clip.start_seconds,
+						clip.end_seconds,
 						result.sources[source_index].duration,
 			        ) &&
-			        library_exercise_index(result.exercises[:], exercise.id) < 0
+			        library_clip_index(result.clips[:], clip.id) < 0
 			if !valid {
-				delete_exercise(&exercise)
+				delete_clip(&clip)
 				report.rejected_records += 1
 				continue
 			}
-			append(&result.exercises, exercise)
+			append(&result.clips, clip)
 		}
 		sqlite3_finalize(statement)
 	}
@@ -905,7 +922,7 @@ database_salvage_state :: proc(
 	report.recovered_sources = len(result.sources)
 	report.recovered_segments = len(result.transcripts.segments)
 	report.recovered_hints = len(result.hints)
-	report.recovered_exercises = len(result.exercises)
+	report.recovered_clips = len(result.clips)
 	return result, complete
 }
 
@@ -1001,11 +1018,11 @@ library_recovery_build_candidate :: proc(
 	sources := make([dynamic]Source_Video, 0)
 	segments := make([dynamic]Transcript_Segment, 0)
 	hints := make([dynamic]Import_Hint, 0)
-	exercises := make([dynamic]Exercise, 0)
+	clips := make([dynamic]Clip, 0)
 	defer delete(sources)
 	defer delete(segments)
 	defer delete(hints)
-	defer delete(exercises)
+	defer delete(clips)
 
 	if backup != nil {
 		for value in backup.sources {
@@ -1083,33 +1100,33 @@ library_recovery_build_candidate :: proc(
 	}
 
 	if backup != nil {
-		for value in backup.exercises {
-			operation, changed := library_change_latest(changes, .Exercise, value.id)
+		for value in backup.clips {
+			operation, changed := library_change_latest(changes, .Clip, value.id)
 			if exact_changes && changed && operation == .Delete {
 				report.replayed_deletions += 1
 				continue
 			}
-			index := library_exercise_index(salvage.exercises[:], value.id)
+			index := library_clip_index(salvage.clips[:], value.id)
 			if index >= 0 && (!exact_changes || changed) {
-				append(&exercises, salvage.exercises[index])
+				append(&clips, salvage.clips[index])
 			} else {
-				append(&exercises, value)
+				append(&clips, value)
 			}
 		}
-		for value in salvage.exercises {
-			if library_exercise_index(exercises[:], value.id) >= 0 {continue}
-			_, changed := library_change_latest(changes, .Exercise, value.id)
-			if !exact_changes || changed {append(&exercises, value)}
+		for value in salvage.clips {
+			if library_clip_index(clips[:], value.id) >= 0 {continue}
+			_, changed := library_change_latest(changes, .Clip, value.id)
+			if !exact_changes || changed {append(&clips, value)}
 		}
 	} else {
-		append(&exercises, ..salvage.exercises[:])
+		append(&clips, ..salvage.clips[:])
 	}
 
 	candidate, copied := app_state_collections_copy(
 		sources[:],
 		segments[:],
 		hints[:],
-		exercises[:],
+		clips[:],
 	)
 	if !copied || !library_state_valid(&candidate) {
 		app_state_collections_destroy(&candidate)
@@ -1577,7 +1594,7 @@ library_recovery_activate :: proc(
 					replacement.sources[:],
 					replacement.transcripts.segments[:],
 					replacement.hints[:],
-					replacement.exercises[:],
+					replacement.clips[:],
 	            )
 	sqlite3_close(candidate_database)
 	if !prepared {

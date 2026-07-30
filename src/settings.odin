@@ -3,26 +3,26 @@ package main
 import "core:fmt"
 import command_palette "command_palette:."
 
-Vocal_Settings_Category :: enum {
+Video_Clips_Settings_Category :: enum {
 	Styling,
 	Shortcuts,
 }
 
-Vocal_Setting_Descriptor :: struct {
+Video_Clips_Setting_Descriptor :: struct {
 	id: command_palette.Entry_ID,
-	category: Vocal_Settings_Category,
+	category: Video_Clips_Settings_Category,
 	title: string,
 	subtitle: string,
 	keywords: []string,
 	action: UI_Action,
 }
 
-VOCAL_SETTING_LIGHT_ID :: command_palette.Entry_ID(1)
-VOCAL_SETTING_DARK_ID :: command_palette.Entry_ID(2)
-VOCAL_SETTING_FLASH_ID :: command_palette.Entry_ID(100)
-VOCAL_SETTINGS_ROW_HEIGHT :: 36.0
+VIDEO_CLIPS_SETTING_LIGHT_ID :: command_palette.Entry_ID(1)
+VIDEO_CLIPS_SETTING_DARK_ID :: command_palette.Entry_ID(2)
+VIDEO_CLIPS_SETTING_FLASH_ID :: command_palette.Entry_ID(100)
+VIDEO_CLIPS_SETTINGS_ROW_HEIGHT :: 36.0
 
-vocal_settings_category_name :: proc(category: Vocal_Settings_Category) -> string {
+video_clips_settings_category_name :: proc(category: Video_Clips_Settings_Category) -> string {
 	switch category {
 	case .Styling: return "STYLING"
 	case .Shortcuts: return "SHORTCUTS"
@@ -30,17 +30,17 @@ vocal_settings_category_name :: proc(category: Vocal_Settings_Category) -> strin
 	return "SETTINGS"
 }
 
-vocal_settings_descriptors :: proc(
+video_clips_settings_descriptors :: proc(
 	allocator := context.temp_allocator,
-) -> [dynamic]Vocal_Setting_Descriptor {
-	result := make([dynamic]Vocal_Setting_Descriptor, allocator)
+) -> [dynamic]Video_Clips_Setting_Descriptor {
+	result := make([dynamic]Video_Clips_Setting_Descriptor, allocator)
 	light_keywords := make([]string, 5, allocator)
 	copy(
 		light_keywords,
 		[]string{"theme", "appearance", "style", "light", "hw-light"},
 	)
-	append(&result, Vocal_Setting_Descriptor{
-		id = VOCAL_SETTING_LIGHT_ID,
+	append(&result, Video_Clips_Setting_Descriptor{
+		id = VIDEO_CLIPS_SETTING_LIGHT_ID,
 		category = .Styling,
 		title = "HW Light",
 		subtitle = "Light interface theme",
@@ -52,8 +52,8 @@ vocal_settings_descriptors :: proc(
 		dark_keywords,
 		[]string{"theme", "appearance", "style", "dark", "hw-dark"},
 	)
-	append(&result, Vocal_Setting_Descriptor{
-		id = VOCAL_SETTING_DARK_ID,
+	append(&result, Video_Clips_Setting_Descriptor{
+		id = VIDEO_CLIPS_SETTING_DARK_ID,
 		category = .Styling,
 		title = "HW Dark",
 		subtitle = "Dark interface theme",
@@ -65,8 +65,8 @@ vocal_settings_descriptors :: proc(
 		flash_keywords,
 		[]string{"keyboard", "shortcut", "leader", "navigation", "jump"},
 	)
-	append(&result, Vocal_Setting_Descriptor{
-		id = VOCAL_SETTING_FLASH_ID,
+	append(&result, Video_Clips_Setting_Descriptor{
+		id = VIDEO_CLIPS_SETTING_FLASH_ID,
 		category = .Shortcuts,
 		title = "Flash leader",
 		subtitle = "Configure the key chord that opens Flash targets",
@@ -76,32 +76,32 @@ vocal_settings_descriptors :: proc(
 	return result
 }
 
-vocal_setting_descriptor_for_id :: proc(
+video_clips_setting_descriptor_for_id :: proc(
 	id: command_palette.Entry_ID,
-) -> (Vocal_Setting_Descriptor, bool) {
-	for descriptor in vocal_settings_descriptors() {
+) -> (Video_Clips_Setting_Descriptor, bool) {
+	for descriptor in video_clips_settings_descriptors() {
 		if descriptor.id == id {return descriptor, true}
 	}
 	return {}, false
 }
 
-vocal_settings_entries :: proc(
+video_clips_settings_entries :: proc(
 	allocator := context.temp_allocator,
 ) -> [dynamic]command_palette.Entry {
 	entries := make([dynamic]command_palette.Entry, allocator)
-	for descriptor in vocal_settings_descriptors(allocator) {
+	for descriptor in video_clips_settings_descriptors(allocator) {
 		append(&entries, command_palette.Entry{
 			id = descriptor.id,
 			title = descriptor.title,
 			subtitle = descriptor.subtitle,
-			category = vocal_settings_category_name(descriptor.category),
+			category = video_clips_settings_category_name(descriptor.category),
 			keywords = descriptor.keywords,
 		})
 	}
 	return entries
 }
 
-vocal_settings_rect_for_size :: proc(width, height: f64) -> UI_Rect {
+video_clips_settings_rect_for_size :: proc(width, height: f64) -> UI_Rect {
 	modal_width := min(900.0, width-48)
 	modal_height := min(600.0, height-72)
 	return {
@@ -112,68 +112,68 @@ vocal_settings_rect_for_size :: proc(width, height: f64) -> UI_Rect {
 	}
 }
 
-vocal_settings_rect :: proc() -> UI_Rect {
-	return vocal_settings_rect_for_size(ui.width, ui.height)
+video_clips_settings_rect :: proc() -> UI_Rect {
+	return video_clips_settings_rect_for_size(ui.width, ui.height)
 }
 
-vocal_settings_search_rect :: proc() -> UI_Rect {
-	modal := vocal_settings_rect()
+video_clips_settings_search_rect :: proc() -> UI_Rect {
+	modal := video_clips_settings_rect()
 	return {modal.x+20, modal.y+modal.h-62, modal.w-76, 34}
 }
 
-vocal_settings_close_rect :: proc() -> UI_Rect {
-	modal := vocal_settings_rect()
+video_clips_settings_close_rect :: proc() -> UI_Rect {
+	modal := video_clips_settings_rect()
 	return {modal.x+modal.w-48, modal.y+modal.h-62, 28, 34}
 }
 
-vocal_settings_sidebar_rect :: proc() -> UI_Rect {
-	modal := vocal_settings_rect()
+video_clips_settings_sidebar_rect :: proc() -> UI_Rect {
+	modal := video_clips_settings_rect()
 	return {modal.x+20, modal.y+20, 168, modal.h-94}
 }
 
-vocal_settings_content_rect :: proc() -> UI_Rect {
-	modal := vocal_settings_rect()
+video_clips_settings_content_rect :: proc() -> UI_Rect {
+	modal := video_clips_settings_rect()
 	return {modal.x+200, modal.y+20, modal.w-220, modal.h-94}
 }
 
-vocal_settings_category_rect :: proc(index: int) -> UI_Rect {
-	sidebar := vocal_settings_sidebar_rect()
+video_clips_settings_category_rect :: proc(index: int) -> UI_Rect {
+	sidebar := video_clips_settings_sidebar_rect()
 	return {
 		sidebar.x,
-		sidebar.y+sidebar.h-VOCAL_SETTINGS_ROW_HEIGHT-f64(index)*VOCAL_SETTINGS_ROW_HEIGHT,
+		sidebar.y+sidebar.h-VIDEO_CLIPS_SETTINGS_ROW_HEIGHT-f64(index)*VIDEO_CLIPS_SETTINGS_ROW_HEIGHT,
 		sidebar.w,
-		VOCAL_SETTINGS_ROW_HEIGHT-2,
+		VIDEO_CLIPS_SETTINGS_ROW_HEIGHT-2,
 	}
 }
 
-vocal_settings_result_rect :: proc(index: int) -> UI_Rect {
-	content := vocal_settings_content_rect()
+video_clips_settings_result_rect :: proc(index: int) -> UI_Rect {
+	content := video_clips_settings_content_rect()
 	return {
 		content.x,
-		content.y+content.h-VOCAL_SETTINGS_ROW_HEIGHT-f64(index)*VOCAL_SETTINGS_ROW_HEIGHT,
+		content.y+content.h-VIDEO_CLIPS_SETTINGS_ROW_HEIGHT-f64(index)*VIDEO_CLIPS_SETTINGS_ROW_HEIGHT,
 		content.w,
-		VOCAL_SETTINGS_ROW_HEIGHT-2,
+		VIDEO_CLIPS_SETTINGS_ROW_HEIGHT-2,
 	}
 }
 
-vocal_settings_search_active :: proc() -> bool {
+video_clips_settings_search_active :: proc() -> bool {
 	return len(ui.settings_query) > 0
 }
 
-vocal_settings_result_descriptors :: proc(
+video_clips_settings_result_descriptors :: proc(
 	allocator := context.temp_allocator,
-) -> [dynamic]Vocal_Setting_Descriptor {
-	result := make([dynamic]Vocal_Setting_Descriptor, allocator)
-	if vocal_settings_search_active() {
+) -> [dynamic]Video_Clips_Setting_Descriptor {
+	result := make([dynamic]Video_Clips_Setting_Descriptor, allocator)
+	if video_clips_settings_search_active() {
 		for ranked in command_palette.visible_results(&ui.settings_search) {
-			if descriptor, found := vocal_setting_descriptor_for_id(ranked.entry.id);
+			if descriptor, found := video_clips_setting_descriptor_for_id(ranked.entry.id);
 			   found {
 				append(&result, descriptor)
 			}
 		}
 		return result
 	}
-	for descriptor in vocal_settings_descriptors() {
+	for descriptor in video_clips_settings_descriptors() {
 		if descriptor.category == ui.settings_category {
 			append(&result, descriptor)
 		}
@@ -181,19 +181,19 @@ vocal_settings_result_descriptors :: proc(
 	return result
 }
 
-vocal_settings_category_match_count :: proc(
-	category: Vocal_Settings_Category,
+video_clips_settings_category_match_count :: proc(
+	category: Video_Clips_Settings_Category,
 ) -> int {
-	if !vocal_settings_search_active() {
+	if !video_clips_settings_search_active() {
 		count := 0
-		for descriptor in vocal_settings_descriptors() {
+		for descriptor in video_clips_settings_descriptors() {
 			if descriptor.category == category {count += 1}
 		}
 		return count
 	}
 	count := 0
 	for ranked in command_palette.visible_results(&ui.settings_search) {
-		if descriptor, found := vocal_setting_descriptor_for_id(ranked.entry.id);
+		if descriptor, found := video_clips_setting_descriptor_for_id(ranked.entry.id);
 		   found && descriptor.category == category {
 			count += 1
 		}
@@ -201,25 +201,25 @@ vocal_settings_category_match_count :: proc(
 	return count
 }
 
-vocal_settings_commands_available :: proc() -> bool {
+video_clips_settings_commands_available :: proc() -> bool {
 	return !library_recovery_state.required && !major_change_pending.open
 }
 
-vocal_settings_open :: proc() -> bool {
-	if !vocal_settings_commands_available() {return false}
+video_clips_settings_open :: proc() -> bool {
+	if !video_clips_settings_commands_available() {return false}
 	if ui.settings_open {
 		focus_text_input(.Settings_Search)
 		return true
 	}
-	entries := vocal_settings_entries()
+	entries := video_clips_settings_entries()
 	if error := command_palette.open(&ui.settings_search, entries[:], 0);
 	   error != .None {
 		return false
 	}
 	if ui.source_modal_open {close_source_modal()}
 	if ui.source_details_open {close_source_details()}
-	if ui.exercise_rename_open {close_exercise_rename()}
-	if ui.exercise_metadata_open {close_exercise_metadata()}
+	if ui.clip_rename_open {close_clip_rename()}
+	if ui.clip_metadata_open {close_clip_metadata()}
 	if ui.randomize_help_open {close_randomize_help()}
 	if ui.pitch.help_open {close_pitch_help()}
 	if ui.data_modal_open {close_data_modal()}
@@ -235,9 +235,9 @@ vocal_settings_open :: proc() -> bool {
 	return true
 }
 
-vocal_settings_close :: proc() {
+video_clips_settings_close :: proc() {
 	if !ui.settings_open {return}
-	if ui.shortcut_open {vocal_shortcut_recorder_close()}
+	if ui.shortcut_open {video_clips_shortcut_recorder_close()}
 	command_palette.close(&ui.settings_search)
 	ui.settings_open = false
 	if ui.focus == .Settings_Search {_ = unfocus_text_input()}
@@ -248,8 +248,8 @@ vocal_settings_close :: proc() {
 	ui.needs_redraw = true
 }
 
-vocal_settings_apply_theme :: proc(dark: bool) -> bool {
-	if !vocal_settings_commands_available() {return false}
+video_clips_settings_apply_theme :: proc(dark: bool) -> bool {
+	if !video_clips_settings_commands_available() {return false}
 	if dark == ui.dark_theme {return true}
 	if !database_interface_theme_save(library_database, dark) {
 		ui_set_string(&ui.settings_error, "THE THEME COULD NOT BE SAVED")
@@ -262,9 +262,9 @@ vocal_settings_apply_theme :: proc(dark: bool) -> bool {
 	return true
 }
 
-vocal_shortcut_recorder_open :: proc() -> bool {
-	if !vocal_settings_commands_available() {return false}
-	vocal_shortcut_destroy(&ui.shortcut_candidate)
+video_clips_shortcut_recorder_open :: proc() -> bool {
+	if !video_clips_settings_commands_available() {return false}
+	video_clips_shortcut_destroy(&ui.shortcut_candidate)
 	ui.shortcut_candidate_valid = false
 	ui_set_string(&ui.shortcut_collision, "")
 	ui_set_string(&ui.shortcut_error, "")
@@ -278,8 +278,8 @@ vocal_shortcut_recorder_open :: proc() -> bool {
 	return true
 }
 
-vocal_shortcut_recorder_close :: proc() {
-	vocal_shortcut_destroy(&ui.shortcut_candidate)
+video_clips_shortcut_recorder_close :: proc() {
+	video_clips_shortcut_destroy(&ui.shortcut_candidate)
 	ui.shortcut_candidate_valid = false
 	ui_set_string(&ui.shortcut_collision, "")
 	ui_set_string(&ui.shortcut_error, "")
@@ -289,18 +289,18 @@ vocal_shortcut_recorder_close :: proc() {
 	ui.needs_redraw = true
 }
 
-vocal_shortcut_recorder_capture :: proc(
+video_clips_shortcut_recorder_capture :: proc(
 	key_code: uint,
 	text: string,
 	flags: uint,
 ) -> bool {
-	candidate, valid := vocal_shortcut_from_event(key_code, text, flags)
+	candidate, valid := video_clips_shortcut_from_event(key_code, text, flags)
 	if !valid {return false}
-	vocal_shortcut_destroy(&ui.shortcut_candidate)
+	video_clips_shortcut_destroy(&ui.shortcut_candidate)
 	ui.shortcut_candidate = candidate
 	ui.shortcut_candidate_valid = true
 	ui_set_string(&ui.shortcut_collision, "")
-	if owner, collides := vocal_shortcut_collision(candidate); collides {
+	if owner, collides := video_clips_shortcut_collision(candidate); collides {
 		ui_set_string(
 			&ui.shortcut_collision,
 			fmt.tprintf("CONFLICTS WITH %s", owner),
@@ -313,11 +313,11 @@ vocal_shortcut_recorder_capture :: proc(
 	return true
 }
 
-vocal_shortcut_recorder_save :: proc() -> bool {
+video_clips_shortcut_recorder_save :: proc() -> bool {
 	if !ui.shortcut_candidate_valid || len(ui.shortcut_collision) > 0 {
 		return false
 	}
-	encoded, valid := vocal_shortcut_serialize(
+	encoded, valid := video_clips_shortcut_serialize(
 		ui.shortcut_candidate,
 		context.temp_allocator,
 	)
@@ -326,15 +326,15 @@ vocal_shortcut_recorder_save :: proc() -> bool {
 		ui.needs_redraw = true
 		return false
 	}
-	vocal_shortcut_destroy(&ui.flash_leader)
-	ui.flash_leader = vocal_shortcut_clone(ui.shortcut_candidate)
-	vocal_shortcut_recorder_close()
+	video_clips_shortcut_destroy(&ui.flash_leader)
+	ui.flash_leader = video_clips_shortcut_clone(ui.shortcut_candidate)
+	video_clips_shortcut_recorder_close()
 	return true
 }
 
-vocal_shortcut_recorder_reset :: proc() -> bool {
-	default_value := vocal_shortcut_default()
-	encoded, valid := vocal_shortcut_serialize(
+video_clips_shortcut_recorder_reset :: proc() -> bool {
+	default_value := video_clips_shortcut_default()
+	encoded, valid := video_clips_shortcut_serialize(
 		default_value,
 		context.temp_allocator,
 	)
@@ -346,25 +346,25 @@ vocal_shortcut_recorder_reset :: proc() -> bool {
 		ui.needs_redraw = true
 		return false
 	}
-	vocal_shortcut_destroy(&ui.flash_leader)
-	ui.flash_leader = vocal_shortcut_clone(default_value)
-	vocal_shortcut_recorder_close()
+	video_clips_shortcut_destroy(&ui.flash_leader)
+	ui.flash_leader = video_clips_shortcut_clone(default_value)
+	video_clips_shortcut_recorder_close()
 	return true
 }
 
-vocal_shortcut_modal_rect :: proc() -> UI_Rect {
+video_clips_shortcut_modal_rect :: proc() -> UI_Rect {
 	width := min(560.0, ui.width-48)
 	height := 260.0
 	return {(ui.width-width)/2, (ui.height-height)/2, width, height}
 }
 
-vocal_shortcut_record_rect :: proc() -> UI_Rect {
-	modal := vocal_shortcut_modal_rect()
+video_clips_shortcut_record_rect :: proc() -> UI_Rect {
+	modal := video_clips_shortcut_modal_rect()
 	return {modal.x+24, modal.y+86, modal.w-48, 54}
 }
 
-vocal_shortcut_action_rect :: proc(index: int) -> UI_Rect {
-	modal := vocal_shortcut_modal_rect()
+video_clips_shortcut_action_rect :: proc(index: int) -> UI_Rect {
+	modal := video_clips_shortcut_modal_rect()
 	gap := 8.0
 	width := (modal.w-48-gap*2)/3
 	return {

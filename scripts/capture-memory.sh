@@ -8,7 +8,7 @@ MODE=$1
 PID=$2
 APP=$3
 RSS_KB=$4
-EXECUTABLE="$APP/Contents/MacOS/VocalTraining"
+EXECUTABLE="$APP/Contents/MacOS/hw_videoClips"
 TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
 DEST="$ROOT/build/memory-diagnostics/$TIMESTAMP-$MODE-pid-$PID"
 
@@ -46,4 +46,4 @@ ls -1dt "$ROOT"/build/memory-diagnostics/* 2>/dev/null |
     esac
   done
 
-printf '[vocal-training] memory diagnostics: %s\n' "$DEST"
+printf '[hw_videoClips] memory diagnostics: %s\n' "$DEST"

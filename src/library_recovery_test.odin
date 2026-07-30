@@ -11,7 +11,7 @@ import mem_virtual "core:mem/virtual"
 recovery_test_temp_path :: proc() -> (string, bool) {
 	file, create_error := os2.create_temp_file(
 		"",
-		"vocal-training-recovery-*.sqlite3",
+		"hw_videoClips-recovery-*.sqlite3",
 	)
 	if create_error != nil {return "", false}
 	path, clone_error := strings.clone(os2.name(file))
@@ -22,11 +22,40 @@ recovery_test_temp_path :: proc() -> (string, bool) {
 }
 
 @(test)
+legacy_application_support_directory_moves_without_copying_test :: proc(
+	t: ^testing.T,
+) {
+	root, created := recovery_test_temp_path()
+	testing.expect(t, created)
+	if !created {return}
+	testing.expect(t, os.make_directory(root) == nil)
+	defer {
+		_ = os2.remove_all(root)
+		delete(root)
+	}
+	legacy := fmt.tprintf("%s/VocalTraining", root)
+	current := fmt.tprintf("%s/hw_videoClips", root)
+	testing.expect(t, os.make_directory(legacy) == nil)
+	legacy_database := fmt.tprintf("%s/library.sqlite3", legacy)
+	contents := string("legacy")
+	testing.expect(
+		t,
+		os.write_entire_file(
+			legacy_database,
+			transmute([]byte)contents,
+		),
+	)
+	testing.expect(t, migrate_legacy_app_support_paths(current, legacy))
+	testing.expect(t, !os.exists(legacy))
+	testing.expect(t, os.exists(fmt.tprintf("%s/library.sqlite3", current)))
+}
+
+@(test)
 malformed_required_text_fails_without_replacing_destination_test :: proc(
 	t: ^testing.T,
 ) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	fixture_path, found := os.lookup_env("VT_TEST_LIBRARY")
+	fixture_path, found := os.lookup_env("HW_VIDEO_CLIPS_TEST_LIBRARY")
 	defer delete(fixture_path)
 	testing.expect(t, found)
 	if !found {return}
@@ -55,7 +84,7 @@ malformed_required_text_fails_without_replacing_destination_test :: proc(
 	destination: App_State
 	destination.sources = make([dynamic]Source_Video)
 	destination.hints = make([dynamic]Import_Hint)
-	destination.exercises = make([dynamic]Exercise)
+	destination.clips = make([dynamic]Clip)
 	destination.transcripts, _ = transcript_generation_create()
 	defer app_state_collections_destroy(&destination)
 	existing, copied := clone_source_video(Source_Video{
@@ -96,7 +125,7 @@ malformed_required_text_fails_without_replacing_destination_test :: proc(
 	testing.expect_value(t, len(restored.sources), 7)
 	testing.expect_value(t, len(restored.transcripts.segments), 1532)
 	testing.expect_value(t, len(restored.hints), 12)
-	testing.expect_value(t, len(restored.exercises), 1)
+	testing.expect_value(t, len(restored.clips), 1)
 }
 
 @(test)
@@ -129,9 +158,9 @@ salvage_keeps_valid_rows_and_rejects_corrupt_dependencies_test :: proc(
 			duration = 60,
 		},
 	}
-	exercises := [2]Exercise{
+	clips := [2]Clip{
 		{
-			id = "exercise-good",
+			id = "clip-good",
 			source_id = "source-good",
 			name = "Good",
 			start_seconds = 1,
@@ -139,7 +168,7 @@ salvage_keeps_valid_rows_and_rejects_corrupt_dependencies_test :: proc(
 			clip_path = "/tmp/good-clip.mp4",
 		},
 		{
-			id = "exercise-bad",
+			id = "clip-bad",
 			source_id = "source-bad",
 			name = "Bad",
 			start_seconds = 1,
@@ -152,7 +181,7 @@ salvage_keeps_valid_rows_and_rejects_corrupt_dependencies_test :: proc(
 		sources[:],
 		nil,
 		nil,
-		exercises[:],
+		clips[:],
 	))
 	testing.expect(t, sqlite_execute(
 		database,
@@ -169,8 +198,8 @@ salvage_keeps_valid_rows_and_rejects_corrupt_dependencies_test :: proc(
 	defer app_state_collections_destroy(&salvage)
 	testing.expect_value(t, len(salvage.sources), 1)
 	testing.expect_value(t, salvage.sources[0].id, "source-good")
-	testing.expect_value(t, len(salvage.exercises), 1)
-	testing.expect_value(t, salvage.exercises[0].id, "exercise-good")
+	testing.expect_value(t, len(salvage.clips), 1)
+	testing.expect_value(t, salvage.clips[0].id, "clip-good")
 	testing.expect(t, report.rejected_records >= 2)
 }
 
@@ -233,7 +262,7 @@ revision_log_commits_and_rolls_back_with_library_rows_test :: proc(
 @(test)
 verified_backup_is_reused_for_the_same_revision_test :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	fixture_path, found := os.lookup_env("VT_TEST_LIBRARY")
+	fixture_path, found := os.lookup_env("HW_VIDEO_CLIPS_TEST_LIBRARY")
 	defer delete(fixture_path)
 	testing.expect(t, found)
 	if !found {return}
@@ -422,9 +451,9 @@ recovery_activation_test_restore_environment :: proc(
 	found: bool,
 ) {
 	if found {
-		_ = os.set_env("VT_APP_SUPPORT_DIR", previous)
+		_ = os.set_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR", previous)
 	} else {
-		_ = os.unset_env("VT_APP_SUPPORT_DIR")
+		_ = os.unset_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR")
 	}
 }
 
@@ -432,7 +461,7 @@ recovery_activation_test_restore_environment :: proc(
 activation_reconciliation_preserves_archive_at_each_boundary_test :: proc(
 	t: ^testing.T,
 ) {
-	previous_support, support_found := os.lookup_env("VT_APP_SUPPORT_DIR")
+	previous_support, support_found := os.lookup_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR")
 	defer {
 		recovery_activation_test_restore_environment(
 			previous_support,
@@ -456,7 +485,7 @@ activation_reconciliation_preserves_archive_at_each_boundary_test :: proc(
 			_ = os2.remove_all(root)
 			delete(root)
 		}
-		testing.expect(t, os.set_env("VT_APP_SUPPORT_DIR", root) == nil)
+		testing.expect(t, os.set_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR", root) == nil)
 		testing.expect(
 			t,
 			os.make_directory(library_failed_recovery_dir()) == nil,
@@ -554,7 +583,7 @@ activation_reconciliation_preserves_archive_at_each_boundary_test :: proc(
 malformed_activation_record_preserves_all_database_files_test :: proc(
 	t: ^testing.T,
 ) {
-	previous_support, support_found := os.lookup_env("VT_APP_SUPPORT_DIR")
+	previous_support, support_found := os.lookup_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR")
 	defer {
 		recovery_activation_test_restore_environment(
 			previous_support,
@@ -570,7 +599,7 @@ malformed_activation_record_preserves_all_database_files_test :: proc(
 		_ = os2.remove_all(root)
 		delete(root)
 	}
-	testing.expect(t, os.set_env("VT_APP_SUPPORT_DIR", root) == nil)
+	testing.expect(t, os.set_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR", root) == nil)
 	active_path := database_path()
 	candidate_path := fmt.tprintf("%s/candidate.sqlite3", root)
 	active_text := "failed-main"
@@ -607,11 +636,11 @@ malformed_activation_record_preserves_all_database_files_test :: proc(
 newer_schema_is_rejected_without_modifying_the_database_test :: proc(
 	t: ^testing.T,
 ) {
-	fixture_path, fixture_found := os.lookup_env("VT_TEST_LIBRARY")
+	fixture_path, fixture_found := os.lookup_env("HW_VIDEO_CLIPS_TEST_LIBRARY")
 	defer delete(fixture_path)
 	testing.expect(t, fixture_found)
 	if !fixture_found {return}
-	previous_support, support_found := os.lookup_env("VT_APP_SUPPORT_DIR")
+	previous_support, support_found := os.lookup_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR")
 	defer {
 		recovery_activation_test_restore_environment(
 			previous_support,
@@ -627,7 +656,7 @@ newer_schema_is_rejected_without_modifying_the_database_test :: proc(
 		_ = os2.remove_all(root)
 		delete(root)
 	}
-	testing.expect(t, os.set_env("VT_APP_SUPPORT_DIR", root) == nil)
+	testing.expect(t, os.set_env("HW_VIDEO_CLIPS_APP_SUPPORT_DIR", root) == nil)
 	path := database_path()
 	testing.expect(t, library_database_copy(fixture_path, path))
 	database, opened := library_database_open_path(
@@ -636,7 +665,7 @@ newer_schema_is_rejected_without_modifying_the_database_test :: proc(
 	)
 	testing.expect(t, opened)
 	if !opened {return}
-	testing.expect(t, sqlite_execute(database, "PRAGMA user_version = 6"))
+	testing.expect(t, sqlite_execute(database, "PRAGMA user_version = 7"))
 	sqlite3_close(database)
 	before, before_hashed := library_recovery_file_fingerprint(path)
 	testing.expect(t, before_hashed)
@@ -655,7 +684,7 @@ newer_schema_is_rejected_without_modifying_the_database_test :: proc(
 	defer library_load_result_destroy(&result)
 	testing.expect(t, result.mode == .Recovery_Required)
 	testing.expect(t, result.stage == .Schema)
-	testing.expect_value(t, result.schema_version, 6)
+	testing.expect_value(t, result.schema_version, 7)
 	testing.expect(t, library_database == nil)
 	testing.expect(t, !library_recovery_state.recovery_allowed)
 	after, after_hashed := library_recovery_file_fingerprint(path)
@@ -667,7 +696,7 @@ newer_schema_is_rejected_without_modifying_the_database_test :: proc(
 	version, version_read := library_database_user_version(database)
 	sqlite3_close(database)
 	testing.expect(t, version_read)
-	testing.expect_value(t, version, 6)
+	testing.expect_value(t, version, 7)
 }
 
 @(test)

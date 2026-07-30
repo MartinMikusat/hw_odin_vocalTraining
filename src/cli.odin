@@ -7,7 +7,7 @@ import "core:strconv"
 import "core:strings"
 import mem_virtual "core:mem/virtual"
 
-DEV_TASK_SIMULATION :: #config(VT_DEV_TASK_SIMULATION, ODIN_DEBUG)
+DEV_TASK_SIMULATION :: #config(HW_VIDEO_CLIPS_DEV_TASK_SIMULATION, ODIN_DEBUG)
 
 CLI_Exit :: enum i32 {
 	Success = 0,
@@ -33,6 +33,7 @@ CLI_Command :: enum {
 
 CLI_Request :: struct {
 	command: CLI_Command,
+	workflow: Workflow_Kind,
 	url: string,
 	source_id: string,
 	from_segment: string,
@@ -63,6 +64,7 @@ CLI_Error_Response :: struct {
 
 CLI_Source_Output :: struct {
 	id: string,
+	workflow: string,
 	video_id: string,
 	title: string,
 	url: string,
@@ -121,6 +123,7 @@ CLI_Transcript_Response :: struct {
 CLI_Clip_Output :: struct {
 	id: string,
 	source_id: string,
+	workflow: string,
 	name: string,
 	start_seconds: f64,
 	end_seconds: f64,
@@ -245,6 +248,19 @@ cli_parse_positive_int :: proc(value: string) -> (int, bool) {
 	return parsed, parsed_ok && parsed > 0
 }
 
+cli_workflow_name :: proc(workflow: Workflow_Kind) -> string {
+	return workflow == .Dancing ? "dancing" : "vocal"
+}
+
+cli_parse_workflow :: proc(value: string) -> (Workflow_Kind, bool) {
+	lower := strings.to_lower(value, context.temp_allocator)
+	switch lower {
+	case "vocal": return .Vocal, true
+	case "dancing": return .Dancing, true
+	}
+	return .Vocal, false
+}
+
 cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string) -> (string, bool) {
 	for index := 0; index < len(args); {
 		flag := args[index]
@@ -266,6 +282,10 @@ cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string
 		case "--name": request.name = value
 		case "--baseline": request.baseline_path = value
 		case "--scenario": request.scenario = value
+		case "--workflow":
+			workflow, ok := cli_parse_workflow(value)
+			if !ok {return "--workflow must be vocal or dancing", false}
+			request.workflow = workflow
 		case "--max-height":
 			height, ok := cli_parse_positive_int(value)
 			if !ok {return "--max-height must be a positive integer", false}
@@ -292,20 +312,19 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 	switch {
 	case group == "source" && action == "add":
 		request.command = .Source_Add
-		allowed = []string{"--url", "--max-height", "--allow-without-backup"}
+		allowed = []string{"--url", "--max-height", "--allow-without-backup", "--workflow"}
 	case group == "source" && action == "list":
 		request.command = .Source_List
-		if len(remaining) != 0 {return {}, cli_error(request.command, .Usage, "usage", "source list does not accept options"), false}
-		return request, {}, true
+		allowed = []string{"--workflow"}
 	case group == "transcript" && action == "get":
 		request.command = .Transcript_Get
-		allowed = []string{"--source"}
+		allowed = []string{"--source", "--workflow"}
 	case group == "clip" && action == "create":
 		request.command = .Clip_Create
-		allowed = []string{"--source", "--from-segment", "--to-segment", "--name"}
+		allowed = []string{"--source", "--from-segment", "--to-segment", "--name", "--workflow"}
 	case group == "clip" && action == "list":
 		request.command = .Clip_List
-		allowed = []string{"--source"}
+		allowed = []string{"--source", "--workflow"}
 	case group == "ui" && action == "snapshot":
 		request.command = .UI_Snapshot
 		if len(remaining) != 0 {return {}, cli_error(request.command, .Usage, "usage", "ui snapshot does not accept options"), false}
@@ -355,9 +374,15 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 	return request, {}, true
 }
 
-cli_find_source :: proc(source_id: string) -> ^Source_Video {
+cli_find_source :: proc(
+	source_id: string,
+	workflow: Workflow_Kind,
+) -> ^Source_Video {
 	for &source in state.sources {
-		if source.id == source_id || source.video_id == source_id {return &source}
+		if source.workflow == workflow &&
+		   (source.id == source_id || source.video_id == source_id) {
+			return &source
+		}
 	}
 	return nil
 }
@@ -365,6 +390,7 @@ cli_find_source :: proc(source_id: string) -> ^Source_Video {
 cli_source_output :: proc(source: ^Source_Video) -> CLI_Source_Output {
 	return CLI_Source_Output{
 		id=source.id,
+		workflow=cli_workflow_name(source.workflow),
 		video_id=source.video_id,
 		title=source.title,
 		url=source.url,
@@ -382,21 +408,31 @@ cli_source_output :: proc(source: ^Source_Video) -> CLI_Source_Output {
 	}
 }
 
-cli_clip_output :: proc(exercise: ^Exercise) -> CLI_Clip_Output {
+cli_clip_output :: proc(clip: ^Clip) -> CLI_Clip_Output {
 	return CLI_Clip_Output{
-		id=exercise.id,
-		source_id=exercise.source_id,
-		name=exercise.name,
-		start_seconds=exercise.start_seconds,
-		end_seconds=exercise.end_seconds,
-		clip_path=exercise.clip_path,
-		file_available=os.exists(exercise.clip_path),
+		id=clip.id,
+		source_id=clip.source_id,
+		workflow=cli_workflow_name(clip.workflow),
+		name=clip.name,
+		start_seconds=clip.start_seconds,
+		end_seconds=clip.end_seconds,
+		clip_path=clip.clip_path,
+		file_available=os.exists(clip.clip_path),
 	}
 }
 
 cli_source_list :: proc(request: CLI_Request) -> CLI_Result {
-	outputs := make([]CLI_Source_Output, len(state.sources), context.temp_allocator)
-	for &source, index in state.sources {outputs[index] = cli_source_output(&source)}
+	count := 0
+	for source in state.sources {
+		if source.workflow == request.workflow {count += 1}
+	}
+	outputs := make([]CLI_Source_Output, count, context.temp_allocator)
+	index := 0
+	for &source in state.sources {
+		if source.workflow != request.workflow {continue}
+		outputs[index] = cli_source_output(&source)
+		index += 1
+	}
 	response := CLI_Source_List_Response{ok=true, command=cli_command_name(request.command), data=CLI_Source_List_Data{sources=outputs}}
 	return CLI_Result{output=cli_encode(response), exit_code=.Success}
 }
@@ -416,13 +452,13 @@ cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
 		)
 	}
 
-	existing := cli_find_source(video_id)
+	existing := cli_find_source(video_id, request.workflow)
 	if existing == nil {
 		if available, reason := helper_available("yt-dlp"); !available {return cli_error(request.command, .Media, "helper_unavailable", reason, diagnostic_log_path("yt-dlp"))}
 		if available, reason := helper_available("ffmpeg"); !available {return cli_error(request.command, .Media, "helper_unavailable", reason, diagnostic_log_path("ffmpeg"))}
 	}
 	existing_hint_count := len(state.hints)
-	job := import_job_create(request.url)
+	job := import_job_create(request.url, "", request.workflow)
 	if job == nil {return cli_error(request.command, .Storage, "allocation_failed", "Unable to allocate the import job")}
 	defer import_job_destroy(job)
 	job.allow_without_backup = request.allow_without_backup
@@ -436,7 +472,7 @@ cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
 		return cli_error(request.command, .Media, code, message, diagnostic_log_path("yt-dlp"))
 	}
 	if !import_job_apply(job) {return cli_error(request.command, .Storage, "storage_failed", "The source was downloaded but the library update failed")}
-	source := cli_find_source(video_id)
+	source := cli_find_source(video_id, request.workflow)
 	if source == nil {return cli_error(request.command, .Storage, "storage_failed", "The source is missing after the library update")}
 	status := "imported"
 	if existing != nil {
@@ -447,7 +483,7 @@ cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
 }
 
 cli_transcript_get :: proc(request: CLI_Request) -> CLI_Result {
-	source := cli_find_source(request.source_id)
+	source := cli_find_source(request.source_id, request.workflow)
 	if source == nil {return cli_error(request.command, .Invalid, "source_not_found", "The source does not exist")}
 	segments, _, found := transcript_source_segments(&state.transcripts, source.id)
 	if !found {
@@ -473,11 +509,11 @@ cli_transcript_get :: proc(request: CLI_Request) -> CLI_Result {
 	return CLI_Result{output=cli_encode(response), exit_code=.Success}
 }
 
-cli_next_exercise_id :: proc(source: ^Source_Video) -> string {
+cli_next_clip_id :: proc(source: ^Source_Video) -> string {
 	for number := 1; ; number += 1 {
-		candidate := fmt.tprintf("%s-%d", source.video_id, number)
+		candidate := fmt.tprintf("%s-%d", source.id, number)
 		found := false
-		for exercise in state.exercises {if exercise.id == candidate {found = true; break}}
+		for clip in state.clips {if clip.id == candidate {found = true; break}}
 		if !found {return candidate}
 	}
 }
@@ -498,7 +534,7 @@ cli_segment_range :: proc(source_id, from_segment, to_segment: string, segments:
 
 cli_clip_create :: proc(request: CLI_Request) -> CLI_Result {
 	if import_job != nil || export_job != nil {return cli_error(request.command, .Busy, "busy", "Another media operation is active")}
-	source := cli_find_source(request.source_id)
+	source := cli_find_source(request.source_id, request.workflow)
 	if source == nil {return cli_error(request.command, .Invalid, "source_not_found", "The source does not exist")}
 	if !os.exists(source.media_path) {return cli_error(request.command, .Invalid, "media_missing", "The source media file is missing")}
 	start_seconds, end_seconds, range_error := cli_segment_range(source.id, request.from_segment, request.to_segment, state.transcripts.segments[:])
@@ -508,25 +544,34 @@ cli_clip_create :: proc(request: CLI_Request) -> CLI_Result {
 	case "segment_order_invalid": return cli_error(request.command, .Invalid, range_error, "The first transcript segment occurs after the last segment")
 	case:
 	}
-	if !valid_exercise_range(start_seconds, end_seconds, source.duration) {return cli_error(request.command, .Invalid, "range_invalid", "The transcript segments produce an invalid clip range")}
+	if !valid_clip_range(start_seconds, end_seconds, source.duration) {return cli_error(request.command, .Invalid, "range_invalid", "The transcript segments produce an invalid clip range")}
 	if available, reason := helper_available("ffmpeg"); !available {return cli_error(request.command, .Media, "helper_unavailable", reason, diagnostic_log_path("ffmpeg"))}
-	id := cli_next_exercise_id(source)
-	exercise := Exercise{id=id, source_id=source.id, name=request.name, start_seconds=start_seconds, end_seconds=end_seconds}
-	if !export_exercise(&exercise, source.media_path) {return cli_error(request.command, .Media, "clip_export_failed", "FFmpeg could not create the clip", diagnostic_log_path("ffmpeg"))}
-	defer delete(exercise.clip_path)
-	copy, copied := clone_exercise(exercise)
-	if !copied {
-		_ = os.remove(exercise.clip_path)
-		return cli_error(request.command, .Storage, "allocation_failed", "Unable to store the exported exercise")
+	id := cli_next_clip_id(source)
+	clip := Clip{
+		id=id,
+		source_id=source.id,
+		workflow=source.workflow,
+		name=request.name,
+		start_seconds=start_seconds,
+		end_seconds=end_seconds,
+		dance_count_in_bpm=120,
+		dance_playback_rate=1,
 	}
-	append(&state.exercises, copy)
+	if !export_clip(&clip, source.media_path) {return cli_error(request.command, .Media, "clip_export_failed", "FFmpeg could not create the clip", diagnostic_log_path("ffmpeg"))}
+	defer delete(clip.clip_path)
+	copy, copied := clone_clip(clip)
+	if !copied {
+		_ = os.remove(clip.clip_path)
+		return cli_error(request.command, .Storage, "allocation_failed", "Unable to store the exported clip")
+	}
+	append(&state.clips, copy)
 	if !save_library() {
-		stored := pop(&state.exercises)
-		delete_exercise(&stored)
-		_ = os.remove(exercise.clip_path)
+		stored := pop(&state.clips)
+		delete_clip(&stored)
+		_ = os.remove(clip.clip_path)
 		return cli_error(request.command, .Storage, "storage_failed", "The clip was created but the library update failed")
 	}
-	stored := &state.exercises[len(state.exercises)-1]
+	stored := &state.clips[len(state.clips)-1]
 	response := CLI_Clip_Create_Response{ok=true, command=cli_command_name(request.command), data=CLI_Clip_Create_Data{clip=cli_clip_output(stored)}}
 	return CLI_Result{output=cli_encode(response), exit_code=.Success}
 }
@@ -534,17 +579,21 @@ cli_clip_create :: proc(request: CLI_Request) -> CLI_Result {
 cli_clip_list :: proc(request: CLI_Request) -> CLI_Result {
 	filter := ""
 	if len(request.source_id) > 0 {
-		source := cli_find_source(request.source_id)
+		source := cli_find_source(request.source_id, request.workflow)
 		if source == nil {return cli_error(request.command, .Invalid, "source_not_found", "The source does not exist")}
 		filter = source.id
 	}
 	count := 0
-	for exercise in state.exercises {if len(filter) == 0 || exercise.source_id == filter {count += 1}}
+	for clip in state.clips {
+		if clip.workflow != request.workflow {continue}
+		if len(filter) == 0 || clip.source_id == filter {count += 1}
+	}
 	outputs := make([]CLI_Clip_Output, count, context.temp_allocator)
 	index := 0
-	for &exercise in state.exercises {
-		if len(filter) > 0 && exercise.source_id != filter {continue}
-		outputs[index] = cli_clip_output(&exercise)
+	for &clip in state.clips {
+		if clip.workflow != request.workflow {continue}
+		if len(filter) > 0 && clip.source_id != filter {continue}
+		outputs[index] = cli_clip_output(&clip)
 		index += 1
 	}
 	response := CLI_Clip_List_Response{ok=true, command=cli_command_name(request.command), data=CLI_Clip_List_Data{clips=outputs}}
