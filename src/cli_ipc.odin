@@ -48,6 +48,9 @@ CLI_IPC_Response :: struct {
 CLI_IPC_Work :: struct {
 	request: CLI_Request,
 	result: CLI_Result,
+	mutex: sync.Mutex,
+	condition: sync.Cond,
+	completed: bool,
 }
 
 CLI_IPC_State :: struct {
@@ -61,6 +64,34 @@ cli_library_owner: CLI_Library_Owner
 cli_ipc_state := CLI_IPC_State{listen_fd=-1, active_client_fd=-1}
 cli_ipc_state_mutex: sync.Mutex
 cli_ipc_work: ^CLI_IPC_Work
+
+cli_ipc_work_finish :: proc(work: ^CLI_IPC_Work, result: CLI_Result) {
+	if work == nil {
+		delete(result.output)
+		return
+	}
+	sync.mutex_lock(&work.mutex)
+	if work.completed {
+		sync.mutex_unlock(&work.mutex)
+		delete(result.output)
+		return
+	}
+	work.result = result
+	work.completed = true
+	sync.cond_broadcast(&work.condition)
+	sync.mutex_unlock(&work.mutex)
+}
+
+cli_ipc_work_wait :: proc(work: ^CLI_IPC_Work) {
+	if work == nil {
+		return
+	}
+	sync.mutex_lock(&work.mutex)
+	for !work.completed {
+		sync.cond_wait(&work.condition, &work.mutex)
+	}
+	sync.mutex_unlock(&work.mutex)
+}
 
 cli_lock_path :: proc() -> string {
 	return fmt.tprintf("%s/library.lock", app_support_dir())
@@ -234,12 +265,21 @@ on_cli_ipc_request :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if cli_ipc_work == nil {return}
-	cli_ipc_work.result = cli_execute(cli_ipc_work.request)
+	if cli_ipc_work.request.command == .Source_Add &&
+	   cli_source_add_enqueue(cli_ipc_work.request, cli_ipc_work) {
+		return
+	}
+	if cli_ipc_work.request.command == .Clip_Create &&
+	   cli_clip_create_enqueue(cli_ipc_work.request, cli_ipc_work) {
+		return
+	}
+	result := cli_execute(cli_ipc_work.request)
 	if cli_command_mutates_library(cli_ipc_work.request.command) {
 		refresh_sources()
 		refresh_clips()
 		ui.needs_redraw = true
 	}
+	cli_ipc_work_finish(cli_ipc_work, result)
 }
 
 cli_ipc_serve_connection :: proc(
@@ -300,6 +340,7 @@ cli_ipc_serve_connection :: proc(
 		nil,
 		true,
 	)
+	cli_ipc_work_wait(&work)
 	cli_ipc_work = nil
 	defer delete(work.result.output)
 	_ = cli_ipc_send_result(fd, work.result)

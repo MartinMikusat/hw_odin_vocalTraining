@@ -13,6 +13,7 @@ import "core:sync"
 import "base:runtime"
 import mem_virtual "core:mem/virtual"
 import match_sorter "match_sorter:."
+import task_queue "task_queue:."
 
 Id  :: rawptr
 Sel :: rawptr
@@ -183,9 +184,12 @@ Import_Phase :: enum {
 }
 
 Import_Job :: struct {
-	thread: ^thread.Thread,
+	task_id: task_queue.Task_ID,
 	completion_target: Id,
 	arena: ^mem_virtual.Arena,
+	operation_id: u64,
+	progress_path: string,
+	log_path: string,
 	input: string,
 	workflow: Workflow_Kind,
 	sources: [dynamic]Source_Video,
@@ -225,6 +229,11 @@ Import_Job :: struct {
 	recovery_index: int,
 	recovery_total: int,
 	reuse_existing_media: bool,
+	applied_source_index: int,
+	cli_work: ^CLI_IPC_Work,
+	cli_existing_source: bool,
+	cli_existing_hint_count: int,
+	completion: Media_Task_Completion,
 }
 
 Import_Quality :: struct {
@@ -241,9 +250,10 @@ Export_Operation :: enum {
 }
 
 Export_Job :: struct {
-	thread: ^thread.Thread,
+	task_id: task_queue.Task_ID,
 	completion_target: Id,
 	arena: ^mem_virtual.Arena,
+	operation_id: u64,
 	clip: Clip,
 	source_path: string,
 	log_path: string,
@@ -251,6 +261,12 @@ Export_Job :: struct {
 	notification_id: i64,
 	draft_revision: i64,
 	success: bool,
+	process_mutex: sync.Mutex,
+	process: os2.Process,
+	has_process: bool,
+	cancelled: bool,
+	cli_work: ^CLI_IPC_Work,
+	completion: Media_Task_Completion,
 }
 
 Library_Recovery_Entry :: struct {
@@ -269,6 +285,18 @@ Library_Recovery :: struct {
 }
 
 library_recovery: ^Library_Recovery
+
+Library_Replacement_Job :: struct {
+	task_id: task_queue.Task_ID,
+	library: App_State,
+	scope: Portable_Library_Scope,
+	allow_without_backup: bool,
+	notification_id: i64,
+	cancelled: bool,
+	completion: Media_Task_Completion,
+}
+
+library_replacement_job: ^Library_Replacement_Job
 pending_library_import: App_State
 pending_library_import_scope: Portable_Library_Scope
 
@@ -282,11 +310,11 @@ Source_Metadata_Job :: struct {
 	metadata_loaded: bool,
 }
 
-import_job: ^Import_Job
 export_jobs: [dynamic]^Export_Job
 export_completed_jobs: [dynamic]^Export_Job
 export_completion_mutex: sync.Mutex
 source_metadata_job: ^Source_Metadata_Job
+media_operation_sequence: u64
 
 msg_id :: proc(receiver: Id, selector: Sel) -> Id {
 	p := transmute(proc "c" (Id, Sel) -> Id)send_address
@@ -570,11 +598,39 @@ diagnostic_log_path :: proc(name: string) -> string {
 	return fmt.tprintf("%s/%s.log", app_support_dir(), name)
 }
 
-clip_export_log_path :: proc(clip_id: string) -> string {
+next_media_operation_id :: proc() -> u64 {
+	media_operation_sequence += 1
+	return media_operation_sequence
+}
+
+clip_export_log_path :: proc(clip_id: string, operation_id: u64 = 0) -> string {
+	if operation_id > 0 {
+		return fmt.tprintf(
+			"%s/ffmpeg-%s-%020d.log",
+			app_support_dir(),
+			clip_id,
+			operation_id,
+		)
+	}
 	return fmt.tprintf("%s/ffmpeg-%s.log", app_support_dir(), clip_id)
 }
 
-import_progress_path :: proc() -> string {
+import_log_path :: proc(operation_id: u64) -> string {
+	return fmt.tprintf(
+		"%s/yt-dlp-%020d.log",
+		app_support_dir(),
+		operation_id,
+	)
+}
+
+import_progress_path :: proc(operation_id: u64 = 0) -> string {
+	if operation_id > 0 {
+		return fmt.tprintf(
+			"%s/yt-dlp-progress-%020d.log",
+			app_support_dir(),
+			operation_id,
+		)
+	}
 	return fmt.tprintf("%s/yt-dlp-progress.log", app_support_dir())
 }
 
@@ -646,37 +702,41 @@ import_progress_status :: proc(job: ^Import_Job, contents: string) -> string {
 }
 
 refresh_import_progress :: proc() {
-	if import_job == nil {return}
-	contents, _ := os.read_entire_file(import_progress_path(), context.temp_allocator)
-	status := import_progress_status(import_job, string(contents))
-	if import_job.notification_id != 0 {
-		phase := import_job_phase(import_job)
+	for job in import_jobs {
+		contents, _ := os.read_entire_file(
+			job.progress_path,
+			context.temp_allocator,
+		)
+		status := import_progress_status(job, string(contents))
+		if job.notification_id == 0 {
+			set_text(state.status, status)
+			continue
+		}
+		phase := import_job_phase(job)
 		source_progress := ""
-		if import_job.library_recovery_source {
+		if job.library_recovery_source {
 			source_progress = fmt.tprintf(
 				"%d of %d",
-				import_job.recovery_index,
-				import_job.recovery_total,
+				job.recovery_index,
+				job.recovery_total,
 			)
 		}
 		fields := [3]Notification_Field{
-			{label="Operation", value=import_job.library_recovery_source ? "Library recovery" : "Media import"},
+			{label="Operation", value=job.library_recovery_source ? "Library recovery" : "Media import"},
 			{label="Source", value=source_progress},
 			{label="Phase", value=fmt.tprintf("%v", phase)},
 		}
-		phase_changed := !import_job.has_notification_phase ||
-		                 import_job.last_notification_phase != phase
-		import_job.last_notification_phase = phase
-		import_job.has_notification_phase = true
+		phase_changed := !job.has_notification_phase ||
+		                 job.last_notification_phase != phase
+		job.last_notification_phase = phase
+		job.has_notification_phase = true
 		_ = notification_update(
-			import_job.notification_id,
+			job.notification_id,
 			status,
 			"The application validates local media, downloads missing media, and rebuilds saved clips.",
 			fields[:],
 			persist_now = phase_changed,
 		)
-	} else {
-		set_text(state.status, status)
 	}
 }
 
@@ -1384,7 +1444,6 @@ refresh_clips :: proc() {
 on_transcribe :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if import_job != nil { set_text(state.status, "Wait for the active import to finish"); return }
 	if state.active_source < 0 { set_text(state.status, "Import or select a source first"); return }
 	source := &state.sources[state.active_source]
 	count := load_youtube_transcript(source)
@@ -1422,6 +1481,57 @@ export_clip :: proc(
 	return run(c_command) == 0
 }
 
+export_job_cancel :: proc(job: ^Export_Job) {
+	if job == nil {
+		return
+	}
+	sync.mutex_lock(&job.process_mutex)
+	job.cancelled = true
+	if job.has_process {
+		_ = kill(i32(job.process.pid), 15)
+	}
+	sync.mutex_unlock(&job.process_mutex)
+}
+
+export_job_execute :: proc(job: ^Export_Job) -> bool {
+	allocator := mem_virtual.arena_allocator(job.arena)
+	dir := workflow_clip_directory(job.clip.workflow)
+	os.make_directory(dir)
+	job.clip.clip_path = fmt.aprintf(
+		"%s/%s.mp4",
+		dir,
+		job.clip.id,
+		allocator = allocator,
+	)
+	command := clip_export_command(
+		job.source_path,
+		job.clip.clip_path,
+		job.clip.start_seconds,
+		job.clip.end_seconds,
+		log_path = job.log_path,
+	)
+	arguments := []string{"/bin/sh", "-c", command}
+	process, start_error := os2.process_start({command = arguments})
+	if start_error != nil {
+		return false
+	}
+	sync.mutex_lock(&job.process_mutex)
+	job.process = process
+	job.has_process = true
+	cancelled := job.cancelled
+	if cancelled {
+		_ = kill(i32(process.pid), 15)
+	}
+	sync.mutex_unlock(&job.process_mutex)
+	process_state, wait_error := os2.process_wait(process)
+	_ = os2.process_close(process)
+	sync.mutex_lock(&job.process_mutex)
+	job.has_process = false
+	cancelled = job.cancelled
+	sync.mutex_unlock(&job.process_mutex)
+	return !cancelled && wait_error == nil && process_state.success
+}
+
 import_job_destroy :: proc(job: ^Import_Job) {
 	if job == nil { return }
 	transcript_generation_destroy(&job.snapshot_transcripts)
@@ -1441,6 +1551,16 @@ import_job_create :: proc(
 	job.arena = arena
 	job.completion_target = state.delegate_target
 	allocator := mem_virtual.arena_allocator(arena)
+	job.operation_id = next_media_operation_id()
+	job.progress_path = strings.clone(
+		import_progress_path(job.operation_id),
+		allocator,
+	)
+	job.log_path = strings.clone(
+		import_log_path(job.operation_id),
+		allocator,
+	)
+	job.applied_source_index = -1
 	job.input = strings.clone(input, allocator)
 	job.workflow = workflow
 	job.replace_video_id = strings.clone(replace_video_id, allocator)
@@ -1562,21 +1682,21 @@ import_job_auth_browser :: proc(job: ^Import_Job) -> Source_Auth_Browser {
 	return .None
 }
 
-staged_source_cleanup :: proc(directory, video_id: string) {
+staged_source_cleanup :: proc(directory, staging_name: string) {
 	handle, open_error := os.open(directory)
 	if open_error != nil {return}
 	defer os.close(handle)
 	entries, read_error := os.read_dir(handle, -1, context.temp_allocator)
 	if read_error != nil {return}
-	prefix := fmt.tprintf("%s.download.", video_id)
+	prefix := fmt.tprintf("%s.", staging_name)
 	for entry in entries {
 		if strings.has_prefix(entry.name, prefix) {_ = os.remove(fmt.tprintf("%s/%s", directory, entry.name))}
 	}
 }
 
-staged_source_validate :: proc(directory, video_id: string) -> bool {
-	media_path := fmt.tprintf("%s/%s.download.mp4", directory, video_id)
-	info_path := fmt.tprintf("%s/%s.download.info.json", directory, video_id)
+staged_source_validate :: proc(directory, staging_name: string) -> bool {
+	media_path := fmt.tprintf("%s/%s.mp4", directory, staging_name)
+	info_path := fmt.tprintf("%s/%s.info.json", directory, staging_name)
 	bytes, read_ok := os.read_entire_file(info_path, context.temp_allocator)
 	if !read_ok {return false}
 	metadata: YTDLP_Metadata
@@ -1595,14 +1715,18 @@ media_file_validate :: proc(media_path: string) -> bool {
 	return process_error == nil && process_state.success && streams_ok
 }
 
-staged_source_commit :: proc(directory, video_id: string) -> bool {
+staged_source_commit :: proc(
+	directory,
+	staging_name,
+	video_id: string,
+) -> bool {
 	handle, open_error := os.open(directory)
 	if open_error != nil {return false}
 	defer os.close(handle)
 	entries, read_error := os.read_dir(handle, -1, context.temp_allocator)
 	if read_error != nil {return false}
-	prefix := fmt.tprintf("%s.download.", video_id)
-	media_name := fmt.tprintf("%s.download.mp4", video_id)
+	prefix := fmt.tprintf("%s.", staging_name)
+	media_name := fmt.tprintf("%s.mp4", staging_name)
 	for entry in entries {
 		if !strings.has_prefix(entry.name, prefix) || entry.name == media_name {continue}
 		suffix := entry.name[len(prefix):]
@@ -1618,10 +1742,10 @@ import_job_run_download :: proc(
 	exact_height := false,
 	auth_browser := Source_Auth_Browser.None,
 ) -> bool {
-	progress_file, progress_error := os2.open(import_progress_path(), {.Write, .Create, .Trunc, .Inheritable})
+	progress_file, progress_error := os2.open(job.progress_path, {.Write, .Create, .Trunc, .Inheritable})
 	if progress_error != nil {return false}
 	defer os2.close(progress_file)
-	log_file, log_error := os2.open(diagnostic_log_path("yt-dlp"), {.Write, .Create, .Append, .Inheritable})
+	log_file, log_error := os2.open(job.log_path, {.Write, .Create, .Append, .Inheritable})
 	if log_error != nil {return false}
 	defer os2.close(log_file)
 	import_job_set_phase(job, .Downloading)
@@ -1706,6 +1830,7 @@ import_job_rebuild_clips :: proc(job: ^Import_Job, source: ^Source_Video) {
 			clip.clip_path,
 			clip.start_seconds,
 			clip.end_seconds,
+			log_path = job.log_path,
 		)
 		c_command := strings.clone_to_cstring(command)
 		result := run(c_command)
@@ -1748,8 +1873,13 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 
 	source_directory := workflow_source_directory(job.workflow)
 	os.make_directory(source_directory)
-	staged_source_cleanup(source_directory, video_id)
-	output := fmt.tprintf("%s/%s.download.%%(ext)s", source_directory, video_id)
+	staging_name := fmt.tprintf(
+		"%s.download-%020d",
+		video_id,
+		job.operation_id,
+	)
+	staged_source_cleanup(source_directory, staging_name)
+	output := fmt.tprintf("%s/%s.%%(ext)s", source_directory, staging_name)
 	selected_height, exact_height, auth_browser :=
 		import_job_selected_quality(job, video_id)
 	if !import_job_run_download(
@@ -1760,13 +1890,14 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 		exact_height,
 		auth_browser,
 	) {
-		staged_source_cleanup(source_directory, video_id)
+		staged_source_cleanup(source_directory, staging_name)
 		return false
 	}
 	import_job_set_phase(job, .Validating_Downloaded_Media)
-	if !staged_source_validate(source_directory, video_id) || !staged_source_commit(source_directory, video_id) {
+	if !staged_source_validate(source_directory, staging_name) ||
+	   !staged_source_commit(source_directory, staging_name, video_id) {
 		job.invalid_merged_media += 1
-		staged_source_cleanup(source_directory, video_id)
+		staged_source_cleanup(source_directory, staging_name)
 		return false
 	}
 	media_path := fmt.tprintf("%s/%s.mp4", source_directory, video_id)
@@ -1831,16 +1962,14 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	return true
 }
 
-import_worker :: proc(t: ^thread.Thread) {
+import_job_execute :: proc(job: ^Import_Job) {
 	context = runtime.default_context()
-	job := cast(^Import_Job)t.data
 	for raw in strings.split_lines(job.input) {
 		if import_job_is_cancelled(job) {break}
 		url := strings.trim_space(raw)
 		if len(url) == 0 { continue }
 		if import_job_process_url(job, url) { job.accepted += 1 } else { job.failed += 1 }
 	}
-	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("importFinished:"), nil, false)
 }
 
 import_job_apply :: proc(job: ^Import_Job) -> bool {
@@ -1868,16 +1997,59 @@ import_job_apply :: proc(job: ^Import_Job) -> bool {
 	for source in job.new_sources {
 		copy, copied := clone_source_video(source)
 		if !copied {return false}
-		append(&candidate.sources, copy)
+		existing_index := source_index_for_video_id(
+			candidate.sources[:],
+			source.video_id,
+			source.workflow,
+		)
+		if existing_index >= 0 {
+			delete_source_video(&candidate.sources[existing_index])
+			candidate.sources[existing_index] = copy
+		} else {
+			append(&candidate.sources, copy)
+		}
 	}
 	for hint in job.new_hints {
+		duplicate := false
+		for current_hint in candidate.hints {
+			if current_hint.source_id == hint.source_id &&
+			   current_hint.seconds == hint.seconds {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
 		copy, copied := clone_import_hint(hint)
 		if !copied {return false}
 		append(&candidate.hints, copy)
 	}
 	if job.has_transcript_update {
-		transcripts, transcripts_copied := transcript_generation_copy(
-			job.transcripts.segments[:],
+		source_id := ""
+		if job.has_source_update &&
+		   job.updated_source.video_id == job.last_video_id {
+			source_id = job.updated_source.id
+		}
+		if len(source_id) == 0 {
+			for source in job.new_sources {
+				if source.video_id == job.last_video_id &&
+				   source.workflow == job.workflow {
+					source_id = source.id
+					break
+				}
+			}
+		}
+		if len(source_id) == 0 {
+			source_id = source_id_for_workflow(
+				job.workflow,
+				job.last_video_id,
+			)
+		}
+		transcripts, transcripts_copied := transcript_generation_replace_source(
+			&candidate.transcripts,
+			&job.transcripts,
+			source_id,
 		)
 		if !transcripts_copied {return false}
 		transcript_generation_destroy(&candidate.transcripts)
@@ -1893,7 +2065,7 @@ import_job_apply :: proc(job: ^Import_Job) -> bool {
 	for source, index in state.sources {
 		if source.workflow == job.workflow &&
 		   source.video_id == job.last_video_id {
-			last_imported_source = index
+			job.applied_source_index = index
 			break
 		}
 	}
@@ -1901,14 +2073,18 @@ import_job_apply :: proc(job: ^Import_Job) -> bool {
 	return true
 }
 
-on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
-	context = runtime.default_context()
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	job := import_job
-	if job == nil { return }
-	thread.join(job.thread)
-	thread.destroy(job.thread)
-	job.thread = nil
+finish_import_job :: proc(job: ^Import_Job) {
+	if job == nil {
+		return
+	}
+	defer {
+		_ = import_jobs_remove(job)
+		media_task_completion_finish(&job.completion)
+	}
+	if job.cli_work != nil {
+		cli_source_add_finish(job)
+		return
+	}
 	if job.library_recovery_source {
 		success := false
 		if !job.cancelled && job.accepted > 0 {
@@ -1920,14 +2096,10 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		}
 		cancelled := job.cancelled
 		if library_recovery == nil {
-			import_job = nil
-			import_job_destroy(job)
 			return
 		}
 		if cancelled {
 			library_recovery.cancelled = true
-			import_job = nil
-			import_job_destroy(job)
 			library_recovery_finish()
 			return
 		}
@@ -1945,14 +2117,8 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 				}
 			}
 		}
-		import_job = nil
-		import_job_destroy(job)
 		library_recovery_start_next()
 		return
-	}
-	defer {
-		import_job = nil
-		import_job_destroy(job)
 	}
 	if job.cancelled {
 		_ = notification_finish(
@@ -1968,9 +2134,9 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			if should_load_completed_source(
 				job.has_source_update,
 				state.active_source,
-				last_imported_source,
+				job.applied_source_index,
 			) {
-				load_source_player(last_imported_source)
+				load_source_player(job.applied_source_index)
 			}
 			refresh_sources()
 		} else {
@@ -1985,8 +2151,12 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	}
 	if job.failed > 0 {
 		if len(job.replace_video_id) > 0 &&
-		   should_load_completed_source(true, state.active_source, last_imported_source) {
-			load_source_player(last_imported_source)
+		   should_load_completed_source(
+				true,
+				state.active_source,
+				job.applied_source_index,
+		   ) {
+			load_source_player(job.applied_source_index)
 		}
 		if job.invalid_merged_media > 0 {
 			_ = notification_finish(
@@ -2000,21 +2170,22 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 				job.notification_id,
 				.Error,
 				"Import failed: yt-dlp did not create the merged MP4",
-				fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("yt-dlp")),
+				fmt.tprintf("Inspect the diagnostic log at %s", job.log_path),
 			)
-		} else if len(job.replace_video_id) > 0 && last_imported_source >= 0 {
+		} else if len(job.replace_video_id) > 0 &&
+		          job.applied_source_index >= 0 {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
 				"Refetch failed",
-				fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("yt-dlp")),
+				fmt.tprintf("Inspect the diagnostic log at %s", job.log_path),
 			)
 		} else {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
 				fmt.tprintf("Imported %d source(s); %d failed", job.accepted, job.failed),
-				fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("yt-dlp")),
+				fmt.tprintf("Inspect the diagnostic log at %s", job.log_path),
 			)
 		}
 	} else if job.has_source_update {
@@ -2026,7 +2197,7 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 					"Refetched source; %d clip rebuild(s) failed",
 					job.failed_clip_refreshes,
 				),
-				fmt.tprintf("Inspect the diagnostic log at %s", diagnostic_log_path("ffmpeg")),
+				fmt.tprintf("Inspect the diagnostic log at %s", job.log_path),
 			)
 		} else {
 			_ = notification_finish(
@@ -2062,6 +2233,21 @@ on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		set_status_source(job.updated_source.video_id)
 	} else if job.failed > 0 && len(job.replace_video_id) > 0 {
 		set_status_source(job.replace_video_id)
+	}
+}
+
+on_import_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	for {
+		sync.mutex_lock(&import_completion_mutex)
+		if len(import_completed_jobs) == 0 {
+			sync.mutex_unlock(&import_completion_mutex)
+			break
+		}
+		job := pop(&import_completed_jobs)
+		sync.mutex_unlock(&import_completion_mutex)
+		finish_import_job(job)
 	}
 }
 
@@ -2228,7 +2414,7 @@ source_index_for_video_id :: proc(
 }
 
 library_recovery_start_next :: proc() {
-	if library_recovery == nil || import_job != nil {return}
+	if library_recovery == nil {return}
 	for library_recovery.next < len(library_recovery.entries) {
 		entry_index := library_recovery.next
 		entry := library_recovery.entries[entry_index]
@@ -2269,18 +2455,13 @@ library_recovery_start_next :: proc() {
 				},
 			)
 		}
-		worker := thread.create(import_worker)
-		if worker == nil {
+		if !media_queue_schedule_import(job, barrier = true) {
 			import_job_destroy(job)
 			library_recovery.failed += 1
 			continue
 		}
-		job.thread = worker
-		worker.data = job
-		import_job = job
 		os.make_directory(app_support_dir())
-		_ = os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
-		_ = os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
+		_ = os.write_entire_file(job.log_path, nil)
 		fields := [3]Notification_Field{
 			{label="Operation", value="Library recovery"},
 			{label="Source", value=fmt.tprintf("%d of %d", entry_index + 1, len(library_recovery.entries))},
@@ -2298,14 +2479,13 @@ library_recovery_start_next :: proc() {
 			fields[:],
 			persist_now = true,
 		)
-		thread.start(worker)
 		return
 	}
 	library_recovery_finish()
 }
 
 library_recovery_start :: proc() -> bool {
-	if library_recovery != nil || import_job != nil {return false}
+	if library_recovery != nil {return false}
 	if len(state.sources) == 0 {
 		set_success_status("Library imported")
 		return true
@@ -2394,14 +2574,8 @@ refetch_source :: proc(
 	maximum_height := 0,
 	auth_browser := Source_Auth_Browser.None,
 ) {
-	if source_import_media_job_blocks(true) {
-		if import_job != nil {
-			set_text(state.status, "An import is already running")
-		} else if library_recovery != nil {
-			set_text(state.status, "Wait for the active library recovery to finish")
-		} else {
-			set_text(state.status, "Wait for the active clip exports to finish")
-		}
+	if library_replacement_job != nil {
+		set_text(state.status, "Wait for the queued library replacement")
 		return
 	}
 	if source_index < 0 || source_index >= len(state.sources) { set_text(state.status, "Select a source to refetch"); return }
@@ -2420,6 +2594,7 @@ refetch_source :: proc(
 	job := import_job_create(source.url, source.video_id, source.workflow)
 	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
 	job.allow_without_backup = allow_without_backup
+	job.applied_source_index = source_index
 	if maximum_height > 0 {
 		allocator := mem_virtual.arena_allocator(job.arena)
 		append(
@@ -2431,10 +2606,6 @@ refetch_source :: proc(
 			},
 		)
 	}
-	worker := thread.create(import_worker)
-	if worker == nil { import_job_destroy(job); set_text(state.status, "Unable to start import worker"); return }
-	job.thread = worker
-	worker.data = job
 	fields := [2]Notification_Field{
 		{label="Operation", value="Source refetch"},
 		{label="Source", value=source.title},
@@ -2465,13 +2636,14 @@ refetch_source :: proc(
 		detail,
 		fields[:],
 	)
-	import_job = job
-	last_imported_source = source_index
-	if state.active_source == source_index {metal_player_clear()}
 	os.make_directory(app_support_dir())
-	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
-	os.write_entire_file(diagnostic_log_path("ffmpeg"), nil)
-	thread.start(worker)
+	os.write_entire_file(job.log_path, nil)
+	if !media_queue_schedule_import(job, barrier = true) {
+		import_job_destroy(job)
+		set_text(state.status, "Unable to queue the source refetch")
+		return
+	}
+	set_text(state.status, "Source refetch queued")
 }
 
 on_refetch_source :: proc "c" (self: Id, command: Sel, sender: Id) {
@@ -2483,17 +2655,8 @@ on_refetch_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	refetching := ui.source_modal_refetch_index >= 0
-	if source_import_media_job_blocks(refetching) {
-		if import_job != nil {
-			set_text(state.status, "An import is already running")
-		} else if library_recovery != nil {
-			set_text(state.status, "Wait for the active library recovery to finish")
-		} else if refetching {
-			set_text(state.status, "Wait for the active clip exports to finish")
-		} else {
-			set_text(state.status, "Wait for the active preview or repair to finish")
-		}
+	if library_replacement_job != nil {
+		set_text(state.status, "Wait for the queued library replacement")
 		return
 	}
 	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
@@ -2520,32 +2683,62 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if !major_change_backup_preflight(.Source_Import) {return}
 	allow_without_backup := major_change_backup_override
 	major_change_backup_override = false
-	job := import_job_create(input)
-	if job == nil { set_text(state.status, "Unable to allocate import job"); return }
-	job.allow_without_backup = allow_without_backup
-	worker := thread.create(import_worker)
-	if worker == nil { import_job_destroy(job); set_text(state.status, "Unable to start import worker"); return }
-	job.thread = worker
-	worker.data = job
-	summary := "Downloading video and YouTube captions..."
-	detail := "The application downloads each selected source sequentially and validates the merged media before updating the library."
-	if auth_browser := import_job_auth_browser(job); auth_browser != .None {
-		browser_name := source_auth_browser_name(auth_browser)
-		summary = fmt.tprintf(
-			"Downloading with %s session...",
-			browser_name,
-		)
-		detail = fmt.tprintf(
-			"You selected %s. yt-dlp reads its YouTube session for this download. The application does not store or export browser cookies.",
-			browser_name,
-		)
-	}
-	job.notification_id = notification_begin(summary, detail)
-	import_job = job
 	os.make_directory(app_support_dir())
-	os.write_entire_file(diagnostic_log_path("yt-dlp"), nil)
-	thread.start(worker)
+	queued := 0
+	for raw in strings.split_lines(input) {
+		url := strings.trim_space(raw)
+		if len(url) == 0 {
+			continue
+		}
+		job := import_job_create(url)
+		if job == nil {
+			continue
+		}
+		job.allow_without_backup = allow_without_backup
+		summary := "Source download queued"
+		detail := "The queue runs up to two source downloads and validates each result before updating the library."
+		if auth_browser := import_job_auth_browser(job);
+		   auth_browser != .None {
+			browser_name := source_auth_browser_name(auth_browser)
+			summary = fmt.tprintf(
+				"Source download queued with %s session",
+				browser_name,
+			)
+			detail = fmt.tprintf(
+				"You selected %s. yt-dlp reads its YouTube session for this download. The application does not store or export browser cookies.",
+				browser_name,
+			)
+		}
+		fields := [1]Notification_Field{
+			{label = "URL", value = url},
+		}
+		job.notification_id = notification_begin(
+			summary,
+			detail,
+			fields[:],
+		)
+		os.write_entire_file(job.log_path, nil)
+		if !media_queue_schedule_import(job) {
+			_ = notification_finish(
+				job.notification_id,
+				.Error,
+				"Unable to queue source download",
+			)
+			import_job_destroy(job)
+			continue
+		}
+		queued += 1
+	}
+	if queued == 0 {
+		set_text(state.status, "Unable to queue the source download")
+		return
+	}
 	close_source_modal()
+	status := "Queued 1 source download"
+	if queued > 1 {
+		status = fmt.tprintf("Queued %d source downloads", queued)
+	}
+	set_text(state.status, status)
 }
 
 on_set_start :: proc "c" (self: Id, command: Sel, sender: Id) {
@@ -2605,22 +2798,22 @@ export_jobs_have_exclusive_operation :: proc() -> bool {
 	return false
 }
 
-source_import_media_job_blocks :: proc(refetching: bool) -> bool {
-	if import_job != nil || library_recovery != nil {return true}
-	if refetching {return export_jobs_any()}
-	return export_jobs_have_exclusive_operation()
+source_import_media_job_blocks :: proc() -> bool {
+	return library_replacement_job != nil
 }
 
 import_job_has_exclusive_operation :: proc() -> bool {
-	return import_job != nil &&
-	       (import_job.library_recovery_source ||
-	        len(import_job.replace_video_id) > 0)
+	for job in import_jobs {
+		if job.library_recovery_source ||
+		   len(job.replace_video_id) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 clip_save_media_job_blocks :: proc() -> bool {
-	return library_recovery != nil ||
-	       import_job_has_exclusive_operation() ||
-	       export_jobs_have_exclusive_operation()
+	return library_replacement_job != nil
 }
 
 export_jobs_add :: proc(job: ^Export_Job) {
@@ -2662,12 +2855,8 @@ next_clip_number_for_export :: proc(source: ^Source_Video) -> int {
 on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if clip_save_media_job_blocks() {
-		if library_recovery != nil || import_job_has_exclusive_operation() {
-			set_text(state.status, "Wait for the active source refetch or recovery to finish")
-		} else {
-			set_text(state.status, "Wait for the active preview or repair to finish")
-		}
+	if library_replacement_job != nil {
+		set_text(state.status, "Wait for the queued library replacement")
 		return
 	}
 	if !flush_active_clip_draft() {return}
@@ -2712,9 +2901,12 @@ on_save :: proc "c" (self: Id, command: Sel, sender: Id) {
 		"FFmpeg is encoding the selected source range as a standalone clip.",
 		fields[:],
 	)
-	export_jobs_add(job)
 	os.write_entire_file(job.log_path, nil)
-	thread.start(job.thread)
+	if !media_queue_schedule_export(job) {
+		export_job_destroy(job)
+		set_text(state.status, "Unable to queue the clip export")
+		return
+	}
 }
 
 on_play :: proc "c" (self: Id, command: Sel, sender: Id) {
@@ -2751,8 +2943,8 @@ on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
 on_preview :: proc "c" (self: Id, command: Sel, sender: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if export_jobs_any() {
-		set_text(state.status, "Wait for the active clip exports to finish")
+	if library_replacement_job != nil {
+		set_text(state.status, "Wait for the queued library replacement")
 		return
 	}
 	if !require_helper("ffmpeg") { return }
@@ -2786,9 +2978,12 @@ on_preview :: proc "c" (self: Id, command: Sel, sender: Id) {
 		"FFmpeg is encoding a temporary preview for the selected range.",
 		fields[:],
 	)
-	export_jobs_add(job)
 	os.write_entire_file(job.log_path, nil)
-	thread.start(job.thread)
+	if !media_queue_schedule_export(job, barrier = true) {
+		export_job_destroy(job)
+		set_text(state.status, "Unable to queue the range preview")
+		return
+	}
 }
 
 export_job_destroy :: proc(job: ^Export_Job) {
@@ -2809,36 +3004,18 @@ export_job_create :: proc(
 	job.arena = arena
 	job.completion_target = state.delegate_target
 	allocator := mem_virtual.arena_allocator(arena)
+	job.operation_id = next_media_operation_id()
 	copy, copied := clone_clip(clip, allocator)
 	if !copied { export_job_destroy(job); return nil }
 	job.clip = copy
 	job.source_path = strings.clone(source_path, allocator)
 	job.log_path = strings.clone(
-		clip_export_log_path(job.clip.id),
+		clip_export_log_path(job.clip.id, job.operation_id),
 		allocator,
 	)
 	job.operation = operation
 	job.draft_revision = draft_revision
-	worker := thread.create(export_worker)
-	if worker == nil { export_job_destroy(job); return nil }
-	job.thread = worker
-	worker.data = job
 	return job
-}
-
-export_worker :: proc(t: ^thread.Thread) {
-	context = runtime.default_context()
-	job := cast(^Export_Job)t.data
-	job.success = export_clip(
-		&job.clip,
-		job.source_path,
-		mem_virtual.arena_allocator(job.arena),
-		job.log_path,
-	)
-	sync.mutex_lock(&export_completion_mutex)
-	append(&export_completed_jobs, job)
-	sync.mutex_unlock(&export_completion_mutex)
-	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("exportFinished:"), nil, false)
 }
 
 repair_clip_apply :: proc(value: Clip) -> (int, bool) {
@@ -2887,10 +3064,18 @@ save_export_apply :: proc(job: ^Export_Job) -> bool {
 
 finish_export_job :: proc(job: ^Export_Job) {
 	if job == nil {return}
-	if job.thread != nil {
-		thread.join(job.thread)
-		thread.destroy(job.thread)
-		job.thread = nil
+	if job.cli_work != nil {
+		cli_clip_create_finish(job)
+		return
+	}
+	if job.cancelled {
+		_ = notification_finish(
+			job.notification_id,
+			.Interrupted,
+			"Media export stopped",
+			"The user stopped the queued media operation.",
+		)
+		return
 	}
 	if !job.success {
 		_ = notification_finish(
@@ -2994,7 +3179,7 @@ on_export_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		sync.mutex_unlock(&export_completion_mutex)
 		if !export_jobs_remove(job) {continue}
 		finish_export_job(job)
-		export_job_destroy(job)
+		media_task_completion_finish(&job.completion)
 	}
 }
 
@@ -3029,8 +3214,8 @@ play_clip :: proc(index: int) -> bool {
 		ui.playback_rate = clamp_playback_rate(clip.dance_playback_rate)
 	}
 	if !os.exists(clip.clip_path) {
-		if export_jobs_any() {
-			set_text(state.status, "Wait for the active clip export to finish")
+		if library_replacement_job != nil {
+			set_text(state.status, "Wait for the queued library replacement")
 			return false
 		}
 		source_index := source_index_for_id(state.sources[:], clip.source_id)
@@ -3062,9 +3247,12 @@ play_clip :: proc(index: int) -> bool {
 			"FFmpeg is recreating the saved clip from its original source range.",
 			fields[:],
 		)
-		export_jobs_add(job)
 		os.write_entire_file(job.log_path, nil)
-		thread.start(job.thread)
+		if !media_queue_schedule_export(job, barrier = true) {
+			export_job_destroy(job)
+			set_text(state.status, "Unable to queue the clip rebuild")
+			return false
+		}
 		return true
 	}
 	if !metal_player_load(clip.clip_path) {
@@ -3396,11 +3584,7 @@ on_open_data_folder :: proc "c" (self: Id, command: Sel, sender: Id) {
 }
 
 library_transfer_busy :: proc() -> bool {
-	return import_job != nil ||
-	       export_jobs_any() ||
-	       source_probe_job != nil ||
-	       source_metadata_job != nil ||
-	       library_recovery != nil
+	return library_replacement_job != nil
 }
 
 library_panel_path :: proc(
@@ -3447,10 +3631,6 @@ library_panel_path :: proc(
 export_library_with_panel :: proc(
 	scope := Portable_Library_Scope.All,
 ) {
-	if library_transfer_busy() {
-		set_error_status("Wait for the active media or metadata operation")
-		return
-	}
 	path, selected := library_panel_path(true, scope)
 	if !selected {return}
 	defer delete(path)
@@ -3464,10 +3644,6 @@ export_library_with_panel :: proc(
 }
 
 prepare_library_import_with_panel :: proc() {
-	if library_transfer_busy() {
-		set_error_status("Wait for the active media or metadata operation")
-		return
-	}
 	path, selected := library_panel_path(false)
 	if !selected {return}
 	defer delete(path)
@@ -3486,20 +3662,69 @@ prepare_library_import_with_panel :: proc() {
 
 confirm_library_import :: proc() {
 	if library_transfer_busy() {
-		set_error_status("Wait for the active media or metadata operation")
+		set_error_status("A library replacement is already queued")
 		return
 	}
 	if !flush_active_clip_draft() {return}
 	if !major_change_backup_preflight(.Library_Replacement) {return}
 	allow_without_backup := major_change_backup_override
 	major_change_backup_override = false
+	job := new(Library_Replacement_Job)
+	copy, copied := app_state_collections_clone(&pending_library_import)
+	if !copied {
+		free(job)
+		set_error_status("Unable to allocate the queued library replacement")
+		return
+	}
+	job.library = copy
+	job.scope = pending_library_import_scope
+	job.allow_without_backup = allow_without_backup
+	job.notification_id = notification_begin(
+		"Library replacement queued",
+		"The media queue will finish earlier tasks before it installs and recovers this library.",
+	)
+	library_replacement_job = job
+	ui.library_import_confirm_open = false
+	if !media_queue_schedule_library_replacement(job) {
+		library_replacement_job = nil
+		app_state_collections_destroy(&job.library)
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"Unable to queue the library replacement",
+		)
+		free(job)
+		set_error_status("Unable to queue the library replacement")
+		return
+	}
+	set_text(state.status, "Library replacement queued")
+}
+
+finish_library_replacement_job :: proc(job: ^Library_Replacement_Job) {
+	if job == nil {
+		return
+	}
+	if job.cancelled {
+		_ = notification_finish(
+			job.notification_id,
+			.Interrupted,
+			"Library replacement cancelled",
+		)
+		return
+	}
 	metal_player_clear()
 	if install_error := portable_library_install(
-		&pending_library_import,
-		pending_library_import_scope,
-		allow_without_backup,
+		&job.library,
+		job.scope,
+		job.allow_without_backup,
 	);
 	   install_error != .None {
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"Library replacement failed",
+			portable_library_error_text(install_error),
+		)
 		set_error_status(portable_library_error_text(install_error))
 		return
 	}
@@ -3519,19 +3744,38 @@ confirm_library_import :: proc() {
 	refresh_sources()
 	refresh_clips()
 	_ = database_clip_drafts_prune(library_database)
+	_ = notification_finish(
+		job.notification_id,
+		.Success,
+		"Library replacement installed",
+	)
 	_ = library_recovery_start()
 }
 
-jobs_shutdown :: proc() {
-	if source_probe_job != nil {
-		if source_probe_job.thread != nil {
-			thread.join(source_probe_job.thread)
-			thread.destroy(source_probe_job.thread)
-			source_probe_job.thread = nil
-		}
-		source_probe_job_destroy(source_probe_job)
-		source_probe_job = nil
+library_replacement_job_destroy :: proc(job: ^Library_Replacement_Job) {
+	if job == nil {
+		return
 	}
+	app_state_collections_destroy(&job.library)
+	free(job)
+}
+
+on_library_replacement_ready :: proc "c" (
+	self: Id,
+	command: Sel,
+	sender: Id,
+) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	job := library_replacement_job
+	library_replacement_job = nil
+	finish_library_replacement_job(job)
+	if job != nil {
+		media_task_completion_finish(&job.completion)
+	}
+}
+
+jobs_shutdown :: proc() {
 	if source_metadata_job != nil {
 		if source_metadata_job.thread != nil {
 			thread.join(source_metadata_job.thread)
@@ -3541,22 +3785,54 @@ jobs_shutdown :: proc() {
 		source_metadata_job_destroy(source_metadata_job)
 		source_metadata_job = nil
 	}
-	if import_job != nil {
-		import_job_cancel(import_job)
-		if import_job.thread != nil {
-			thread.join(import_job.thread)
-			thread.destroy(import_job.thread)
-			import_job.thread = nil
-		}
-		import_job_destroy(import_job)
-		import_job = nil
-	}
 	library_recovery_destroy()
+	if media_queue_initialized {
+		media_queue_begin_shutdown()
+		task_queue.queue_destroy(&media_queue, .Cancel_All)
+		media_queue_initialized = false
+	}
+	if source_probe_job != nil {
+		source_probe_job_destroy(source_probe_job)
+		source_probe_job = nil
+	}
+	if library_replacement_job != nil {
+		job := library_replacement_job
+		library_replacement_job = nil
+		job.cancelled = true
+		finish_library_replacement_job(job)
+		library_replacement_job_destroy(job)
+	}
+	for job in import_jobs {
+		if job.cli_work != nil {
+			cli_ipc_work_finish(
+				job.cli_work,
+				cli_error(
+					.Source_Add,
+					.Busy,
+					"app_stopping",
+					"The application stopped before the queued source import completed",
+				),
+			)
+		}
+		import_job_destroy(job)
+	}
+	delete(import_jobs)
+	import_jobs = nil
+	sync.mutex_lock(&import_completion_mutex)
+	delete(import_completed_jobs)
+	import_completed_jobs = nil
+	sync.mutex_unlock(&import_completion_mutex)
 	for job in export_jobs {
-		if job.thread != nil {
-			thread.join(job.thread)
-			thread.destroy(job.thread)
-			job.thread = nil
+		if job.cli_work != nil {
+			cli_ipc_work_finish(
+				job.cli_work,
+				cli_error(
+					.Clip_Create,
+					.Busy,
+					"app_stopping",
+					"The application stopped before the queued clip export completed",
+				),
+			)
 		}
 		export_job_destroy(job)
 	}
@@ -3588,8 +3864,8 @@ video_clips_process_main :: proc(args := os.args) {
 	defer source_probe_results_clear()
 	defer source_probe_cache_clear()
 	defer database_close()
-	defer jobs_shutdown()
 	defer cli_ipc_server_stop()
+	defer jobs_shutdown()
 	if !migrate_legacy_app_support_dir() {return}
 	configure_helper_path()
 	objc_handle := os.dlopen("/usr/lib/libobjc.A.dylib", os.RTLD_NOW)
@@ -3633,6 +3909,10 @@ video_clips_process_main :: proc(args := os.args) {
 		fmt.println(result.output)
 		delete(result.output)
 		os.exit(int(result.exit_code))
+	}
+	if !media_queue_init() {
+		fmt.eprintln("Unable to initialize the media task queue")
+		return
 	}
 	if !cli_library_try_acquire() {
 		fmt.eprintln("hw_videoClips is already running or the library is busy")

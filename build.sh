@@ -6,6 +6,7 @@ MATCH_SORTER_ROOT="$ROOT/../hw_odin_matchSorter"
 UI_FLASH_ROOT="$ROOT/../hw_odin_ui_flash"
 COMMAND_PALETTE_ROOT="$ROOT/../hw_odin_ui_commandPalette"
 COMPONENTS_ROOT="$ROOT/../hw_odin_ui_components"
+TASK_QUEUE_ROOT="$ROOT/../hw_odin_concurrency_taskQueue"
 FONT_ROOT="$ROOT/resources/fonts"
 ICON_ROOT="$ROOT/resources/icons/iconoir"
 if [ ! -f "$MATCH_SORTER_ROOT/match_sorter.odin" ]; then
@@ -22,6 +23,10 @@ if [ ! -f "$COMMAND_PALETTE_ROOT/command_palette.odin" ]; then
 fi
 if [ ! -f "$COMPONENTS_ROOT/text_input/text_input.odin" ]; then
   echo "[hw_videoClips] missing Odin UI components checkout: $COMPONENTS_ROOT" >&2
+  exit 1
+fi
+if [ ! -f "$TASK_QUEUE_ROOT/task_queue.odin" ]; then
+  echo "[hw_videoClips] missing Odin task queue checkout: $TASK_QUEUE_ROOT" >&2
   exit 1
 fi
 if [ ! -f "$FONT_ROOT/Iosevka-Regular.ttf" ]; then
@@ -72,6 +77,7 @@ odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
   -collection:flash="$UI_FLASH_ROOT" \
   -collection:command_palette="$COMMAND_PALETTE_ROOT" \
   -collection:components="$COMPONENTS_ROOT" \
+  -collection:task_queue="$TASK_QUEUE_ROOT" \
   -extra-linker-flags:"$PITCH_CAPTURE_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/Fonts"

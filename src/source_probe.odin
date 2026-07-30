@@ -5,9 +5,11 @@ import "core:fmt"
 import "core:os"
 import "core:os/os2"
 import "core:strings"
-import "core:thread"
+import "core:sync"
+import "core:sys/posix"
 import mem_virtual "core:mem/virtual"
 import "base:runtime"
+import task_queue "task_queue:."
 
 Source_Auth_Browser :: enum {
 	None,
@@ -144,8 +146,11 @@ Source_Probe_Result :: struct {
 }
 
 Source_Probe_Job :: struct {
-	thread: ^thread.Thread,
+	task_id: task_queue.Task_ID,
 	completion_target: Id,
+	operation_id: u64,
+	output_path: string,
+	log_path: string,
 	input: string,
 	cached_results: [dynamic]Source_Probe_Result,
 	results: [dynamic]Source_Probe_Result,
@@ -153,6 +158,11 @@ Source_Probe_Job :: struct {
 	auth_browser: Source_Auth_Browser,
 	used_saved_browser: bool,
 	save_browser_on_success: bool,
+	process_mutex: sync.Mutex,
+	process: os2.Process,
+	has_process: bool,
+	cancelled: bool,
+	completion: Media_Task_Completion,
 }
 
 source_probe_job: ^Source_Probe_Job
@@ -235,12 +245,34 @@ source_probe_cache_store :: proc(result: Source_Probe_Result) {
 
 source_probe_job_destroy :: proc(job: ^Source_Probe_Job) {
 	if job == nil {return}
+	if len(job.output_path) > 0 {
+		_ = os.remove(job.output_path)
+	}
+	delete(job.output_path)
+	delete(job.log_path)
 	delete(job.input)
 	for &result in job.cached_results {source_probe_result_destroy(&result)}
 	delete(job.cached_results)
 	for &result in job.results {source_probe_result_destroy(&result)}
 	delete(job.results)
 	free(job)
+}
+
+source_probe_job_cancel :: proc(job: ^Source_Probe_Job) {
+	if job == nil {return}
+	sync.mutex_lock(&job.process_mutex)
+	job.cancelled = true
+	if job.has_process {
+		_ = kill(i32(job.process.pid), 15)
+	}
+	sync.mutex_unlock(&job.process_mutex)
+}
+
+source_probe_job_is_cancelled :: proc(job: ^Source_Probe_Job) -> bool {
+	sync.mutex_lock(&job.process_mutex)
+	cancelled := job.cancelled
+	sync.mutex_unlock(&job.process_mutex)
+	return cancelled
 }
 
 source_probe_default_height :: proc(heights: []int) -> int {
@@ -271,6 +303,7 @@ source_probe_heights :: proc(formats: []Source_Probe_Format_JSON, allocator := c
 }
 
 source_probe_one :: proc(
+	job: ^Source_Probe_Job,
 	url: string,
 	auth_browser := Source_Auth_Browser.None,
 ) -> Source_Probe_Result {
@@ -283,11 +316,71 @@ source_probe_one :: proc(
 		auth_browser,
 		context.temp_allocator,
 	)
-	process_state, stdout, stderr, process_error := os2.process_exec(
-		{command=command[:]},
+	output_file, output_error := os2.open(
+		job.output_path,
+		{.Write, .Create, .Trunc, .Inheritable},
+	)
+	if output_error != nil {
+		result.error = strings.clone("METADATA UNAVAILABLE")
+		return result
+	}
+	log_start := 0
+	if log_info, stat_error := os.stat(
+		job.log_path,
+		context.temp_allocator,
+	); stat_error == nil {
+		log_start = int(log_info.size)
+	}
+	log_file, log_error := os2.open(
+		job.log_path,
+		{.Write, .Create, .Append, .Inheritable},
+	)
+	if log_error != nil {
+		_ = os2.close(output_file)
+		result.error = strings.clone("METADATA UNAVAILABLE")
+		return result
+	}
+	process, start_error := os2.process_start(
+		{command = command[:], stdout = output_file, stderr = log_file},
+	)
+	if start_error != nil {
+		_ = os2.close(output_file)
+		_ = os2.close(log_file)
+		result.error = strings.clone("METADATA UNAVAILABLE")
+		return result
+	}
+	sync.mutex_lock(&job.process_mutex)
+	job.process = process
+	job.has_process = true
+	cancelled := job.cancelled
+	if cancelled {
+		_ = kill(i32(process.pid), 15)
+	}
+	sync.mutex_unlock(&job.process_mutex)
+	process_state, wait_error := os2.process_wait(process)
+	_ = os2.process_close(process)
+	_ = os2.close(output_file)
+	_ = os2.close(log_file)
+	sync.mutex_lock(&job.process_mutex)
+	job.has_process = false
+	cancelled = job.cancelled
+	sync.mutex_unlock(&job.process_mutex)
+	stdout, stdout_ok := os.read_entire_file(
+		job.output_path,
 		context.temp_allocator,
 	)
-	if process_error != nil || !process_state.success {
+	stderr, _ := os.read_entire_file(
+		job.log_path,
+		context.temp_allocator,
+	)
+	if log_start >= 0 && log_start <= len(stderr) {
+		stderr = stderr[log_start:]
+	}
+	if cancelled {
+		result.error = strings.clone("METADATA CHECK STOPPED")
+		return result
+	}
+	if wait_error != nil || !process_state.success || !stdout_ok {
 		result.auth_required = source_probe_auth_required(string(stderr))
 		result.auth_browser = auth_browser
 		if result.auth_required {
@@ -316,12 +409,12 @@ source_probe_one :: proc(
 	return result
 }
 
-source_probe_worker :: proc(t: ^thread.Thread) {
+source_probe_execute :: proc(job: ^Source_Probe_Job) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	job := cast(^Source_Probe_Job)t.data
 	remaining := job.input
 	for raw in strings.split_lines_iterator(&remaining) {
+		if source_probe_job_is_cancelled(job) {break}
 		url := strings.trim_space(raw)
 		if len(url) == 0 {continue}
 		video_id, valid := parse_video_id(url)
@@ -344,9 +437,13 @@ source_probe_worker :: proc(t: ^thread.Thread) {
 			}
 			if cached {continue}
 		}
-		append(&job.results, source_probe_one(url, job.auth_browser))
+		result := source_probe_one(job, url, job.auth_browser)
+		if source_probe_job_is_cancelled(job) {
+			source_probe_result_destroy(&result)
+			break
+		}
+		append(&job.results, result)
 	}
-	msg_void_sel_id_b(job.completion_target, sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"), sel_registerName("sourceProbeFinished:"), nil, false)
 }
 
 source_probe_request :: proc(
@@ -358,7 +455,15 @@ source_probe_request :: proc(
 	if source_probe_job != nil {return}
 	input := strings.trim_space(ui.url_input)
 	if len(input) == 0 {source_probe_results_clear(); ui.needs_redraw = true; return}
+	os.make_directory(app_support_dir())
 	job := new(Source_Probe_Job)
+	job.operation_id = next_media_operation_id()
+	job.output_path = strings.clone(fmt.tprintf(
+		"%s/yt-dlp-probe-%020d.json",
+		app_support_dir(),
+		job.operation_id,
+	))
+	job.log_path = strings.clone(import_log_path(job.operation_id))
 	job.input = strings.clone(input)
 	job.completion_target = state.delegate_target
 	job.cached_results = make([dynamic]Source_Probe_Result)
@@ -367,10 +472,6 @@ source_probe_request :: proc(
 	job.auth_browser = auth_browser
 	job.used_saved_browser = used_saved_browser
 	job.save_browser_on_success = save_browser_on_success
-	worker := thread.create(source_probe_worker)
-	if worker == nil {source_probe_job_destroy(job); return}
-	job.thread = worker
-	worker.data = job
 	summary := "Checking YouTube metadata and formats..."
 	detail := "The application reads source metadata without downloading media."
 	if job.auth_browser != .None {
@@ -400,7 +501,16 @@ source_probe_request :: proc(
 		job.notification_id = notification_begin(summary, detail)
 	}
 	source_probe_job = job
-	thread.start(worker)
+	_ = os.write_entire_file(job.log_path, nil)
+	if !media_queue_schedule_probe(job) {
+		source_probe_job = nil
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"Unable to queue the metadata check",
+		)
+		source_probe_job_destroy(job)
+	}
 }
 
 on_source_probe_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
@@ -408,8 +518,19 @@ on_source_probe_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	job := source_probe_job
 	if job == nil {return}
-	thread.join(job.thread)
-	thread.destroy(job.thread)
+	defer {
+		media_task_completion_finish(&job.completion)
+	}
+	if job.cancelled {
+		_ = notification_finish(
+			job.notification_id,
+			.Interrupted,
+			"Metadata check stopped",
+		)
+		source_probe_job = nil
+		ui.needs_redraw = true
+		return
+	}
 	for result in job.results {source_probe_cache_store(result)}
 	source_probe_results_clear()
 	source_probe_results = job.results
@@ -420,7 +541,6 @@ on_source_probe_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	requested_browser := job.auth_browser
 	probed_input := job.input
 	job.input = ""
-	source_probe_job_destroy(job)
 	source_probe_job = nil
 	current := strings.trim_space(ui.url_input)
 	if current != probed_input {

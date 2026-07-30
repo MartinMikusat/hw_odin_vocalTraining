@@ -7,6 +7,7 @@ import "core:os"
 import os2 "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
+import "core:sync"
 import "core:time"
 import "core:sys/posix"
 import "base:runtime"
@@ -14,6 +15,77 @@ import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
 import flash "flash:."
 import match_sorter "match_sorter:."
+import task_queue "task_queue:."
+
+Media_Queue_Test_State :: struct {
+	mutex: sync.Mutex,
+	active_downloads: int,
+	active_exports: int,
+	max_downloads: int,
+	max_exports: int,
+	max_total: int,
+	barrier_started_alone: bool,
+	release: bool,
+	order: [dynamic]int,
+}
+
+Media_Queue_Test_Data :: struct {
+	state: ^Media_Queue_Test_State,
+	class: Media_Task_Class,
+	value: int,
+	barrier: bool,
+	wait_for_release: bool,
+	delay: time.Duration,
+}
+
+media_queue_test_task :: proc(
+	task_context: ^task_queue.Task_Context,
+) -> task_queue.Task_Outcome {
+	data := (^Media_Queue_Test_Data)(task_context.data)
+	sync.mutex_lock(&data.state.mutex)
+	if data.barrier {
+		data.state.barrier_started_alone =
+			data.state.active_downloads +
+			data.state.active_exports == 0
+	}
+	if data.class == .Download {
+		data.state.active_downloads += 1
+	} else {
+		data.state.active_exports += 1
+	}
+	data.state.max_downloads = max(
+		data.state.max_downloads,
+		data.state.active_downloads,
+	)
+	data.state.max_exports = max(
+		data.state.max_exports,
+		data.state.active_exports,
+	)
+	data.state.max_total = max(
+		data.state.max_total,
+		data.state.active_downloads + data.state.active_exports,
+	)
+	append(&data.state.order, data.value)
+	sync.mutex_unlock(&data.state.mutex)
+	for data.wait_for_release {
+		sync.mutex_lock(&data.state.mutex)
+		release := data.state.release
+		sync.mutex_unlock(&data.state.mutex)
+		if release {
+			break
+		}
+		time.sleep(time.Millisecond)
+	}
+	time.sleep(data.delay)
+	sync.mutex_lock(&data.state.mutex)
+	if data.class == .Download {
+		data.state.active_downloads -= 1
+	} else {
+		data.state.active_exports -= 1
+	}
+	sync.mutex_unlock(&data.state.mutex)
+	return {}
+}
 
 @(test)
 launch_activation_respects_background_policy_test :: proc(t: ^testing.T) {
@@ -188,9 +260,13 @@ window_controls_remain_registered_over_modal_content_test :: proc(
 	previous_state := state
 	previous_ui := ui
 	previous_ui_build := ui_build
+	previous_import_jobs := import_jobs
+	import_jobs = nil
 	previous_recovery := library_recovery_state
 	previous_pending := major_change_pending
 	defer {
+		delete(import_jobs)
+		import_jobs = previous_import_jobs
 		state = previous_state
 		ui = previous_ui
 		ui_build = previous_ui_build
@@ -709,19 +785,22 @@ parallel_save_jobs_reserve_unique_clip_numbers_and_remain_actionable_test :: pro
 ) {
 	previous_state := state
 	previous_ui := ui
-	previous_import := import_job
+	previous_imports := import_jobs
 	previous_recovery := library_recovery
+	previous_library_replacement := library_replacement_job
 	previous_exports := export_jobs
 	previous_actions := command_palette_actions
 	defer {
 		delete(state.sources)
 		delete(state.clips)
 		delete(export_jobs)
+		delete(import_jobs)
 		delete(command_palette_actions)
 		state = previous_state
 		ui = previous_ui
-		import_job = previous_import
+		import_jobs = previous_imports
 		library_recovery = previous_recovery
+		library_replacement_job = previous_library_replacement
 		export_jobs = previous_exports
 		command_palette_actions = previous_actions
 	}
@@ -744,8 +823,9 @@ parallel_save_jobs_reserve_unique_clip_numbers_and_remain_actionable_test :: pro
 		workflow = .Vocal,
 		source_modal_refetch_index = -1,
 	}
-	import_job = nil
+	import_jobs = nil
 	library_recovery = nil
+	library_replacement_job = nil
 	export_jobs = nil
 	first := Export_Job{
 		operation = .Save,
@@ -758,19 +838,19 @@ parallel_save_jobs_reserve_unique_clip_numbers_and_remain_actionable_test :: pro
 		3,
 	)
 	testing.expect(t, ui_action_enabled_for_current_job(.Save))
-	testing.expect(t, !ui_action_enabled_for_current_job(.Preview))
+	testing.expect(t, ui_action_enabled_for_current_job(.Preview))
 	testing.expect(t, ui_action_enabled_for_current_job(.Import))
 	testing.expect(t, ui_action_enabled_for_current_job(.Workflow_Toggle))
 	testing.expect(t, ui_action_enabled_for_current_job(.Mode_Toggle))
 
 	ui.source_modal_refetch_index = 0
-	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	testing.expect(t, ui_action_enabled_for_current_job(.Import))
 	ui.source_modal_refetch_index = -1
 
 	active_import := Import_Job{}
-	import_job = &active_import
+	append(&import_jobs, &active_import)
 	testing.expect(t, ui_action_enabled_for_current_job(.Save))
-	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	testing.expect(t, ui_action_enabled_for_current_job(.Import))
 	command_palette_actions = nil
 	entries := build_command_palette_entries(context.temp_allocator)
 	commit_index := -1
@@ -789,21 +869,22 @@ parallel_save_jobs_reserve_unique_clip_numbers_and_remain_actionable_test :: pro
 	}
 
 	active_import.replace_video_id = "source"
-	testing.expect(t, !ui_action_enabled_for_current_job(.Save))
+	testing.expect(t, ui_action_enabled_for_current_job(.Save))
 	if commit_index >= 0 {
-		testing.expect(t, !command_palette.context_matches(
+		testing.expect(t, command_palette.context_matches(
 			palette_active_context(),
 			entries[commit_index].contexts,
 		))
 	}
-	import_job = nil
+	delete(import_jobs)
+	import_jobs = nil
 
 	active_recovery: Library_Recovery
 	library_recovery = &active_recovery
-	testing.expect(t, !ui_action_enabled_for_current_job(.Save))
-	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	testing.expect(t, ui_action_enabled_for_current_job(.Save))
+	testing.expect(t, ui_action_enabled_for_current_job(.Import))
 	if commit_index >= 0 {
-		testing.expect(t, !command_palette.context_matches(
+		testing.expect(t, command_palette.context_matches(
 			palette_active_context(),
 			entries[commit_index].contexts,
 		))
@@ -812,16 +893,252 @@ parallel_save_jobs_reserve_unique_clip_numbers_and_remain_actionable_test :: pro
 
 	preview := Export_Job{operation = .Preview}
 	export_jobs[0] = &preview
-	testing.expect(t, !ui_action_enabled_for_current_job(.Save))
-	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	testing.expect(t, ui_action_enabled_for_current_job(.Save))
+	testing.expect(t, ui_action_enabled_for_current_job(.Import))
 	if commit_index >= 0 {
-		testing.expect(t, !command_palette.context_matches(
+		testing.expect(t, command_palette.context_matches(
 			palette_active_context(),
 			entries[commit_index].contexts,
 		))
 	}
-	testing.expect(t, !ui_action_enabled_for_current_job(.Workflow_Toggle))
-	testing.expect(t, !ui_action_enabled_for_current_job(.Mode_Toggle))
+	testing.expect(t, ui_action_enabled_for_current_job(.Workflow_Toggle))
+	testing.expect(t, ui_action_enabled_for_current_job(.Mode_Toggle))
+
+	replacement: Library_Replacement_Job
+	library_replacement_job = &replacement
+	testing.expect(t, !ui_action_enabled_for_current_job(.Save))
+	testing.expect(t, !ui_action_enabled_for_current_job(.Preview))
+	testing.expect(t, !ui_action_enabled_for_current_job(.Import))
+	testing.expect(t, ui_action_enabled_for_current_job(.Workflow_Toggle))
+}
+
+@(test)
+media_queue_policy_enforces_resource_limits_and_barriers_test :: proc(
+	t: ^testing.T,
+) {
+	policy: Media_Queue_Policy_State
+	items := [4]task_queue.Policy_Item{
+		{
+			id = 1,
+			sequence = 1,
+			policy_data = media_queue_policy_encode(
+				.Download,
+				resource_key = 101,
+			),
+		},
+		{
+			id = 2,
+			sequence = 2,
+			policy_data = media_queue_policy_encode(
+				.Download,
+				resource_key = 101,
+			),
+		},
+		{
+			id = 3,
+			sequence = 3,
+			policy_data = media_queue_policy_encode(
+				.Download,
+				resource_key = 202,
+			),
+		},
+		{
+			id = 4,
+			sequence = 4,
+			policy_data = media_queue_policy_encode(.Export),
+		},
+	}
+	snapshot := task_queue.Queue_Snapshot{concurrency = 4}
+	testing.expect_value(
+		t,
+		media_queue_policy_select(items[:], snapshot, &policy),
+		0,
+	)
+	media_queue_policy_notify(.Activated, items[0], &policy)
+	snapshot.running = 1
+	testing.expect_value(
+		t,
+		media_queue_policy_select(items[1:], snapshot, &policy),
+		1,
+	)
+	media_queue_policy_notify(.Activated, items[2], &policy)
+	snapshot.running = 2
+	testing.expect_value(
+		t,
+		media_queue_policy_select(items[1:], snapshot, &policy),
+		2,
+	)
+	media_queue_policy_notify(.Finished, items[0], &policy)
+	media_queue_policy_notify(.Finished, items[2], &policy)
+
+	barrier_items := [3]task_queue.Policy_Item{
+		{
+			id = 5,
+			sequence = 5,
+			policy_data = media_queue_policy_encode(.Export),
+		},
+		{
+			id = 6,
+			sequence = 6,
+			policy_data = media_queue_policy_encode(
+				.Download,
+				barrier = true,
+			),
+		},
+		{
+			id = 7,
+			sequence = 7,
+			policy_data = media_queue_policy_encode(.Export),
+		},
+	}
+	snapshot.running = 0
+	testing.expect_value(
+		t,
+		media_queue_policy_select(barrier_items[:], snapshot, &policy),
+		0,
+	)
+	testing.expect_value(
+		t,
+		media_queue_policy_select(barrier_items[1:], snapshot, &policy),
+		0,
+	)
+	media_queue_policy_notify(.Activated, barrier_items[1], &policy)
+	testing.expect_value(
+		t,
+		media_queue_policy_select(
+			barrier_items[2:],
+			task_queue.Queue_Snapshot{running = 1},
+			&policy,
+		),
+		-1,
+	)
+	media_queue_policy_notify(.Finished, barrier_items[1], &policy)
+}
+
+@(test)
+media_queue_runs_two_downloads_and_two_exports_concurrently_test :: proc(
+	t: ^testing.T,
+) {
+	state := Media_Queue_Test_State{
+		order = make([dynamic]int),
+	}
+	defer delete(state.order)
+	policy: Media_Queue_Policy_State
+	queue: task_queue.Queue
+	testing.expect_value(
+		t,
+		task_queue.queue_init(
+			&queue,
+			{
+				concurrency = MEDIA_QUEUE_CONCURRENCY,
+				start_paused = true,
+				policy = {
+					select_procedure = media_queue_policy_select,
+					notify_procedure = media_queue_policy_notify,
+					data = &policy,
+				},
+			},
+		),
+		task_queue.Init_Error.None,
+	)
+	defer task_queue.queue_destroy(&queue)
+	data := [6]Media_Queue_Test_Data{
+		{state = &state, class = .Download, value = 1, wait_for_release = true},
+		{state = &state, class = .Download, value = 2, wait_for_release = true},
+		{state = &state, class = .Download, value = 3, wait_for_release = true},
+		{state = &state, class = .Export, value = 4, wait_for_release = true},
+		{state = &state, class = .Export, value = 5, wait_for_release = true},
+		{state = &state, class = .Export, value = 6, wait_for_release = true},
+	}
+	for datum, index in data {
+		_, add_error := task_queue.add(
+			&queue,
+			{
+				procedure = media_queue_test_task,
+				data = &data[index],
+				policy_data = media_queue_policy_encode(datum.class),
+			},
+		)
+		testing.expect_value(t, add_error, task_queue.Add_Error.None)
+	}
+	task_queue.start(&queue)
+	reached_full_concurrency := false
+	for _ in 0 ..< 1000 {
+		sync.mutex_lock(&state.mutex)
+		reached_full_concurrency = state.max_total == MEDIA_QUEUE_CONCURRENCY
+		if reached_full_concurrency {
+			state.release = true
+		}
+		sync.mutex_unlock(&state.mutex)
+		if reached_full_concurrency {
+			break
+		}
+		time.sleep(time.Millisecond)
+	}
+	testing.expect(t, reached_full_concurrency)
+	testing.expect(
+		t,
+		task_queue.wait_until(&queue, .Idle, timeout = time.Second),
+	)
+	testing.expect_value(t, state.max_downloads, MEDIA_DOWNLOAD_CONCURRENCY)
+	testing.expect_value(t, state.max_exports, MEDIA_EXPORT_CONCURRENCY)
+	testing.expect_value(t, state.max_total, MEDIA_QUEUE_CONCURRENCY)
+}
+
+@(test)
+media_queue_barrier_preserves_submission_order_test :: proc(t: ^testing.T) {
+	state := Media_Queue_Test_State{
+		order = make([dynamic]int),
+	}
+	defer delete(state.order)
+	policy: Media_Queue_Policy_State
+	queue: task_queue.Queue
+	testing.expect_value(
+		t,
+		task_queue.queue_init(
+			&queue,
+			{
+				concurrency = MEDIA_QUEUE_CONCURRENCY,
+				start_paused = true,
+				policy = {
+					select_procedure = media_queue_policy_select,
+					notify_procedure = media_queue_policy_notify,
+					data = &policy,
+				},
+			},
+		),
+		task_queue.Init_Error.None,
+	)
+	defer task_queue.queue_destroy(&queue)
+	data := [3]Media_Queue_Test_Data{
+		{state = &state, class = .Export, value = 1, delay = 10 * time.Millisecond},
+		{state = &state, class = .Download, value = 2, barrier = true},
+		{state = &state, class = .Export, value = 3},
+	}
+	for datum, index in data {
+		_, add_error := task_queue.add(
+			&queue,
+			{
+				procedure = media_queue_test_task,
+				data = &data[index],
+				policy_data = media_queue_policy_encode(
+					datum.class,
+					datum.barrier,
+				),
+			},
+		)
+		testing.expect_value(t, add_error, task_queue.Add_Error.None)
+	}
+	task_queue.start(&queue)
+	testing.expect(
+		t,
+		task_queue.wait_until(&queue, .Idle, timeout = time.Second),
+	)
+	testing.expect_value(t, len(state.order), 3)
+	testing.expect_value(t, state.order[0], 1)
+	testing.expect_value(t, state.order[1], 2)
+	testing.expect_value(t, state.order[2], 3)
+	testing.expect(t, state.barrier_started_alone)
 }
 
 @(test)
@@ -912,7 +1229,7 @@ global_source_paste_preserves_workflow_and_opens_sources_test :: proc(
 	previous_ui := ui
 	previous_database := library_database
 	previous_results := source_probe_results
-	previous_import := import_job
+	previous_imports := import_jobs
 	previous_exports := export_jobs
 	previous_library_recovery := library_recovery
 	previous_recovery_state := library_recovery_state
@@ -923,7 +1240,8 @@ global_source_paste_preserves_workflow_and_opens_sources_test :: proc(
 		ui = previous_ui
 		library_database = previous_database
 		source_probe_results = previous_results
-		import_job = previous_import
+		delete(import_jobs)
+		import_jobs = previous_imports
 		delete(export_jobs)
 		export_jobs = previous_exports
 		library_recovery = previous_library_recovery
@@ -944,7 +1262,7 @@ global_source_paste_preserves_workflow_and_opens_sources_test :: proc(
 	}
 	library_database = nil
 	source_probe_results = nil
-	import_job = nil
+	import_jobs = nil
 	export_jobs = nil
 	library_recovery = nil
 	library_recovery_state = {}
@@ -975,7 +1293,7 @@ global_source_paste_appends_inside_open_add_modal_test :: proc(
 ) {
 	previous_ui := ui
 	previous_results := source_probe_results
-	previous_import := import_job
+	previous_imports := import_jobs
 	previous_exports := export_jobs
 	previous_library_recovery := library_recovery
 	previous_recovery_state := library_recovery_state
@@ -984,7 +1302,8 @@ global_source_paste_appends_inside_open_add_modal_test :: proc(
 		delete(ui.url_input)
 		ui = previous_ui
 		source_probe_results = previous_results
-		import_job = previous_import
+		delete(import_jobs)
+		import_jobs = previous_imports
 		delete(export_jobs)
 		export_jobs = previous_exports
 		library_recovery = previous_library_recovery
@@ -998,7 +1317,7 @@ global_source_paste_appends_inside_open_add_modal_test :: proc(
 		source_modal_refetch_index = -1,
 	}
 	source_probe_results = nil
-	import_job = nil
+	import_jobs = nil
 	export_jobs = nil
 	library_recovery = nil
 	library_recovery_state = {}
@@ -1029,19 +1348,23 @@ global_source_paste_appends_inside_open_add_modal_test :: proc(
 }
 
 @(test)
-source_paste_blocks_only_conflicting_media_jobs_test :: proc(t: ^testing.T) {
-	previous_import := import_job
+source_paste_accepts_all_queued_media_states_test :: proc(t: ^testing.T) {
+	previous_imports := import_jobs
 	previous_exports := export_jobs
 	previous_library_recovery := library_recovery
+	previous_library_replacement := library_replacement_job
 	defer {
-		import_job = previous_import
+		delete(import_jobs)
+		import_jobs = previous_imports
 		delete(export_jobs)
 		export_jobs = previous_exports
 		library_recovery = previous_library_recovery
+		library_replacement_job = previous_library_replacement
 	}
-	import_job = nil
+	import_jobs = nil
 	export_jobs = nil
 	library_recovery = nil
+	library_replacement_job = nil
 	testing.expect(t, !source_paste_media_job_blocks())
 
 	save_export := Export_Job{operation = .Save}
@@ -1050,20 +1373,25 @@ source_paste_blocks_only_conflicting_media_jobs_test :: proc(t: ^testing.T) {
 
 	preview_export := Export_Job{operation = .Preview}
 	export_jobs[0] = &preview_export
-	testing.expect(t, source_paste_media_job_blocks())
+	testing.expect(t, !source_paste_media_job_blocks())
 
 	repair_export := Export_Job{operation = .Repair}
 	export_jobs[0] = &repair_export
-	testing.expect(t, source_paste_media_job_blocks())
+	testing.expect(t, !source_paste_media_job_blocks())
 
 	clear(&export_jobs)
 	active_import: Import_Job
-	import_job = &active_import
-	testing.expect(t, source_paste_media_job_blocks())
+	append(&import_jobs, &active_import)
+	testing.expect(t, !source_paste_media_job_blocks())
 
-	import_job = nil
+	delete(import_jobs)
+	import_jobs = nil
 	active_recovery: Library_Recovery
 	library_recovery = &active_recovery
+	testing.expect(t, !source_paste_media_job_blocks())
+
+	replacement: Library_Replacement_Job
+	library_replacement_job = &replacement
 	testing.expect(t, source_paste_media_job_blocks())
 }
 
@@ -1317,6 +1645,8 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	previous_state := state
 	previous_ui := ui
 	previous_ui_build := ui_build
+	previous_import_jobs := import_jobs
+	import_jobs = nil
 	frame_arena: mem_virtual.Arena
 	frame_arena_error := mem_virtual.arena_init_static(&frame_arena, 1024*1024, 4096)
 	testing.expect(t, frame_arena_error == nil)
@@ -1334,9 +1664,11 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 		delete(state.clips)
 		transcript_generation_destroy(&state.transcripts)
 		delete(ui.transcript_matches)
+		delete(import_jobs)
 		state = previous_state
 		ui = previous_ui
 		ui_build = previous_ui_build
+		import_jobs = previous_import_jobs
 	}
 	ui = UI_State{
 		width = 2048,
@@ -1363,9 +1695,7 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	mem_virtual.arena_free_all(&frame_arena)
 
 	busy_job: Import_Job
-	previous_import_job := import_job
-	import_job = &busy_job
-	defer import_job = previous_import_job
+	append(&import_jobs, &busy_job)
 	ui.frame_tick += 1
 	build_ui_controls(false, frame_allocator)
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
@@ -1384,7 +1714,7 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	testing.expect(t, busy_diff.ok)
 	testing.expect_value(t, busy_diff.retained_count, len(idle_snapshot.controls))
 	testing.expect_value(t, len(busy_diff.added), 1)
-	testing.expect(t, len(busy_diff.disabled) > 0)
+	testing.expect_value(t, len(busy_diff.disabled), 0)
 	testing.expect_value(t, len(busy_diff.removed), 0)
 	testing.expect_value(t, len(busy_diff.changed), 0)
 	testing.expect_value(t, len(busy_diff.unexpected), 0)
@@ -1422,18 +1752,19 @@ canonical_library_loads_real_data_and_builds_unique_controls_test :: proc(t: ^te
 	testing.expect(t, mode != nil && .Enabled in mode.flags)
 	testing.expect(t, source != nil && .Enabled in source.flags)
 	testing.expect(t, search != nil && .Enabled in search.flags)
-	testing.expect(t, add != nil && .Enabled not_in add.flags)
-	testing.expect(t, save != nil && .Enabled not_in save.flags)
-	testing.expect(t, captions != nil && .Enabled not_in captions.flags)
-	testing.expect(t, preview != nil && .Enabled not_in preview.flags)
+	testing.expect(t, add != nil && .Enabled in add.flags)
+	testing.expect(t, save != nil)
+	testing.expect(t, captions != nil && .Enabled in captions.flags)
+	testing.expect(t, preview != nil)
 	testing.expect(t, ui_action_enabled_for_current_job(.Source_Play_Pause))
 	testing.expect(t, ui_action_enabled_for_current_job(.Source_Timeline))
 	testing.expect(t, ui_action_enabled_for_current_job(.Volume_Down))
 	testing.expect(t, ui_action_enabled_for_current_job(.Speed_Up))
-	testing.expect(t, !ui_action_enabled_for_current_job(.Source_Hint))
+	testing.expect(t, ui_action_enabled_for_current_job(.Source_Hint))
 	ui_build.controls = nil
 	mem_virtual.arena_free_all(&frame_arena)
-	import_job = previous_import_job
+	delete(import_jobs)
+	import_jobs = nil
 
 	ui_set_string(&ui.status_source_video_id, state.sources[1].video_id)
 	action_rect := status_source_rect()
@@ -2771,7 +3102,7 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 	previous_mode := ui.mode
 	previous_player := state.player
 	previous_source := state.active_source
-	previous_import := import_job
+	previous_imports := import_jobs
 	previous_exports := export_jobs
 	previous_actions := command_palette_actions
 	defer {
@@ -2780,7 +3111,8 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 		ui.mode = previous_mode
 		state.player = previous_player
 		state.active_source = previous_source
-		import_job = previous_import
+		delete(import_jobs)
+		import_jobs = previous_imports
 		delete(export_jobs)
 		export_jobs = previous_exports
 	}
@@ -2788,7 +3120,7 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 	ui.mode = .Play
 	state.player = nil
 	state.active_source = -1
-	import_job = nil
+	import_jobs = nil
 	export_jobs = nil
 	entries := build_command_palette_entries(context.temp_allocator)
 	active := palette_active_context()
@@ -3145,6 +3477,58 @@ transcript_generation_groups_interleaved_sources_into_stable_spans_test :: proc(
 	testing.expect(t, transcript_append_copy(&direct, input[1]))
 	testing.expect(t, !transcript_append_copy(&direct, input[2]))
 	testing.expect_value(t, len(direct.segments), 2)
+}
+
+@(test)
+transcript_source_replacement_preserves_other_completed_imports_test :: proc(
+	t: ^testing.T,
+) {
+	current, current_ok := transcript_generation_create(2)
+	testing.expect(t, current_ok)
+	if !current_ok {return}
+	defer transcript_generation_destroy(&current)
+	testing.expect(t, transcript_append_copy(&current, {
+		id = "source-a-0",
+		source_id = "source-a",
+		text = "old a",
+	}))
+	testing.expect(t, transcript_append_copy(&current, {
+		id = "source-b-0",
+		source_id = "source-b",
+		text = "completed b",
+	}))
+
+	replacement, replacement_ok := transcript_generation_create(1)
+	testing.expect(t, replacement_ok)
+	if !replacement_ok {return}
+	defer transcript_generation_destroy(&replacement)
+	testing.expect(t, transcript_append_copy(&replacement, {
+		id = "source-a-1",
+		source_id = "source-a",
+		text = "new a",
+	}))
+
+	merged, merged_ok := transcript_generation_replace_source(
+		&current,
+		&replacement,
+		"source-a",
+	)
+	testing.expect(t, merged_ok)
+	if !merged_ok {return}
+	defer transcript_generation_destroy(&merged)
+	a_segments, _, a_found := transcript_source_segments(
+		&merged,
+		"source-a",
+	)
+	b_segments, _, b_found := transcript_source_segments(
+		&merged,
+		"source-b",
+	)
+	testing.expect(t, a_found && b_found)
+	testing.expect_value(t, len(a_segments), 1)
+	testing.expect_value(t, len(b_segments), 1)
+	testing.expect_value(t, a_segments[0].text, "new a")
+	testing.expect_value(t, b_segments[0].text, "completed b")
 }
 
 @(test)
@@ -3825,7 +4209,7 @@ successful_import_commit_survives_database_reload_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(state.hints), 1)
 	testing.expect_value(t, len(state.transcripts.segments), 1)
 	testing.expect_value(t, state.pending_hint, 12)
-	testing.expect_value(t, last_imported_source, 0)
+	testing.expect_value(t, job.applied_source_index, 0)
 
 	app_state_collections_destroy(&state)
 	state = {}

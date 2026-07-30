@@ -166,8 +166,8 @@ The app downloads into staging files. It verifies H.264 video and AAC audio,
 decodes one second of both tracks, and then replaces the active source files.
 
 The Source Register marks a source as **MISSING** when its merged MP4 file is
-not available. Right-click that source and refetch it. Inspect `yt-dlp.log` if
-the refetch fails.
+not available. Right-click that source and refetch it. Open its failed task in
+the notification history to find the private `yt-dlp-<operation-id>.log`.
 
 Select a source, load its captions, and click a timed transcript row to seek.
 Use the transcript search field to rank fuzzy caption matches. Clear the field
@@ -183,11 +183,13 @@ Clip reset seeks to the start of the clip.
 The application stores each source's mark-in, mark-out, and optional clip name
 as a separate local draft. It restores these drafts after source changes and
 application relaunches.
-Each Commit starts an independent export immediately. A successful export
+Each Commit appends an independent export. A successful export
 clears its submitted draft only when that source's draft has not changed.
 Failed exports and newer drafts retain their marks and names.
-Normal source imports and clip commits can run at the same time.
-Source refetch, preview, repair, and recovery remain exclusive media operations.
+The media queue runs up to two source operations and two exports at once.
+Eligible actions stay available while other media work runs.
+Refetch, preview, repair, and recovery enter the same queue as ordered barriers.
+Each footer task has its own Stop action.
 The Sources footer highlights each missing range endpoint. It enables and
 highlights **Commit** only after the range is at least one second long. The
 footer shows the calculated clip duration beside the range.
@@ -252,13 +254,13 @@ Left Arrow or Right Arrow to move by words, and add **Shift** to extend the
 selection. Hold **Command** to move to a line boundary. Option-Backspace
 deletes the previous word.
 
-Download diagnostics are stored as `yt-dlp.log` in the application-support
-directory. Each clip export writes `ffmpeg-<clip-id>.log`, which keeps parallel
-export diagnostics separate. Use the **Data** control to open the library data
-dialog. Press **01** to export both workflows, **02** to export the current
-workflow, **03** to import, **04** to open the directory in Finder, or **05** to
-close. Import reads the file scope and replaces only that scope. Its
-confirmation actions use **01 Replace and Recover** and **02 Cancel**.
+Each source task writes `yt-dlp-<operation-id>.log` and a private progress
+file in the application-support directory. Each clip task writes
+`ffmpeg-<clip-id>-<operation-id>.log`. Use the **Data** control to open the
+library data dialog. Press **01** to export both workflows, **02** to export
+the current workflow, **03** to import, **04** to open the directory in Finder,
+or **05** to close. Import reads the file scope and replaces only that scope.
+Its confirmation actions use **01 Replace and Recover** and **02 Cancel**.
 
 Select the footer notification to open the notification history. The modal
 shows the newest entries first and keeps the selected entry visible while new
@@ -311,8 +313,10 @@ explicitly continue without a new restore point.
 `clip create` starts at the first segment start. It ends at the last segment
 start plus its duration. The command saves the MP4 as a clip.
 
-The GUI owns the library while it runs. CLI commands then use its private local
-socket. When the GUI is closed, the CLI locks and updates the library directly.
+The GUI owns the library while it runs. CLI media commands append work to its
+media queue and wait for the result without blocking the interface. Other CLI
+commands use its private local socket. When the GUI is closed, the CLI locks
+and updates the library directly.
 
 Structural UI commands require the running development application. Capture a
 baseline before an interaction, then check the completed background state:
@@ -435,6 +439,13 @@ A startup worker fills missing metadata from existing yt-dlp files. Startup
 marks an unfinished notification as interrupted when the previous process did
 not finalize its operation.
 
+The sibling `hw_odin_concurrency_taskQueue` package owns worker threads,
+priority ordering, cancellation, barriers, and resource limits. The
+application assigns four workers, with limits of two source tasks and two
+exports. It keeps queue state in memory. Each worker writes private staging and
+diagnostic files, then asks the main thread to commit application state before
+the queue releases its slot.
+
 The portable library format is a separate JSON data-transfer schema. It omits
 runtime file paths. Import derives each source and clip path from the selected
 application-support directory, which permits transfers between development and
@@ -457,10 +468,11 @@ into the retained text texture. The next dirty redraw resets that arena. Debug
 builds print each arena's high-water mark, reset count, and allocation-failure
 count at shutdown.
 
-Each import or export worker owns a private growing arena and never reads the
-mutable UI or application arrays. Save workers run independently and enqueue
-their exact job pointer through a mutex-protected completion queue. The main
-thread joins each completed worker, commits its clip, and destroys its arena.
+Each import or export task owns a private growing arena and never reads the
+mutable UI or application arrays after submission. The task queue passes each
+completed job through a mutex-protected completion queue. The main thread
+commits its result. The queue finalizer then destroys the task arena before it
+releases the worker slot.
 Transcript segments and every string reachable from them share one generation
 arena. The generation also stores one contiguous segment span for each source.
 Search and transcript retrieval pass the active source slice directly to their
@@ -478,10 +490,10 @@ and initially commit 64 KiB.
 
 ### Build
 
-Install Odin and ensure `odin` is on `PATH`. Clone `hw_odin_matchSorter`,
-`hw_odin_ui_flash`, and `hw_odin_ui_commandPalette` next to this repository.
-The build imports them as the `match_sorter`, `flash`, and `command_palette`
-collections.
+Install Odin and ensure `odin` is on `PATH`. Clone the sibling repositories
+listed in [`dependencies.lock`](dependencies.lock) next to this repository.
+The build imports the match sorter, Flash, command palette, UI components, and
+task queue as named Odin collections.
 
 [`dependencies.lock`](dependencies.lock) records each sibling repository URL
 and tested commit. Every build rejects a checkout with another origin, commit,

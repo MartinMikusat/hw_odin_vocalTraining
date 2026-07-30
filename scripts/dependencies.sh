@@ -18,6 +18,7 @@ check_dependencies() {
   seen_ui_flash=0
   seen_command_palette=0
   seen_ui_components=0
+  seen_task_queue=0
   while read -r name expected_url expected_revision extra; do
     case "$name" in
       ""|\#*) continue ;;
@@ -54,6 +55,13 @@ check_dependencies() {
           return 1
         }
         seen_ui_components=1
+        ;;
+      hw_odin_concurrency_taskQueue)
+        [ "$seen_task_queue" -eq 0 ] || {
+          echo "[hw_videoClips] duplicate dependency lock entry: $name" >&2
+          return 1
+        }
+        seen_task_queue=1
         ;;
       *)
         echo "[hw_videoClips] unknown dependency lock entry: $name" >&2
@@ -93,7 +101,8 @@ check_dependencies() {
   if [ "$seen_match_sorter" -ne 1 ] ||
      [ "$seen_ui_flash" -ne 1 ] ||
      [ "$seen_command_palette" -ne 1 ] ||
-     [ "$seen_ui_components" -ne 1 ]; then
+     [ "$seen_ui_components" -ne 1 ] ||
+     [ "$seen_task_queue" -ne 1 ]; then
     echo "[hw_videoClips] dependency lock does not contain all required repositories" >&2
     return 1
   fi
@@ -103,7 +112,7 @@ update_dependencies() {
   temporary=$(mktemp "${TMPDIR:-/tmp}/hw_videoClips-dependencies.XXXXXX")
   trap 'rm -f "$temporary"' EXIT HUP INT TERM
   printf '# Sibling repository, origin URL, and tested commit.\n' > "$temporary"
-  for name in hw_odin_matchSorter hw_odin_ui_flash hw_odin_ui_commandPalette hw_odin_ui_components; do
+  for name in hw_odin_matchSorter hw_odin_ui_flash hw_odin_ui_commandPalette hw_odin_ui_components hw_odin_concurrency_taskQueue; do
     repository=$(repository_path "$name")
     if ! git -C "$repository" rev-parse --git-dir >/dev/null 2>&1; then
       echo "[hw_videoClips] missing dependency checkout: $repository" >&2

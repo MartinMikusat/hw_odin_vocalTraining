@@ -187,6 +187,54 @@ transcript_generation_copy :: proc(segments: []Transcript_Segment) -> (Transcrip
 	return generation, true
 }
 
+transcript_generation_replace_source :: proc(
+	current: ^Transcript_Generation,
+	replacement: ^Transcript_Generation,
+	source_id: string,
+) -> (Transcript_Generation, bool) {
+	replacement_segments, _, replacement_found := transcript_source_segments(
+		replacement,
+		source_id,
+	)
+	if !replacement_found {
+		return {}, false
+	}
+	capacity := len(current.segments) + len(replacement_segments)
+	if current_segments, _, found := transcript_source_segments(
+		current,
+		source_id,
+	); found {
+		capacity -= len(current_segments)
+	}
+	generation, created := transcript_generation_create(capacity)
+	if !created {
+		return {}, false
+	}
+	inserted := false
+	for span in current.source_spans {
+		segments := current.segments[span.start:span.start + span.count]
+		if span.source_id == source_id {
+			segments = replacement_segments
+			inserted = true
+		}
+		for segment in segments {
+			if !transcript_append_copy(&generation, segment) {
+				transcript_generation_destroy(&generation)
+				return {}, false
+			}
+		}
+	}
+	if !inserted {
+		for segment in replacement_segments {
+			if !transcript_append_copy(&generation, segment) {
+				transcript_generation_destroy(&generation)
+				return {}, false
+			}
+		}
+	}
+	return generation, true
+}
+
 clone_source_video :: proc(source: Source_Video, allocator := context.allocator) -> (Source_Video, bool) {
 	result := Source_Video{
 		workflow=source.workflow,

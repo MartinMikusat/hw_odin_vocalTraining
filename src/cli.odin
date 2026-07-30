@@ -438,7 +438,6 @@ cli_source_list :: proc(request: CLI_Request) -> CLI_Result {
 }
 
 cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
-	if import_job != nil || export_jobs_any() {return cli_error(request.command, .Busy, "busy", "Another media operation is active")}
 	video_id, valid_url := parse_video_id(request.url)
 	if !valid_url {return cli_error(request.command, .Invalid, "invalid_url", "The URL is not a supported YouTube video URL")}
 	backup := library_backup_create(library_database)
@@ -469,7 +468,7 @@ cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
 		code := "download_failed"
 		message := "The YouTube download failed"
 		if job.invalid_merged_media > 0 {code, message = "media_validation_failed", "The staged MP4 did not contain compatible H.264 video and AAC audio"}
-		return cli_error(request.command, .Media, code, message, diagnostic_log_path("yt-dlp"))
+		return cli_error(request.command, .Media, code, message, job.log_path)
 	}
 	if !import_job_apply(job) {return cli_error(request.command, .Storage, "storage_failed", "The source was downloaded but the library update failed")}
 	source := cli_find_source(video_id, request.workflow)
@@ -480,6 +479,237 @@ cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
 	}
 	response := CLI_Source_Add_Response{ok=true, command=cli_command_name(request.command), data=CLI_Source_Add_Data{status=status, source=cli_source_output(source)}}
 	return CLI_Result{output=cli_encode(response), exit_code=.Success}
+}
+
+cli_source_add_enqueue :: proc(
+	request: CLI_Request,
+	work: ^CLI_IPC_Work,
+) -> bool {
+	if library_replacement_job != nil {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Busy,
+				"library_replacement_queued",
+				"The queued library replacement invalidates new media work",
+			),
+		)
+		return true
+	}
+	video_id, valid_url := parse_video_id(request.url)
+	if !valid_url {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Invalid,
+				"invalid_url",
+				"The URL is not a supported YouTube video URL",
+			),
+		)
+		return true
+	}
+	backup := library_backup_create(library_database)
+	defer library_backup_result_destroy(&backup)
+	if backup.status == .Failed && !request.allow_without_backup {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Storage,
+				"backup_failed",
+				"Unable to verify a library backup; pass --allow-without-backup to continue",
+			),
+		)
+		return true
+	}
+	existing := cli_find_source(video_id, request.workflow)
+	if existing == nil {
+		if available, reason := helper_available("yt-dlp"); !available {
+			cli_ipc_work_finish(
+				work,
+				cli_error(
+					request.command,
+					.Media,
+					"helper_unavailable",
+					reason,
+					diagnostic_log_path("yt-dlp"),
+				),
+			)
+			return true
+		}
+		if available, reason := helper_available("ffmpeg"); !available {
+			cli_ipc_work_finish(
+				work,
+				cli_error(
+					request.command,
+					.Media,
+					"helper_unavailable",
+					reason,
+					diagnostic_log_path("ffmpeg"),
+				),
+			)
+			return true
+		}
+	}
+	job := import_job_create(request.url, "", request.workflow)
+	if job == nil {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Storage,
+				"allocation_failed",
+				"Unable to allocate the import job",
+			),
+		)
+		return true
+	}
+	job.allow_without_backup = request.allow_without_backup
+	job.cli_work = work
+	job.cli_existing_source = existing != nil
+	job.cli_existing_hint_count = len(state.hints)
+	allocator := mem_virtual.arena_allocator(job.arena)
+	append(
+		&job.qualities,
+		Import_Quality{
+			video_id = strings.clone(video_id, allocator),
+			height = request.max_height,
+		},
+	)
+	fields := [1]Notification_Field{
+		{label = "CLI operation", value = "source add"},
+	}
+	job.notification_id = notification_begin(
+		"CLI source download queued",
+		"The command waits for this queued download while the application remains responsive.",
+		fields[:],
+	)
+	_ = os.write_entire_file(job.log_path, nil)
+	if !media_queue_schedule_import(job) {
+		result := cli_error(
+			request.command,
+			.Storage,
+			"queue_failed",
+			"Unable to queue the source import",
+		)
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"Unable to queue the CLI source import",
+		)
+		import_job_destroy(job)
+		cli_ipc_work_finish(work, result)
+	}
+	return true
+}
+
+cli_source_add_finish :: proc(job: ^Import_Job) {
+	work := job.cli_work
+	if job.cancelled {
+		_ = notification_finish(
+			job.notification_id,
+			.Interrupted,
+			"CLI source download stopped",
+		)
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				.Source_Add,
+				.Media,
+				"cancelled",
+				"The source import was cancelled",
+				job.log_path,
+			),
+		)
+		return
+	}
+	if job.failed > 0 || job.accepted == 0 {
+		code := "download_failed"
+		message := "The YouTube download failed"
+		if job.invalid_merged_media > 0 {
+			code = "media_validation_failed"
+			message = "The staged MP4 did not contain compatible H.264 video and AAC audio"
+		}
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			message,
+			fmt.tprintf("Inspect the diagnostic log at %s", job.log_path),
+		)
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				.Source_Add,
+				.Media,
+				code,
+				message,
+				job.log_path,
+			),
+		)
+		return
+	}
+	if !import_job_apply(job) {
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"The CLI import completed, but the library update failed",
+		)
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				.Source_Add,
+				.Storage,
+				"storage_failed",
+				"The source was downloaded but the library update failed",
+			),
+		)
+		return
+	}
+	source := cli_find_source(job.last_video_id, job.workflow)
+	if source == nil {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				.Source_Add,
+				.Storage,
+				"storage_failed",
+				"The source is missing after the library update",
+			),
+		)
+		return
+	}
+	status := "imported"
+	if job.cli_existing_source {
+		status = "existing"
+		if len(state.hints) > job.cli_existing_hint_count {
+			status = "timestamp_added"
+		}
+	}
+	response := CLI_Source_Add_Response{
+		ok = true,
+		command = cli_command_name(.Source_Add),
+		data = {
+			status = status,
+			source = cli_source_output(source),
+		},
+	}
+	_ = notification_finish(
+		job.notification_id,
+		.Success,
+		fmt.tprintf("CLI source %s", status),
+	)
+	refresh_sources()
+	refresh_clips()
+	ui.needs_redraw = true
+	cli_ipc_work_finish(
+		work,
+		CLI_Result{
+			output = cli_encode(response),
+			exit_code = .Success,
+		},
+	)
 }
 
 cli_transcript_get :: proc(request: CLI_Request) -> CLI_Result {
@@ -533,7 +763,6 @@ cli_segment_range :: proc(source_id, from_segment, to_segment: string, segments:
 }
 
 cli_clip_create :: proc(request: CLI_Request) -> CLI_Result {
-	if import_job != nil || export_jobs_any() {return cli_error(request.command, .Busy, "busy", "Another media operation is active")}
 	source := cli_find_source(request.source_id, request.workflow)
 	if source == nil {return cli_error(request.command, .Invalid, "source_not_found", "The source does not exist")}
 	if !os.exists(source.media_path) {return cli_error(request.command, .Invalid, "media_missing", "The source media file is missing")}
@@ -584,6 +813,251 @@ cli_clip_create :: proc(request: CLI_Request) -> CLI_Result {
 	stored := &state.clips[len(state.clips)-1]
 	response := CLI_Clip_Create_Response{ok=true, command=cli_command_name(request.command), data=CLI_Clip_Create_Data{clip=cli_clip_output(stored)}}
 	return CLI_Result{output=cli_encode(response), exit_code=.Success}
+}
+
+cli_clip_create_enqueue :: proc(
+	request: CLI_Request,
+	work: ^CLI_IPC_Work,
+) -> bool {
+	if library_replacement_job != nil {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Busy,
+				"library_replacement_queued",
+				"The queued library replacement invalidates new media work",
+			),
+		)
+		return true
+	}
+	source := cli_find_source(request.source_id, request.workflow)
+	if source == nil {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Invalid,
+				"source_not_found",
+				"The source does not exist",
+			),
+		)
+		return true
+	}
+	if !os.exists(source.media_path) {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Invalid,
+				"media_missing",
+				"The source media file is missing",
+			),
+		)
+		return true
+	}
+	start_seconds, end_seconds, range_error := cli_segment_range(
+		source.id,
+		request.from_segment,
+		request.to_segment,
+		state.transcripts.segments[:],
+	)
+	if len(range_error) > 0 {
+		message := "One or both transcript segments do not exist"
+		if range_error == "segment_source_mismatch" {
+			message = "Both transcript segments must belong to the selected source"
+		} else if range_error == "segment_order_invalid" {
+			message = "The first transcript segment occurs after the last segment"
+		}
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Invalid,
+				range_error,
+				message,
+			),
+		)
+		return true
+	}
+	if !valid_clip_range(start_seconds, end_seconds, source.duration) {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Invalid,
+				"range_invalid",
+				"The transcript segments produce an invalid clip range",
+			),
+		)
+		return true
+	}
+	if available, reason := helper_available("ffmpeg"); !available {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Media,
+				"helper_unavailable",
+				reason,
+				diagnostic_log_path("ffmpeg"),
+			),
+		)
+		return true
+	}
+	number := next_clip_number_for_export(source)
+	if number <= 0 {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Storage,
+				"allocation_failed",
+				"Unable to reserve a clip identifier",
+			),
+		)
+		return true
+	}
+	clip := Clip{
+		id = fmt.tprintf("%s-%d", source.id, number),
+		source_id = source.id,
+		workflow = source.workflow,
+		name = request.name,
+		start_seconds = start_seconds,
+		end_seconds = end_seconds,
+		dance_count_in_bpm = 120,
+		dance_playback_rate = 1,
+	}
+	job := export_job_create(clip, source.media_path, .Save)
+	if job == nil {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Storage,
+				"allocation_failed",
+				"Unable to allocate the clip export",
+			),
+		)
+		return true
+	}
+	job.cli_work = work
+	fields := [1]Notification_Field{
+		{label = "CLI operation", value = "clip create"},
+	}
+	job.notification_id = notification_begin(
+		"CLI clip export queued",
+		"The command waits for this queued export while the application remains responsive.",
+		fields[:],
+	)
+	_ = os.write_entire_file(job.log_path, nil)
+	if !media_queue_schedule_export(job) {
+		result := cli_error(
+			request.command,
+			.Storage,
+			"queue_failed",
+			"Unable to queue the clip export",
+		)
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"Unable to queue the CLI clip export",
+		)
+		export_job_destroy(job)
+		cli_ipc_work_finish(work, result)
+	}
+	return true
+}
+
+cli_clip_create_finish :: proc(job: ^Export_Job) {
+	work := job.cli_work
+	if job.cancelled {
+		_ = notification_finish(
+			job.notification_id,
+			.Interrupted,
+			"CLI clip export stopped",
+		)
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				.Clip_Create,
+				.Media,
+				"cancelled",
+				"The clip export was cancelled",
+				job.log_path,
+			),
+		)
+		return
+	}
+	if !job.success {
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"CLI clip export failed",
+			fmt.tprintf("Inspect the diagnostic log at %s", job.log_path),
+		)
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				.Clip_Create,
+				.Media,
+				"clip_export_failed",
+				"FFmpeg could not create the clip",
+				job.log_path,
+			),
+		)
+		return
+	}
+	if !save_export_apply(job) {
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"The CLI clip was created, but the library update failed",
+		)
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				.Clip_Create,
+				.Storage,
+				"storage_failed",
+				"The clip was created but the library update failed",
+			),
+		)
+		return
+	}
+	index := clip_index_for_id(state.clips[:], job.clip.id)
+	if index < 0 {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				.Clip_Create,
+				.Storage,
+				"storage_failed",
+				"The clip is missing after the library update",
+			),
+		)
+		return
+	}
+	response := CLI_Clip_Create_Response{
+		ok = true,
+		command = cli_command_name(.Clip_Create),
+		data = {clip = cli_clip_output(&state.clips[index])},
+	}
+	_ = notification_finish(
+		job.notification_id,
+		.Success,
+		fmt.tprintf("CLI clip saved: %s", job.clip.name),
+	)
+	refresh_sources()
+	refresh_clips()
+	ui.needs_redraw = true
+	cli_ipc_work_finish(
+		work,
+		CLI_Result{
+			output = cli_encode(response),
+			exit_code = .Success,
+		},
+	)
 }
 
 cli_clip_list :: proc(request: CLI_Request) -> CLI_Result {

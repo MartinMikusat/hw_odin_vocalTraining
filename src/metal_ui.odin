@@ -2008,7 +2008,7 @@ source_paste_dismiss_transient_ui :: proc(preserve_add_modal: bool) {
 }
 
 source_paste_media_job_blocks :: proc() -> bool {
-	return source_import_media_job_blocks(false)
+	return source_import_media_job_blocks()
 }
 
 handle_global_source_paste :: proc(text: string) -> Source_Paste_Result {
@@ -6946,8 +6946,13 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			}
 			fill_overlay_rect(ctx, card, fill)
 			fill_overlay_rect(ctx, UI_Rect{card.x, card.y, 3, card.h}, card_accent)
-			has_stop := import_job != nil &&
-			            import_job.notification_id == notification_id
+			has_stop :=
+				import_job_for_notification(notification_id) != nil ||
+				export_job_for_notification(notification_id) != nil ||
+				(source_probe_job != nil &&
+				 source_probe_job.notification_id == notification_id) ||
+				(library_replacement_job != nil &&
+				 library_replacement_job.notification_id == notification_id)
 			has_source_action := notification.action_kind == .View_Source &&
 			                     notification_action_available(notification)
 			has_action := has_stop || has_source_action
@@ -7542,7 +7547,7 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		       len(ui.shortcut_collision) == 0
 	}
 	if kind == .Workflow_Toggle || kind == .Mode_Toggle {
-		return !export_jobs_have_exclusive_operation()
+		return true
 	}
 	if kind == .Activate_Notification_Action {
 		return notification_action_available(notification_selected())
@@ -7556,9 +7561,7 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		return !library_transfer_busy() && ui.library_import_pending
 	}
 	if kind == .Import {
-		return !source_import_media_job_blocks(
-			ui.source_modal_refetch_index >= 0,
-		)
+		return !source_import_media_job_blocks()
 	}
 	if kind == .Start || kind == .End {
 		return state.player != nil &&
@@ -7570,8 +7573,7 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		       active_clip_range_is_valid()
 	}
 	if kind == .Preview {
-		return import_job == nil &&
-		       !export_jobs_any() &&
+		return !library_transfer_busy() &&
 		       active_clip_range_is_valid()
 	}
 	if kind == .Randomize {
@@ -7635,8 +7637,7 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		return ui.pitch.help_open
 	}
 	if kind == .Rename || kind == .Metadata {
-		return import_job == nil &&
-		       ui.active_clip >= 0 &&
+		return ui.active_clip >= 0 &&
 		       ui.active_clip < len(state.clips)
 	}
 	if kind == .View_Clip_Source {
@@ -7654,21 +7655,6 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		return ui.clip_rename_index >= 0 &&
 		       ui.clip_rename_index < len(state.clips) &&
 		       len(strings.trim_space(ui.clip_rename)) > 0
-	}
-	if import_job == nil {return true}
-	#partial switch kind {
-	case .Open_Source_Modal,
-	     .Refetch_Source_Details,
-	     .Import,
-	     .Source_Quality,
-	     .Retry_Source_With_Browser,
-	     .Toggle_Save_Source_Browser,
-	     .Source_Hint_Menu,
-	     .Source_Hint,
-	     .Save,
-	     .Captions,
-	     .Preview:
-		return false
 	}
 	return true
 }
@@ -8173,8 +8159,13 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			notification := notification_find(notification_id)
 			if notification == nil {continue}
 			card := task_layout.task_rects[task_index]
-			has_stop := import_job != nil &&
-			            import_job.notification_id == notification_id
+			has_stop :=
+				import_job_for_notification(notification_id) != nil ||
+				export_job_for_notification(notification_id) != nil ||
+				(source_probe_job != nil &&
+				 source_probe_job.notification_id == notification_id) ||
+				(library_replacement_job != nil &&
+				 library_replacement_job.notification_id == notification_id)
 			source_index := -1
 			if notification.action_kind == .View_Source {
 				source_index = source_index_for_video_id(
@@ -8200,11 +8191,12 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				add_ax_element(
 					array,
 					element_class,
-					"Stop download",
+					"Stop media task",
 					"AXButton",
 					footer_task_action_rect(card),
 					.Stop_Download,
-					flash_label = "stop download",
+					int(notification_id),
+					flash_label = "stop media task",
 					functional_name = fmt.tprintf(
 						"stop notification task %d",
 						notification_id,
@@ -8255,15 +8247,30 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			.Open_Notification_History,
 			flash_label = "notifications",
 		)
-		if import_job != nil {
+		if len(import_jobs) > 0 ||
+		   len(export_jobs) > 0 ||
+		   source_probe_job != nil ||
+		   library_replacement_job != nil {
+			notification_id: i64
+			if len(import_jobs) > 0 {
+				notification_id = import_jobs[0].notification_id
+			} else if len(export_jobs) > 0 {
+				notification_id = export_jobs[0].notification_id
+			} else if source_probe_job != nil {
+				notification_id = source_probe_job.notification_id
+			} else {
+				notification_id =
+					library_replacement_job.notification_id
+			}
 			add_ax_element(
 				array,
 				element_class,
-				"Stop download",
+				"Stop media task",
 				"AXButton",
 				import_cancel_rect(),
 				.Stop_Download,
-				flash_label = "stop download",
+				int(notification_id),
+				flash_label = "stop media task",
 			)
 		}
 		if len(ui.status_source_video_id) > 0 {
@@ -9104,10 +9111,29 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		ui.needs_redraw = true
 		return true
 	case .Stop_Download:
-		if import_job != nil {
-			if library_recovery != nil {library_recovery.cancelled = true}
-			import_job_cancel(import_job)
-			set_text(state.status, "Stopping download...")
+		if job := import_job_for_notification(i64(action.index));
+		   job != nil {
+			if job.library_recovery_source && library_recovery != nil {
+				library_recovery.cancelled = true
+			}
+			_ = media_queue_cancel_import(job)
+			set_text(state.status, "Stopping media task...")
+		} else if job := export_job_for_notification(i64(action.index));
+		          job != nil {
+			_ = media_queue_cancel_export(job)
+			set_text(state.status, "Stopping media task...")
+		} else if source_probe_job != nil &&
+		          source_probe_job.notification_id ==
+		          i64(action.index) {
+			_ = media_queue_cancel_probe(source_probe_job)
+			set_text(state.status, "Stopping media task...")
+		} else if library_replacement_job != nil &&
+		          library_replacement_job.notification_id ==
+		          i64(action.index) {
+			_ = media_queue_cancel_library_replacement(
+				library_replacement_job,
+			)
+			set_text(state.status, "Stopping media task...")
 		}
 	case .View_Status_Source:
 		set_ui_mode(.Create)
@@ -9350,7 +9376,7 @@ palette_active_context :: proc() -> command_palette.Context_Mask {
 			bits |= u64(PALETTE_CONTEXT_RANGE)
 		}
 	}
-	if import_job != nil {bits |= u64(PALETTE_CONTEXT_IMPORT_BUSY)}
+	if import_jobs_any() {bits |= u64(PALETTE_CONTEXT_IMPORT_BUSY)}
 	if export_jobs_any() {bits |= u64(PALETTE_CONTEXT_EXPORT_BUSY)}
 	if export_jobs_have_exclusive_operation() {
 		bits |= u64(PALETTE_CONTEXT_EXPORT_EXCLUSIVE_BUSY)
@@ -11834,7 +11860,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	if notification_footer_group_active() {
 		ui.activity_tick += 1
 		if ui.activity_tick % 8 == 0 {
-			if import_job != nil {refresh_import_progress()}
+			if import_jobs_any() {refresh_import_progress()}
 			ui.needs_redraw = true
 		}
 	} else {
@@ -11925,6 +11951,12 @@ register_delegate :: proc(app: Id) {
 		delegate_class,
 		sel_registerName("sourceProbeFinished:"),
 		rawptr(on_source_probe_finished),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
+		sel_registerName("libraryReplacementReady:"),
+		rawptr(on_library_replacement_ready),
 		"v@:@",
 	)
 	class_addMethod(
