@@ -393,6 +393,8 @@ global_source_paste_preserves_workflow_and_opens_sources_test :: proc(
 	library_recovery_state = {}
 	major_change_pending = {}
 	ui_set_string(&ui.url_input, "https://youtu.be/stale")
+	save_export := Export_Job{operation = .Save}
+	export_job = &save_export
 
 	result := handle_global_source_paste("https://youtu.be/dance?t=30")
 
@@ -405,6 +407,8 @@ global_source_paste_preserves_workflow_and_opens_sources_test :: proc(
 	testing.expect_value(t, ui.url_input, "https://youtu.be/dance?t=30")
 	testing.expect(t, !ui.randomize_help_open)
 	testing.expect(t, ui.url_probe_pending)
+	testing.expect(t, export_job == &save_export)
+	testing.expect_value(t, export_job.operation, Export_Operation.Save)
 }
 
 @(test)
@@ -463,6 +467,44 @@ global_source_paste_appends_inside_open_add_modal_test :: proc(
 	testing.expect_value(t, result, Source_Paste_Result.Opened)
 	testing.expect_value(t, ui.source_modal_refetch_index, -1)
 	testing.expect_value(t, ui.url_input, "https://youtu.be/new-source")
+}
+
+@(test)
+source_paste_blocks_only_conflicting_media_jobs_test :: proc(t: ^testing.T) {
+	previous_import := import_job
+	previous_export := export_job
+	previous_library_recovery := library_recovery
+	defer {
+		import_job = previous_import
+		export_job = previous_export
+		library_recovery = previous_library_recovery
+	}
+	import_job = nil
+	export_job = nil
+	library_recovery = nil
+	testing.expect(t, !source_paste_media_job_blocks())
+
+	save_export := Export_Job{operation = .Save}
+	export_job = &save_export
+	testing.expect(t, !source_paste_media_job_blocks())
+
+	preview_export := Export_Job{operation = .Preview}
+	export_job = &preview_export
+	testing.expect(t, source_paste_media_job_blocks())
+
+	repair_export := Export_Job{operation = .Repair}
+	export_job = &repair_export
+	testing.expect(t, source_paste_media_job_blocks())
+
+	export_job = nil
+	active_import: Import_Job
+	import_job = &active_import
+	testing.expect(t, source_paste_media_job_blocks())
+
+	import_job = nil
+	active_recovery: Library_Recovery
+	library_recovery = &active_recovery
+	testing.expect(t, source_paste_media_job_blocks())
 }
 
 @(test)

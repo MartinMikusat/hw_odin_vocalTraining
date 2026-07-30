@@ -1980,15 +1980,21 @@ source_paste_dismiss_transient_ui :: proc(preserve_add_modal: bool) {
 	if ui.notification_modal_open {close_notification_history()}
 }
 
+source_paste_media_job_blocks :: proc() -> bool {
+	return import_job != nil ||
+	       library_recovery != nil ||
+	       export_job != nil && export_job.operation != .Save
+}
+
 handle_global_source_paste :: proc(text: string) -> Source_Paste_Result {
 	urls, recognized := source_paste_url_lines(text)
 	if !recognized {return .Not_YouTube}
 	if global_modal_blocks_commands() || ui.library_import_confirm_open {
 		return .Blocked
 	}
-	if import_job != nil || export_job != nil || library_recovery != nil {
+	if source_paste_media_job_blocks() {
 		set_error_status(
-			"Wait for the active media operation to finish before adding another source",
+			"Wait for the active import, preview, repair, or recovery to finish before adding another source",
 		)
 		return .Blocked
 	}
