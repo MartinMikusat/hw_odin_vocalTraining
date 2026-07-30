@@ -436,16 +436,48 @@ format_timestamp :: proc(seconds: f64) -> string {
 	return fmt.tprintf("%02d:%02d:%02d", hours, minutes, remaining_seconds)
 }
 
-parse_video_id :: proc(url: string) -> (string, bool) {
-	if i := strings.index(url, "youtu.be/"); i >= 0 {
-		v := url[i+len("youtu.be/"):]
-		if e := strings.index_any(v, "?&#"); e >= 0 { v = v[:e] }
-		return v, len(v) > 0
+parse_video_id :: proc(raw_url: string) -> (string, bool) {
+	url := strings.trim_space(raw_url)
+	lower := strings.to_lower(url, context.temp_allocator)
+	scheme_end := strings.index(lower, "://")
+	if scheme_end < 0 {return "", false}
+	scheme := lower[:scheme_end]
+	if scheme != "https" && scheme != "http" {return "", false}
+	authority_start := scheme_end + 3
+	authority_end := len(lower)
+	if separator := strings.index_any(lower[authority_start:], "/?#");
+	   separator >= 0 {
+		authority_end = authority_start + separator
 	}
-	if i := strings.index(url, "v="); i >= 0 {
-		v := url[i+2:]
-		if e := strings.index_any(v, "&#"); e >= 0 { v = v[:e] }
-		return v, len(v) > 0
+	if authority_end <= authority_start {return "", false}
+	host := lower[authority_start:authority_end]
+	remainder := url[authority_end:]
+	lower_remainder := lower[authority_end:]
+	if host == "youtu.be" || host == "www.youtu.be" {
+		if len(remainder) < 2 || remainder[0] != '/' {return "", false}
+		video_id := remainder[1:]
+		if end := strings.index_any(video_id, "/?&#"); end >= 0 {
+			video_id = video_id[:end]
+		}
+		return video_id, len(video_id) > 0
+	}
+	if host != "youtube.com" && !strings.has_suffix(host, ".youtube.com") {
+		return "", false
+	}
+	query_start := strings.index(lower_remainder, "?")
+	if query_start < 0 {return "", false}
+	path := lower_remainder[:query_start]
+	if path != "/watch" {return "", false}
+	query := remainder[query_start + 1:]
+	if fragment := strings.index(query, "#"); fragment >= 0 {
+		query = query[:fragment]
+	}
+	remaining := query
+	for parameter in strings.split_iterator(&remaining, "&") {
+		equals := strings.index(parameter, "=")
+		if equals < 0 || parameter[:equals] != "v" {continue}
+		video_id := parameter[equals + 1:]
+		return video_id, len(video_id) > 0
 	}
 	return "", false
 }

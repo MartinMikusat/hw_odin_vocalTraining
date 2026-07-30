@@ -289,6 +289,205 @@ parse_short_youtube_url_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+youtube_url_parser_requires_a_youtube_host_test :: proc(t: ^testing.T) {
+	_, ok := parse_video_id("https://example.com/watch?v=dQw4w9WgXcQ")
+	testing.expect(t, !ok)
+	_, ok = parse_video_id("https://example.com/?next=https://youtu.be/dQw4w9WgXcQ")
+	testing.expect(t, !ok)
+	id, valid := parse_video_id(
+		"https://music.youtube.com/watch?list=album&v=dQw4w9WgXcQ",
+	)
+	testing.expect(t, valid)
+	testing.expect_value(t, id, "dQw4w9WgXcQ")
+}
+
+@(test)
+source_paste_accepts_only_youtube_url_lines_test :: proc(t: ^testing.T) {
+	urls, recognized := source_paste_url_lines(
+		"\n https://youtu.be/first?t=20 \nhttps://www.youtube.com/watch?v=second\n",
+	)
+	testing.expect(t, recognized)
+	testing.expect_value(t, len(urls), 2)
+	testing.expect_value(t, urls[0], "https://youtu.be/first?t=20")
+	testing.expect_value(
+		t,
+		urls[1],
+		"https://www.youtube.com/watch?v=second",
+	)
+	_, recognized = source_paste_url_lines(
+		"Watch this:\nhttps://youtu.be/first",
+	)
+	testing.expect(t, !recognized)
+	_, recognized = source_paste_url_lines("ordinary search text")
+	testing.expect(t, !recognized)
+}
+
+@(test)
+source_paste_merge_appends_exact_new_lines_test :: proc(t: ^testing.T) {
+	incoming := []string{
+		"https://youtu.be/first?t=20",
+		"https://youtu.be/first?t=40",
+		"https://youtu.be/second",
+		"https://youtu.be/second",
+	}
+	merged := merge_source_paste_urls(
+		"https://youtu.be/first?t=20",
+		incoming,
+		true,
+	)
+	testing.expect_value(
+		t,
+		merged,
+		"https://youtu.be/first?t=20\nhttps://youtu.be/first?t=40\nhttps://youtu.be/second",
+	)
+	replaced := merge_source_paste_urls(
+		"https://youtu.be/stale",
+		incoming[:1],
+		false,
+	)
+	testing.expect_value(t, replaced, "https://youtu.be/first?t=20")
+}
+
+@(test)
+global_source_paste_preserves_workflow_and_opens_sources_test :: proc(
+	t: ^testing.T,
+) {
+	previous_state := state
+	previous_ui := ui
+	previous_database := library_database
+	previous_results := source_probe_results
+	previous_import := import_job
+	previous_export := export_job
+	previous_library_recovery := library_recovery
+	previous_recovery_state := library_recovery_state
+	previous_pending := major_change_pending
+	defer {
+		delete(ui.url_input)
+		state = previous_state
+		ui = previous_ui
+		library_database = previous_database
+		source_probe_results = previous_results
+		import_job = previous_import
+		export_job = previous_export
+		library_recovery = previous_library_recovery
+		library_recovery_state = previous_recovery_state
+		major_change_pending = previous_pending
+	}
+	state = App_State{active_source = -1}
+	ui = UI_State{
+		mode = .Play,
+		workflow = .Dancing,
+		active_clip = -1,
+		source_details_index = -1,
+		source_modal_refetch_index = -1,
+		clip_rename_index = -1,
+		clip_metadata_index = -1,
+		transcript_active_match = -1,
+		randomize_help_open = true,
+	}
+	library_database = nil
+	source_probe_results = nil
+	import_job = nil
+	export_job = nil
+	library_recovery = nil
+	library_recovery_state = {}
+	major_change_pending = {}
+	ui_set_string(&ui.url_input, "https://youtu.be/stale")
+
+	result := handle_global_source_paste("https://youtu.be/dance?t=30")
+
+	testing.expect_value(t, result, Source_Paste_Result.Opened)
+	testing.expect_value(t, ui.workflow, Workflow_Kind.Dancing)
+	testing.expect_value(t, ui.mode, UI_Mode.Create)
+	testing.expect(t, ui.source_modal_open)
+	testing.expect_value(t, ui.source_modal_refetch_index, -1)
+	testing.expect_value(t, ui.focus, UI_Focus.URL)
+	testing.expect_value(t, ui.url_input, "https://youtu.be/dance?t=30")
+	testing.expect(t, !ui.randomize_help_open)
+	testing.expect(t, ui.url_probe_pending)
+}
+
+@(test)
+global_source_paste_appends_inside_open_add_modal_test :: proc(
+	t: ^testing.T,
+) {
+	previous_ui := ui
+	previous_results := source_probe_results
+	previous_import := import_job
+	previous_export := export_job
+	previous_library_recovery := library_recovery
+	previous_recovery_state := library_recovery_state
+	previous_pending := major_change_pending
+	defer {
+		delete(ui.url_input)
+		ui = previous_ui
+		source_probe_results = previous_results
+		import_job = previous_import
+		export_job = previous_export
+		library_recovery = previous_library_recovery
+		library_recovery_state = previous_recovery_state
+		major_change_pending = previous_pending
+	}
+	ui = UI_State{
+		mode = .Create,
+		workflow = .Vocal,
+		source_modal_open = true,
+		source_modal_refetch_index = -1,
+	}
+	source_probe_results = nil
+	import_job = nil
+	export_job = nil
+	library_recovery = nil
+	library_recovery_state = {}
+	major_change_pending = {}
+	ui_set_string(&ui.url_input, "https://youtu.be/first?t=20")
+
+	result := handle_global_source_paste(
+		"https://youtu.be/first?t=20\nhttps://youtu.be/first?t=40",
+	)
+
+	testing.expect_value(t, result, Source_Paste_Result.Opened)
+	testing.expect_value(t, ui.workflow, Workflow_Kind.Vocal)
+	testing.expect_value(t, ui.mode, UI_Mode.Create)
+	testing.expect(t, ui.source_modal_open)
+	testing.expect_value(
+		t,
+		ui.url_input,
+		"https://youtu.be/first?t=20\nhttps://youtu.be/first?t=40",
+	)
+
+	ui.source_modal_refetch_index = 0
+	ui_set_string(&ui.url_input, "https://youtu.be/refetch")
+	result = handle_global_source_paste("https://youtu.be/new-source")
+
+	testing.expect_value(t, result, Source_Paste_Result.Opened)
+	testing.expect_value(t, ui.source_modal_refetch_index, -1)
+	testing.expect_value(t, ui.url_input, "https://youtu.be/new-source")
+}
+
+@(test)
+global_source_paste_respects_critical_modal_test :: proc(t: ^testing.T) {
+	previous_ui := ui
+	previous_recovery_state := library_recovery_state
+	previous_pending := major_change_pending
+	defer {
+		ui = previous_ui
+		library_recovery_state = previous_recovery_state
+		major_change_pending = previous_pending
+	}
+	ui = UI_State{mode = .Play, workflow = .Vocal}
+	library_recovery_state = {required = true}
+	major_change_pending = {}
+
+	result := handle_global_source_paste("https://youtu.be/blocked")
+
+	testing.expect_value(t, result, Source_Paste_Result.Blocked)
+	testing.expect_value(t, ui.mode, UI_Mode.Play)
+	testing.expect(t, !ui.source_modal_open)
+	testing.expect_value(t, ui.url_input, "")
+}
+
+@(test)
 timestamp_format_uses_hours_minutes_and_seconds_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, format_timestamp(0), "00:00:00")
 	testing.expect_value(t, format_timestamp(65.9), "00:01:05")

@@ -117,6 +117,12 @@ UI_Mode :: enum {
 	Play,
 }
 
+Source_Paste_Result :: enum {
+	Not_YouTube,
+	Blocked,
+	Opened,
+}
+
 WORKFLOW_COUNT :: 2
 VIDEO_FRAME_RETRY_TICKS :: uint(120)
 
@@ -1897,6 +1903,115 @@ open_source_modal :: proc() {
 	focus_text_input(.URL)
 	ui.needs_redraw = true
 	if len(strings.trim_space(ui.url_input)) > 0 && len(source_probe_results) == 0 {schedule_source_probe(1)}
+}
+
+source_paste_url_lines :: proc(
+	text: string,
+	allocator := context.temp_allocator,
+) -> ([dynamic]string, bool) {
+	urls := make([dynamic]string, allocator)
+	remaining := text
+	for raw_line in strings.split_lines_iterator(&remaining) {
+		line := strings.trim_space(raw_line)
+		if len(line) == 0 {continue}
+		if _, valid := parse_video_id(line); !valid {return urls, false}
+		append(&urls, line)
+	}
+	return urls, len(urls) > 0
+}
+
+merge_source_paste_urls :: proc(
+	current: string,
+	incoming: []string,
+	append_current: bool,
+	allocator := context.temp_allocator,
+) -> string {
+	builder: strings.Builder
+	strings.builder_init(&builder, allocator)
+	seen := make([dynamic]string, allocator)
+	has_output := false
+	if append_current {
+		existing := strings.trim_space(current)
+		if len(existing) > 0 {
+			strings.write_string(&builder, existing)
+			has_output = true
+			remaining := existing
+			for raw_line in strings.split_lines_iterator(&remaining) {
+				line := strings.trim_space(raw_line)
+				if len(line) > 0 {append(&seen, line)}
+			}
+		}
+	}
+	for line in incoming {
+		duplicate := false
+		for existing in seen {
+			if existing == line {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {continue}
+		if has_output {strings.write_string(&builder, "\n")}
+		strings.write_string(&builder, line)
+		append(&seen, line)
+		has_output = true
+	}
+	return strings.to_string(builder)
+}
+
+source_paste_dismiss_transient_ui :: proc(preserve_add_modal: bool) {
+	if ui.shortcut_open {video_clips_shortcut_recorder_close()}
+	if ui.settings_open {video_clips_settings_close()}
+	if command_palette.is_open(&command_palette_state) {
+		close_command_palette(false)
+	}
+	cancel_ui_flash()
+	clear_number_prefix()
+	if ui.source_modal_open &&
+	   (!preserve_add_modal || ui.source_modal_refetch_index >= 0) {
+		close_source_modal()
+	}
+	if ui.source_details_open {close_source_details()}
+	if ui.clip_rename_open {close_clip_rename()}
+	if ui.clip_metadata_open {close_clip_metadata()}
+	if ui.randomize_help_open {close_randomize_help()}
+	if ui.pitch.help_open {close_pitch_help()}
+	if ui.data_modal_open {close_data_modal()}
+	if ui.notification_modal_open {close_notification_history()}
+}
+
+handle_global_source_paste :: proc(text: string) -> Source_Paste_Result {
+	urls, recognized := source_paste_url_lines(text)
+	if !recognized {return .Not_YouTube}
+	if global_modal_blocks_commands() || ui.library_import_confirm_open {
+		return .Blocked
+	}
+	if import_job != nil || export_job != nil || library_recovery != nil {
+		set_error_status(
+			"Wait for the active media operation to finish before adding another source",
+		)
+		return .Blocked
+	}
+	append_current :=
+		ui.mode == .Create &&
+		ui.source_modal_open &&
+		ui.source_modal_refetch_index < 0
+	source_paste_dismiss_transient_ui(append_current)
+	if ui.mode != .Create {set_ui_mode(.Create)}
+	updated := merge_source_paste_urls(
+		ui.url_input,
+		urls[:],
+		append_current,
+	)
+	if updated != ui.url_input {
+		ui_set_string(&ui.url_input, updated)
+		source_probe_results_clear()
+		schedule_source_probe(1)
+	}
+	if !ui.source_modal_open {open_source_modal()} else {focus_text_input(.URL)}
+	collapse_text_selection(len(ui.url_input))
+	ui.needs_redraw = true
+	return .Opened
 }
 
 open_refetch_source_modal :: proc(source_index: int) {
@@ -11005,23 +11120,39 @@ on_metal_select_all :: proc "c" (self: Id, command: Sel, sender: Id) {
 	set_text_selection(0, len(target^), target^)
 }
 
-on_metal_paste :: proc "c" (self: Id, command: Sel, sender: Id) {
-	context = runtime.default_context()
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	target := focused_text()
-	if target == nil {return}
-	pasteboard := msg_id(objc_getClass("NSPasteboard"), sel_registerName("generalPasteboard"))
-	if pasteboard == nil {return}
+general_pasteboard_text :: proc() -> (string, bool) {
+	pasteboard := msg_id(
+		objc_getClass("NSPasteboard"),
+		sel_registerName("generalPasteboard"),
+	)
+	if pasteboard == nil {return "", false}
 	value := msg_id_id(
 		pasteboard,
 		sel_registerName("stringForType:"),
 		nsstring("public.utf8-plain-text"),
 	)
-	if value == nil {return}
+	if value == nil {return "", false}
 	utf8 := msg_id(value, sel_registerName("UTF8String"))
-	if utf8 == nil {return}
+	if utf8 == nil {return "", false}
+	return string(cstring(utf8)), true
+}
+
+handle_global_source_pasteboard :: proc() -> bool {
+	text, available := general_pasteboard_text()
+	if !available {return false}
+	return handle_global_source_paste(text) != .Not_YouTube
+}
+
+on_metal_paste :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	text, available := general_pasteboard_text()
+	if !available {return}
+	if handle_global_source_paste(text) != .Not_YouTube {return}
+	target := focused_text()
+	if target == nil {return}
 	remove_marked_text(target)
-	insert_text_at_caret(target, string(cstring(utf8)))
+	insert_text_at_caret(target, text)
 	if target == &ui.url_input {schedule_source_probe(1)} else {focused_text_changed(target)}
 	ui.needs_redraw = true
 }
@@ -11197,6 +11328,10 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 			close_command_palette(false)
 		}
 		cancel_ui_flash()
+	}
+	if is_paste_shortcut(key, modifiers) &&
+	   handle_global_source_pasteboard() {
+		return
 	}
 	if ui.shortcut_open {
 		if key == 53 {

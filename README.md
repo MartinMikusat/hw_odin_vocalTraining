@@ -120,13 +120,20 @@ produce count audio. **Count Each Loop** repeats the visual count before each
 loop. Pause and resume do not start another count. **Loop** restarts the active
 clip and takes priority over Autoplay.
 
-Press **Add** in the Source Register to open the ingest dialog, then paste one
-or more YouTube URLs with one URL per line. URLs are normalized by video ID,
-while timestamps supplied through `t`, `start`, or `youtu.be` URL forms become
-initial playhead hints. The dialog checks each URL in the background and shows
-its title, duration, and available video resolutions. Select a resolution for
-each video before import. The default is the best available resolution at or
-below 1080p, or the lowest available resolution when all options are higher.
+With the app focused, press **Command-V** after copying one or more supported
+YouTube URL lines. The application preserves the active workflow, switches to
+Sources, opens Add Source, and starts the metadata check. If Add Source is
+already open, it appends new URL lines and skips exact duplicates. Other
+clipboard text keeps its normal focused-field paste behavior.
+
+Press **Add** in the Source Register to open the ingest dialog manually, then
+paste one or more YouTube URLs with one URL per line. URLs are normalized by
+video ID, while timestamps supplied through `t`, `start`, or `youtu.be` URL
+forms become initial playhead hints. The dialog checks each URL in the
+background and shows its title, duration, and available video resolutions.
+Select a resolution for each video before import. The default is the best
+available resolution at or below 1080p, or the lowest available resolution
+when all options are higher.
 Import fetches the selected MP4 video and M4A audio streams and
 merges them without transcoding. Import prefers an English
 caption track and otherwise accepts YouTube's original-language automatic
