@@ -96,6 +96,30 @@ window_header_identity_reports_each_active_view_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+window_header_mode_controls_describe_their_actions_test :: proc(t: ^testing.T) {
+	testing.expect_value(
+		t,
+		workflow_switch_label(.Vocal),
+		"SWITCH TO DANCING",
+	)
+	testing.expect_value(
+		t,
+		workflow_switch_label(.Dancing),
+		"SWITCH TO VOCAL",
+	)
+	testing.expect_value(
+		t,
+		workspace_switch_label(.Create),
+		"SWITCH TO CLIPS",
+	)
+	testing.expect_value(
+		t,
+		workspace_switch_label(.Play),
+		"SWITCH TO SOURCES",
+	)
+}
+
+@(test)
 window_resize_geometry_detects_edges_and_enforces_minimum_test :: proc(
 	t: ^testing.T,
 ) {

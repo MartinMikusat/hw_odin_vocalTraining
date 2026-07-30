@@ -1159,6 +1159,14 @@ active_view_label :: proc(
 	return ""
 }
 
+workflow_switch_label :: proc(workflow: Workflow_Kind) -> string {
+	return workflow == .Vocal ? "SWITCH TO DANCING" : "SWITCH TO VOCAL"
+}
+
+workspace_switch_label :: proc(mode: UI_Mode) -> string {
+	return mode == .Create ? "SWITCH TO CLIPS" : "SWITCH TO SOURCES"
+}
+
 window_resize_edges_for_size :: proc(
 	point: Point,
 	width, height: f64,
@@ -6012,20 +6020,24 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	)
 	mode_rect := ui_control_rect(.Mode_Toggle)
 	workflow_rect := ui_control_rect(.Workflow_Toggle)
-	workflow_text := "WORKFLOW / VOCAL"
-	if ui.workflow == .Dancing {workflow_text = "WORKFLOW / DANCING"}
 	draw_text_in_rect(
 		ctx,
 		small_font,
-		workflow_text,
+		workflow_switch_label(ui.workflow),
 		workflow_rect,
 		.Center,
 		.Center,
 		orange,
 	)
-	mode_text := "WORKSPACE / SOURCES"
-	if ui.mode == .Play {mode_text = "WORKSPACE / CLIPS"}
-	draw_text_in_rect(ctx, small_font, mode_text, mode_rect, .Center, .Center, orange)
+	draw_text_in_rect(
+		ctx,
+		small_font,
+		workspace_switch_label(ui.mode),
+		mode_rect,
+		.Center,
+		.Center,
+		orange,
+	)
 	source_header := UI_Rect {
 		source_panel.x,
 		source_panel.y + source_panel.h - 35,
