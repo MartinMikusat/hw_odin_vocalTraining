@@ -479,7 +479,7 @@ external distribution:
   import and clip export complete without Homebrew, and the final app size and
   embedded helper versions are recorded.
 
-### Reload loop
+### Development loop
 
 Run the dependency-free watcher during development:
 
@@ -487,23 +487,16 @@ Run the dependency-free watcher during development:
 ./dev.sh
 ```
 
-For debug and ASan modes, the watcher builds a stable AppKit host and loads the
-application from a generation-specific dylib. A source edit builds a new
-dylib. The host swaps it at a frame boundary and preserves the window, active
-workflow, selections, playback objects, library connection, search state, and
-UI allocations. It defers the swap while media, metadata, recovery, or CLI work
-is active.
+For debug, trace, and ASan modes, a source or resource change rebuilds the
+complete application. The watcher replaces the running process only after a
+successful build. A failed build leaves the current process active.
 
-Changes to the host contract, application metadata, or bundled resources
-rebuild and restart the host. An incompatible state layout also requests a
-controlled restart with exit status 75. A failed module build leaves the
-current generation active. Trace and release modes keep the full rebuild path.
 Every `./dev.sh` launch orders the window behind active applications. Launch
 the app directly when it must activate and move to the front. Metal validation
 is enabled. Press `Ctrl-C` to stop the watcher and app.
 
-The frame timer continues to poll jobs and hot reload state while the app is
-idle. It does not submit Metal work until playback or a UI change requires it.
+The frame timer continues to poll jobs while the app is idle. It does not
+submit Metal work until playback or a UI change requires it.
 Pausing playback stops the audio node and engine. Resuming playback schedules
 audio from the position stored by `AVPlayer`.
 

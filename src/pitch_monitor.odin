@@ -388,6 +388,19 @@ pitch_monitor_initialize :: proc(
 	state.capture_status = .Stopped
 }
 
+pitch_monitor_refresh_permission :: proc(
+	state: ^Pitch_Monitor_State,
+) -> bool {
+	if state == nil || state.permission_pending {return false}
+	permission := Pitch_Permission(vt_pitch_permission_status())
+	if permission == state.permission {return false}
+	state.permission = permission
+	if state.tracking && permission != .Authorized {
+		pitch_monitor_stop(state)
+	}
+	return true
+}
+
 pitch_monitor_start_capture :: proc(state: ^Pitch_Monitor_State) -> bool {
 	if state.tracking {return true}
 	capture := vt_pitch_capture_create()
@@ -498,7 +511,12 @@ pitch_monitor_status_text :: proc(state: ^Pitch_Monitor_State) -> string {
 		return "MICROPHONE START FAILED"
 	case:
 	}
-	if !state.tracking {return "READY / PRESS 07 TO START"}
+	if !state.tracking {
+		return fmt.tprintf(
+			"READY / PRESS %s TO START",
+			pitch_numbered_action_text(),
+		)
+	}
 	if !state.voiced {return "LISTENING / NO STABLE PITCH"}
 	return "TRACKING"
 }

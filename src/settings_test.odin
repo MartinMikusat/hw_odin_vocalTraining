@@ -4,6 +4,7 @@ import "core:testing"
 import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
 import match_sorter "match_sorter:."
+import text_input "components:text_input"
 
 @(test)
 vocal_settings_layout_contains_two_columns_at_minimum_size_test :: proc(
@@ -116,11 +117,21 @@ vocal_settings_controls_accept_pointer_actions_test :: proc(t: ^testing.T) {
 	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
 	testing.expect(t, find_ui_control_by_action(.Open_Settings) != nil)
-	testing.expect(t, find_ui_control_by_action(.Settings_Search) != nil)
+	settings_search := find_ui_control_by_action(.Settings_Search)
+	testing.expect(t, settings_search != nil)
 	testing.expect(t, find_ui_control_by_action(.Set_Theme) != nil)
 	for control in ui_build.controls {
 		testing.expect(t, control.functional_name != "theme toggle")
 	}
+	if settings_search != nil {
+		dispatch_click({
+			settings_search.rect.x+settings_search.rect.w/2,
+			settings_search.rect.y+settings_search.rect.h/2,
+		})
+	}
+	testing.expect_value(t, ui.focus, UI_Focus.Settings_Search)
+	testing.expect(t, ui.drag_active)
+	text_input.end_pointer_selection(&ui.input_state)
 
 	shortcuts_category := find_ui_control_by_action_and_index(
 		.Settings_Category,
@@ -160,6 +171,59 @@ vocal_settings_controls_accept_pointer_actions_test :: proc(t: ^testing.T) {
 		})
 	}
 	testing.expect(t, !ui.shortcut_open)
+}
+
+@(test)
+vocal_settings_commands_do_not_open_behind_blocking_modals_test :: proc(
+	t: ^testing.T,
+) {
+	previous_ui := ui
+	previous_recovery := library_recovery_state
+	previous_pending := major_change_pending
+	defer {
+		ui = previous_ui
+		library_recovery_state = previous_recovery
+		major_change_pending = previous_pending
+	}
+	ui = UI_State{}
+	library_recovery_state = Library_Recovery_State{required = true}
+	major_change_pending = {}
+	testing.expect(t, !vocal_settings_open())
+	testing.expect(t, !vocal_settings_apply_theme(true))
+	testing.expect(t, !vocal_shortcut_recorder_open())
+	testing.expect(t, !ui.settings_open)
+	testing.expect(t, !ui.shortcut_open)
+	testing.expect(t, !activate_ui_action(UI_Action{kind = .Set_Theme, value = 1}))
+
+	library_recovery_state = {}
+	major_change_pending = Major_Change_Pending{open = true}
+	testing.expect(t, !vocal_settings_open())
+	testing.expect(t, !vocal_shortcut_recorder_open())
+	testing.expect(t, !ui.settings_open)
+	testing.expect(t, !ui.shortcut_open)
+}
+
+@(test)
+settings_and_shortcut_modals_consume_content_scroll_test :: proc(
+	t: ^testing.T,
+) {
+	previous_ui := ui
+	previous_recovery := library_recovery_state
+	previous_pending := major_change_pending
+	defer {
+		ui = previous_ui
+		library_recovery_state = previous_recovery
+		major_change_pending = previous_pending
+	}
+	ui = UI_State{settings_open = true}
+	library_recovery_state = {}
+	major_change_pending = {}
+	testing.expect(t, modal_consumes_content_scroll())
+	ui.settings_open = false
+	ui.shortcut_open = true
+	testing.expect(t, modal_consumes_content_scroll())
+	ui.shortcut_open = false
+	testing.expect(t, !modal_consumes_content_scroll())
 }
 
 @(test)

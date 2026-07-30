@@ -7,14 +7,19 @@ cd "$ROOT"
 MODE=${1:-debug}
 case "$MODE" in
   debug) APP="$ROOT/build/VocalTraining.app" ;;
-  trace|asan|release) APP="$ROOT/build/$MODE/VocalTraining.app" ;;
+  trace|asan) APP="$ROOT/build/$MODE/VocalTraining.app" ;;
+  release)
+    "$ROOT/build.sh" release
+    exec "$ROOT/build/release/VocalTraining.app/Contents/MacOS/VocalTraining"
+    ;;
   *)
     echo "usage: ./dev.sh [debug|trace|asan|release]" >&2
     exit 2
     ;;
 esac
+
 EXECUTABLE="$APP/Contents/MacOS/VocalTraining"
-MODULE="$ROOT/build/hot-reload/$MODE/vocal-training.dylib"
+LOCK="$ROOT/build/dev-watcher.lock"
 APP_PID=""
 STOPPING_APP=0
 MEMORY_PROFILE=${VT_MEMORY_PROFILE:-none}
@@ -32,27 +37,19 @@ case "$MEMORY_WARN_KB" in
     ;;
 esac
 
-"$ROOT/scripts/library-fixture.sh" init
-
-legacy_fingerprint() {
-  stat -f '%m:%z:%N' src/*.odin ./*.sh scripts/*.sh Info.plist resources/fonts/* resources/icons/iconoir/* 2>/dev/null | shasum | cut -d' ' -f1
-}
-
-module_fingerprint() {
-  stat -f '%m:%z:%N' src/*.odin dependencies.lock 2>/dev/null |
-    shasum | cut -d' ' -f1
-}
-
-host_fingerprint() {
-  find dev -type f -name '*.odin' -exec stat -f '%m:%z:%N' {} + 2>/dev/null
-  stat -f '%m:%z:%N' \
-    Info.plist scripts/hot-reload-build.sh \
-    resources/fonts/* resources/icons/iconoir/* \
-    2>/dev/null
-}
-
-hot_reload_fingerprint() {
-  host_fingerprint | shasum | cut -d' ' -f1
+fingerprint() {
+  {
+    stat -f '%m:%z:%N' \
+      "$ROOT"/src/*.odin \
+      "$ROOT"/src/*.m \
+      "$ROOT"/*.sh \
+      "$ROOT"/scripts/*.sh \
+      "$ROOT"/dependencies.lock \
+      "$ROOT"/Info.plist \
+      "$ROOT"/resources/fonts/* \
+      "$ROOT"/resources/icons/iconoir/* \
+      2>/dev/null
+  } | shasum | cut -d' ' -f1
 }
 
 stop_app() {
@@ -65,9 +62,18 @@ stop_app() {
   APP_PID=""
 }
 
+cleanup() {
+  exit_status=$?
+  trap - INT TERM EXIT
+  stop_app
+  rm -f "$LOCK/pid"
+  rmdir "$LOCK" 2>/dev/null || true
+  exit "$exit_status"
+}
+
 archive_crash() {
-  status=$1
-  "$ROOT/scripts/archive-crash.sh" "$MODE" "$APP" "$status" || true
+  exit_status=$1
+  "$ROOT/scripts/archive-crash.sh" "$MODE" "$APP" "$exit_status" || true
 }
 
 check_app() {
@@ -75,19 +81,16 @@ check_app() {
     return
   fi
   if wait "$APP_PID"; then
-    status=0
+    exit_status=0
   else
-    status=$?
+    exit_status=$?
   fi
-  crashed_pid=$APP_PID
+  exited_pid=$APP_PID
   APP_PID=""
-  if [ "$STOPPING_APP" -eq 0 ] && [ "$status" -ne 0 ]; then
-    printf '[vocal-training] app pid %s exited with status %s\n' "$crashed_pid" "$status"
-    if [ "$status" -eq 75 ] && { [ "$MODE" = "debug" ] || [ "$MODE" = "asan" ]; }; then
-      launch_app
-    else
-      archive_crash "$status"
-    fi
+  if [ "$STOPPING_APP" -eq 0 ] && [ "$exit_status" -ne 0 ]; then
+    printf '[vocal-training] app pid %s exited with status %s\n' \
+      "$exited_pid" "$exit_status"
+    archive_crash "$exit_status"
   fi
 }
 
@@ -122,11 +125,6 @@ check_memory() {
 launch_app() {
   VT_ACTIVATE_ON_LAUNCH=0
   export VT_ACTIVATE_ON_LAUNCH
-  if [ "$MODE" = "debug" ] || [ "$MODE" = "asan" ]; then
-    export VT_HOT_RELOAD_MODULE="$MODULE"
-  else
-    unset VT_HOT_RELOAD_MODULE
-  fi
   case "$MEMORY_PROFILE" in
     none)
       env MTL_DEBUG_LAYER=1 "$EXECUTABLE" &
@@ -141,7 +139,9 @@ launch_app() {
       env MTL_DEBUG_LAYER=1 NSZombieEnabled=YES MallocStackLogging=1 "$EXECUTABLE" &
       ;;
     guard-malloc)
-      env MTL_DEBUG_LAYER=1 DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib "$EXECUTABLE" &
+      env MTL_DEBUG_LAYER=1 \
+        DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib \
+        "$EXECUTABLE" &
       ;;
     *)
       echo "unknown VT_MEMORY_PROFILE: $MEMORY_PROFILE" >&2
@@ -154,71 +154,44 @@ launch_app() {
   MEMORY_CAPTURED_PID=""
 }
 
-legacy_rebuild_and_launch() {
+rebuild_and_launch() {
   printf '\n[vocal-training] rebuilding %s...\n' "$MODE"
-  if ! ./build.sh "$MODE"; then
+  if ! "$ROOT/build.sh" "$MODE"; then
     printf '[vocal-training] build failed; keeping the current app running\n'
     return
   fi
-
   stop_app
   if launch_app; then
-    printf '[vocal-training] relaunched pid %s (%s, memory profile: %s)\n' "$APP_PID" "$MODE" "$MEMORY_PROFILE"
+    printf '[vocal-training] relaunched pid %s (%s, memory profile: %s)\n' \
+      "$APP_PID" "$MODE" "$MEMORY_PROFILE"
   fi
 }
 
-hot_rebuild_and_launch() {
-  printf '\n[vocal-training] rebuilding hot-reload %s host and module...\n' "$MODE"
-  if ! "$ROOT/scripts/hot-reload-build.sh" "$MODE" all; then
-    printf '[vocal-training] build failed; keeping the current app running\n'
-    return
+mkdir -p "$ROOT/build"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  existing=$(sed -n '1p' "$LOCK/pid" 2>/dev/null || true)
+  if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
+    printf '[vocal-training] dev watcher already running as pid %s\n' "$existing"
+    exit 0
   fi
-
-  stop_app
-  if launch_app; then
-    printf '[vocal-training] relaunched pid %s (%s, memory profile: %s)\n' "$APP_PID" "$MODE" "$MEMORY_PROFILE"
-  fi
-}
-
-hot_rebuild_module() {
-  printf '\n[vocal-training] rebuilding hot-reload %s module...\n' "$MODE"
-  if ! "$ROOT/scripts/hot-reload-build.sh" "$MODE" module; then
-    printf '[vocal-training] module build failed; the current module remains active\n'
-  fi
-}
-
-trap 'stop_app; exit 0' INT TERM EXIT
-
-if [ "$MODE" = "debug" ] || [ "$MODE" = "asan" ]; then
-  hot_rebuild_and_launch
-  LAST_MODULE_FINGERPRINT=$(module_fingerprint)
-  LAST_HOST_FINGERPRINT=$(hot_reload_fingerprint)
-else
-  legacy_rebuild_and_launch
-  LAST_FINGERPRINT=$(legacy_fingerprint)
+  rm -f "$LOCK/pid"
+  rmdir "$LOCK" 2>/dev/null || true
+  mkdir "$LOCK"
 fi
+printf '%s\n' "$$" > "$LOCK/pid"
+trap cleanup INT TERM EXIT
+
+"$ROOT/scripts/library-fixture.sh" init
+rebuild_and_launch
+LAST_FINGERPRINT=$(fingerprint)
 
 while :; do
   sleep 0.5
   check_app
   check_memory
-  if [ "$MODE" != "debug" ] && [ "$MODE" != "asan" ]; then
-    CURRENT_FINGERPRINT=$(legacy_fingerprint)
-    if [ "$CURRENT_FINGERPRINT" != "$LAST_FINGERPRINT" ]; then
-      LAST_FINGERPRINT=$CURRENT_FINGERPRINT
-      legacy_rebuild_and_launch
-    fi
-    continue
-  fi
-
-  CURRENT_HOST_FINGERPRINT=$(hot_reload_fingerprint)
-  CURRENT_MODULE_FINGERPRINT=$(module_fingerprint)
-  if [ "$CURRENT_HOST_FINGERPRINT" != "$LAST_HOST_FINGERPRINT" ]; then
-    LAST_HOST_FINGERPRINT=$CURRENT_HOST_FINGERPRINT
-    LAST_MODULE_FINGERPRINT=$CURRENT_MODULE_FINGERPRINT
-    hot_rebuild_and_launch
-  elif [ "$CURRENT_MODULE_FINGERPRINT" != "$LAST_MODULE_FINGERPRINT" ]; then
-    LAST_MODULE_FINGERPRINT=$CURRENT_MODULE_FINGERPRINT
-    hot_rebuild_module
+  CURRENT_FINGERPRINT=$(fingerprint)
+  if [ "$CURRENT_FINGERPRINT" != "$LAST_FINGERPRINT" ]; then
+    LAST_FINGERPRINT=$CURRENT_FINGERPRINT
+    rebuild_and_launch
   fi
 done

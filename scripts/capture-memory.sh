@@ -9,7 +9,6 @@ PID=$2
 APP=$3
 RSS_KB=$4
 EXECUTABLE="$APP/Contents/MacOS/VocalTraining"
-MODULE="$ROOT/build/hot-reload/$MODE/vocal-training.dylib"
 TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
 DEST="$ROOT/build/memory-diagnostics/$TIMESTAMP-$MODE-pid-$PID"
 
@@ -29,10 +28,6 @@ mkdir -p "$DEST"
   printf 'built_binary=%s\n' "$EXECUTABLE"
   if [ -f "$EXECUTABLE" ]; then
     xcrun dwarfdump --uuid "$EXECUTABLE" 2>/dev/null || true
-  fi
-  if [ -f "$MODULE" ]; then
-    printf 'hot_reload_module=%s\n' "$MODULE"
-    xcrun dwarfdump --uuid "$MODULE" 2>/dev/null || true
   fi
 } > "$DEST/metadata.txt"
 

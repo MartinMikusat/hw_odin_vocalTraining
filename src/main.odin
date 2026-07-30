@@ -14,8 +14,6 @@ import "base:runtime"
 import mem_virtual "core:mem/virtual"
 import match_sorter "match_sorter:."
 
-HOT_RELOAD_MODULE :: #config(HOT_RELOAD_MODULE, false)
-
 Id  :: rawptr
 Sel :: rawptr
 
@@ -840,6 +838,7 @@ seek_video_seconds :: proc(seconds: f64) {
 
 seek_seconds :: proc(seconds: f64) {
 	if state.player == nil { return }
+	ui.playback_completion_pending = false
 	request_transcript_follow_to(seconds)
 	resume := msg_f32(state.player, sel_registerName("rate")) > 0
 	seek_video_seconds(seconds)
@@ -856,6 +855,7 @@ scrub_player_by :: proc(delta: f64) {
 
 start_loaded_playback_at :: proc(seconds: f64) {
 	if state.player == nil {return}
+	ui.playback_completion_pending = false
 	request_transcript_follow_to(seconds)
 	seek_video_seconds(seconds)
 	metal_audio_seek(seconds, false)
@@ -925,6 +925,7 @@ select_source_hint :: proc(source_index: int, seconds: f64) -> bool {
 
 stop_player_playback :: proc() {
 	if state.player == nil {return}
+	ui.playback_completion_pending = false
 	msg_void(state.player, sel_registerName("pause"))
 	metal_audio_pause()
 	seek_seconds(0)
@@ -933,6 +934,7 @@ stop_player_playback :: proc() {
 
 pause_player_playback :: proc() {
 	if state.player == nil {return}
+	ui.playback_completion_pending = false
 	msg_void(state.player, sel_registerName("pause"))
 	metal_audio_pause()
 	ui.needs_redraw = true
@@ -959,17 +961,18 @@ playback_position_finished :: proc(seconds, duration: f64) -> bool {
 
 exercise_autoplay_should_advance :: proc(
 	enabled,
-	source_playback,
-	was_active,
-	playback_active: bool,
-	seconds,
-	duration: f64,
+	completion_pending,
+	source_playback: bool,
+	mode: UI_Mode,
+	active_exercise,
+	exercise_count: int,
 ) -> bool {
 	return enabled &&
+	       completion_pending &&
 	       !source_playback &&
-	       was_active &&
-	       !playback_active &&
-	       playback_position_finished(seconds, duration)
+	       mode == .Play &&
+	       active_exercise >= 0 &&
+	       active_exercise < exercise_count
 }
 
 reset_player_playback :: proc() {
@@ -3017,8 +3020,6 @@ vocal_process_main :: proc(args := os.args) {
 	msg_void(pool, sel_registerName("drain"))
 }
 
-when !HOT_RELOAD_MODULE {
-	main :: proc() {
-		vocal_process_main()
-	}
+main :: proc() {
+	vocal_process_main()
 }

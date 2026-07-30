@@ -1892,6 +1892,80 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 }
 
 @(test)
+command_palette_uses_current_action_availability_test :: proc(t: ^testing.T) {
+	previous_mode := ui.mode
+	previous_pitch := ui.pitch
+	previous_search := ui.exercise_search
+	previous_state := state
+	previous_recovery := library_recovery_state
+	previous_pending := major_change_pending
+	previous_actions := command_palette_actions
+	defer {
+		delete(state.exercises)
+		delete(command_palette_actions)
+		command_palette_actions = previous_actions
+		ui.mode = previous_mode
+		ui.pitch = previous_pitch
+		ui.exercise_search = previous_search
+		state = previous_state
+		library_recovery_state = previous_recovery
+		major_change_pending = previous_pending
+	}
+	command_palette_actions = nil
+	state = App_State{active_source = -1}
+	state.exercises = make([dynamic]Exercise)
+	append(&state.exercises, Exercise{name = "Warm up"})
+	ui.mode = .Play
+	ui.exercise_search = "Missing"
+	ui.pitch.permission = .Denied
+	ui.pitch.permission_pending = false
+	library_recovery_state = Library_Recovery_State{required = true}
+	major_change_pending = {}
+
+	entries := build_command_palette_entries(context.temp_allocator)
+	active := palette_active_context()
+	found_settings := false
+	found_flash := false
+	found_pitch := false
+	found_next := false
+	for entry in entries {
+		matches := command_palette.context_matches(active, entry.contexts)
+		switch entry.title {
+		case "Open Settings":
+			found_settings = true
+			testing.expect(t, !matches)
+		case "Configure leader key for Flash":
+			found_flash = true
+			testing.expect(t, !matches)
+		case "Start pitch tracking":
+			found_pitch = true
+			testing.expect(t, !matches)
+		case "Play next exercise":
+			found_next = true
+			testing.expect(t, !matches)
+		}
+	}
+	testing.expect(t, found_settings)
+	testing.expect(t, found_flash)
+	testing.expect(t, found_pitch)
+	testing.expect(t, found_next)
+
+	library_recovery_state = {}
+	ui.exercise_search = ""
+	ui.pitch.permission = .Authorized
+	active = palette_active_context()
+	for entry in entries {
+		if entry.title == "Start pitch tracking" ||
+		   entry.title == "Play next exercise" {
+			testing.expect(
+				t,
+				command_palette.context_matches(active, entry.contexts),
+			)
+		}
+	}
+}
+
+@(test)
 audio_frame_range_maps_and_clamps_source_time_test :: proc(t: ^testing.T) {
 	start, count := audio_frame_range(1.5, 48_000, 480_000)
 	testing.expect_value(t, start, i64(72_000))
@@ -2770,6 +2844,7 @@ numbered_action_codes_match_interface_sections_test :: proc(t: ^testing.T) {
 			action,
 		)
 	}
+	testing.expect_value(t, pitch_numbered_action_text(), "31")
 }
 
 @(test)
@@ -2782,6 +2857,22 @@ numbered_action_keys_use_digits_one_through_nine_test :: proc(t: ^testing.T) {
 	}
 	_, found := number_digit_for_key_code(29)
 	testing.expect(t, !found)
+}
+
+@(test)
+shortcut_recorder_reserves_only_its_numbered_actions_test :: proc(
+	t: ^testing.T,
+) {
+	testing.expect_value(t, shortcut_digit_route(1), Shortcut_Digit_Route.Save)
+	testing.expect_value(t, shortcut_digit_route(2), Shortcut_Digit_Route.Reset)
+	testing.expect_value(t, shortcut_digit_route(3), Shortcut_Digit_Route.Cancel)
+	for digit in 4 ..= 9 {
+		testing.expect_value(
+			t,
+			shortcut_digit_route(digit),
+			Shortcut_Digit_Route.Capture,
+		)
+	}
 }
 
 @(test)
@@ -2888,6 +2979,29 @@ pitch_monitor_registers_controls_and_help_overlay_test :: proc(
 }
 
 @(test)
+pitch_action_availability_matches_microphone_permission_test :: proc(
+	t: ^testing.T,
+) {
+	previous_ui := ui
+	defer ui = previous_ui
+	ui = UI_State{mode = .Play}
+	ui.pitch.permission = .Unknown
+	testing.expect(t, ui_action_enabled_for_current_job(.Pitch_Toggle))
+	ui.pitch.permission = .Authorized
+	testing.expect(t, ui_action_enabled_for_current_job(.Pitch_Toggle))
+	ui.pitch.permission = .Denied
+	testing.expect(t, !ui_action_enabled_for_current_job(.Pitch_Toggle))
+	ui.pitch.permission = .Restricted
+	testing.expect(t, !ui_action_enabled_for_current_job(.Pitch_Toggle))
+	ui.pitch.permission = .Authorized
+	ui.pitch.permission_pending = true
+	testing.expect(t, !ui_action_enabled_for_current_job(.Pitch_Toggle))
+	ui.mode = .Create
+	ui.pitch.permission_pending = false
+	testing.expect(t, !ui_action_enabled_for_current_job(.Pitch_Toggle))
+}
+
+@(test)
 random_exercise_weight_increases_with_skipped_draws_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, random_exercise_weight(10, 10), 2)
 	testing.expect_value(t, random_exercise_weight(9, 10), 3)
@@ -2991,33 +3105,11 @@ exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
 		t,
 		exercise_autoplay_should_advance(
 			true,
-			false,
 			true,
 			false,
-			10,
-			10,
-		),
-	)
-	testing.expect(
-		t,
-		!exercise_autoplay_should_advance(
-			true,
-			true,
-			true,
-			false,
-			10,
-			10,
-		),
-	)
-	testing.expect(
-		t,
-		!exercise_autoplay_should_advance(
-			false,
-			false,
-			true,
-			false,
-			10,
-			10,
+			.Play,
+			0,
+			1,
 		),
 	)
 	testing.expect(
@@ -3026,9 +3118,53 @@ exercise_autoplay_advances_only_after_exercise_completion_test :: proc(
 			true,
 			false,
 			false,
+			.Play,
+			0,
+			1,
+		),
+	)
+	testing.expect(
+		t,
+		!exercise_autoplay_should_advance(
+			true,
+			true,
+			true,
+			.Play,
+			0,
+			1,
+		),
+	)
+	testing.expect(
+		t,
+		!exercise_autoplay_should_advance(
 			false,
-			10,
-			10,
+			true,
+			false,
+			.Play,
+			0,
+			1,
+		),
+	)
+	testing.expect(
+		t,
+		!exercise_autoplay_should_advance(
+			true,
+			true,
+			false,
+			.Create,
+			0,
+			1,
+		),
+	)
+	testing.expect(
+		t,
+		!exercise_autoplay_should_advance(
+			true,
+			true,
+			false,
+			.Play,
+			-1,
+			1,
 		),
 	)
 }

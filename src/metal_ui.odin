@@ -15,7 +15,6 @@ import command_palette "command_palette:."
 import text_input "components:text_input"
 import flash "flash:."
 import match_sorter "match_sorter:."
-import hot_reload "../dev/hot_reload_contract"
 
 foreign import metal "system:Metal.framework"
 foreign metal {
@@ -25,6 +24,11 @@ foreign metal {
 foreign import avfaudio "system:AVFAudio.framework"
 foreign avfaudio {
 	AVAudioEngineConfigurationChangeNotification: Id
+}
+
+foreign import avfoundation "system:AVFoundation.framework"
+foreign avfoundation {
+	AVPlayerItemDidPlayToEndTimeNotification: Id
 }
 
 foreign import core_graphics "system:CoreGraphics.framework"
@@ -116,6 +120,8 @@ UI_Mode :: enum {
 Numbered_Action_Code :: struct {
 	section, action: int,
 }
+
+PITCH_ACTION_INDEX :: 11
 
 Source_Hint_Control :: enum {
 	None,
@@ -217,7 +223,8 @@ UI_State :: struct {
 	active_exercise:    int,
 	exercise_shuffle:   bool,
 	exercise_autoplay:  bool,
-	playback_was_active: bool,
+	player_item:        Id,
+	playback_completion_pending: bool,
 	player_volume:      f32,
 	playback_rate:      f32,
 	player_duration:    f64,
@@ -529,6 +536,9 @@ PALETTE_CONTEXT_EXPORT_BUSY  :: command_palette.Context_Mask(1 << 7)
 PALETTE_CONTEXT_SETTINGS     :: command_palette.Context_Mask(1 << 8)
 PALETTE_CONTEXT_LIGHT_THEME  :: command_palette.Context_Mask(1 << 9)
 PALETTE_CONTEXT_DARK_THEME   :: command_palette.Context_Mask(1 << 10)
+PALETTE_CONTEXT_GLOBAL_MODAL :: command_palette.Context_Mask(1 << 11)
+PALETTE_CONTEXT_PLAY_NEXT    :: command_palette.Context_Mask(1 << 12)
+PALETTE_CONTEXT_PITCH        :: command_palette.Context_Mask(1 << 13)
 
 CONTROL_URL :: Id(rawptr(uintptr(1)))
 CONTROL_STATUS :: Id(rawptr(uintptr(2)))
@@ -1967,7 +1977,7 @@ control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
 	case 6: return 4
 	case 7: return 13
 	case 8: return 14
-	case 9: return 11
+	case 9: return PITCH_ACTION_INDEX
 	}
 	return -1
 }
@@ -2006,9 +2016,18 @@ numbered_action_code_for_action :: proc(
 	case 4:  return {2, 2}, true
 	case 13: return {2, 3}, true
 	case 14: return {2, 4}, true
-	case 11: return {3, 1}, true
+	case PITCH_ACTION_INDEX: return {3, 1}, true
 	}
 	return {}, false
+}
+
+pitch_numbered_action_text :: proc() -> string {
+	code, found := numbered_action_code_for_action(
+		.Play,
+		PITCH_ACTION_INDEX,
+	)
+	if !found {return ""}
+	return fmt.tprintf("%d%d", code.section, code.action)
 }
 
 numbered_action_for_code :: proc(
@@ -2077,6 +2096,22 @@ number_digit_for_key_code :: proc(key_code: uint) -> (int, bool) {
 		if candidate == key_code {return index + 1, true}
 	}
 	return 0, false
+}
+
+Shortcut_Digit_Route :: enum {
+	Capture,
+	Save,
+	Reset,
+	Cancel,
+}
+
+shortcut_digit_route :: proc(digit: int) -> Shortcut_Digit_Route {
+	switch digit {
+	case 1: return .Save
+	case 2: return .Reset
+	case 3: return .Cancel
+	case:   return .Capture
+	}
 }
 
 create_action_is_emphasized :: proc(
@@ -4212,7 +4247,10 @@ draw_pitch_help :: proc(
 		bright,
 	)
 	lines := [8]string{
-		"Press action 07 to start or stop live microphone analysis.",
+		fmt.tprintf(
+			"Press action %s to start or stop live microphone analysis.",
+			pitch_numbered_action_text(),
+		),
 		"The first start asks macOS for microphone access. No audio is stored.",
 		"Pitch Standard changes the A4 reference frequency from 400 to 480 Hz.",
 		"Range selects the frequencies shown by the chart and detector.",
@@ -6819,10 +6857,17 @@ ui_controls_valid :: proc(controls: []UI_Control) -> bool {
 	return true
 }
 
+global_modal_blocks_commands :: proc() -> bool {
+	return library_recovery_state.required || major_change_pending.open
+}
+
 ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	if kind == .Command_Palette_Disabled {return false}
-	if kind == .Open_Settings {
-		return !library_recovery_state.required && !major_change_pending.open
+	if kind == .Open_Settings ||
+	   kind == .Configure_Flash ||
+	   kind == .Shortcut_Record ||
+	   kind == .Set_Theme {
+		return vocal_settings_commands_available()
 	}
 	if kind == .Shortcut_Save {
 		return ui.shortcut_candidate_valid &&
@@ -8206,6 +8251,7 @@ find_ax_control :: proc(element: Id) -> ^UI_Control {
 }
 
 activate_ui_action :: proc(action: UI_Action) -> bool {
+	if !ui_action_enabled_for_current_job(action.kind) {return false}
 	clear_number_prefix()
 	#partial switch action.kind {
 	case .Command_Palette_Search:
@@ -8250,9 +8296,9 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 	case .Set_Theme:
 		return vocal_settings_apply_theme(action.value != 0)
 	case .Configure_Flash:
-		vocal_shortcut_recorder_open()
+		return vocal_shortcut_recorder_open()
 	case .Shortcut_Record:
-		vocal_shortcut_recorder_open()
+		return vocal_shortcut_recorder_open()
 	case .Shortcut_Save:
 		return vocal_shortcut_recorder_save()
 	case .Shortcut_Reset:
@@ -8491,6 +8537,15 @@ palette_active_context :: proc() -> command_palette.Context_Mask {
 	} else {
 		bits |= u64(PALETTE_CONTEXT_LIGHT_THEME)
 	}
+	if global_modal_blocks_commands() {
+		bits |= u64(PALETTE_CONTEXT_GLOBAL_MODAL)
+	}
+	if ui_action_enabled_for_current_job(.Play_Next) {
+		bits |= u64(PALETTE_CONTEXT_PLAY_NEXT)
+	}
+	if ui_action_enabled_for_current_job(.Pitch_Toggle) {
+		bits |= u64(PALETTE_CONTEXT_PITCH)
+	}
 	return command_palette.Context_Mask(bits)
 }
 
@@ -8540,8 +8595,13 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"Search and configure application settings",
 		"Command",
 		[]string{"preferences", "configuration", "gear"},
-		palette_condition(none = PALETTE_CONTEXT_SETTINGS),
-		"Settings is already open",
+		palette_condition(
+			none = command_palette.Context_Mask(
+				u64(PALETTE_CONTEXT_SETTINGS) |
+				u64(PALETTE_CONTEXT_GLOBAL_MODAL),
+			),
+		),
+		"Unavailable while another modal owns application input",
 	)
 	append_command_palette_entry(
 		&entries,
@@ -8553,6 +8613,8 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		),
 		"Shortcut",
 		[]string{"keyboard", "shortcut", "leader", "jump", "navigation"},
+		palette_condition(none = PALETTE_CONTEXT_GLOBAL_MODAL),
+		"Unavailable while another modal owns application input",
 	)
 	append_command_palette_entry(
 		&entries,
@@ -8561,8 +8623,13 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"HW Light interface theme",
 		"Theme",
 		[]string{"appearance", "style", "light", "HW Light"},
-		palette_condition(none = PALETTE_CONTEXT_LIGHT_THEME),
-		"Current theme",
+		palette_condition(
+			none = command_palette.Context_Mask(
+				u64(PALETTE_CONTEXT_LIGHT_THEME) |
+				u64(PALETTE_CONTEXT_GLOBAL_MODAL),
+			),
+		),
+		"Unavailable for the current theme or modal state",
 	)
 	append_command_palette_entry(
 		&entries,
@@ -8571,8 +8638,13 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"HW Dark interface theme",
 		"Theme",
 		[]string{"appearance", "style", "dark", "HW Dark"},
-		palette_condition(none = PALETTE_CONTEXT_DARK_THEME),
-		"Current theme",
+		palette_condition(
+			none = command_palette.Context_Mask(
+				u64(PALETTE_CONTEXT_DARK_THEME) |
+				u64(PALETTE_CONTEXT_GLOBAL_MODAL),
+			),
+		),
+		"Unavailable for the current theme or modal state",
 	)
 	mode_context := PALETTE_CONTEXT_CREATE
 	mode_title := "Switch to Play mode"
@@ -8749,8 +8821,13 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"Start or stop live microphone pitch analysis",
 		"Command",
 		[]string{"microphone", "sing", "tuner", "pitch"},
-		palette_condition(PALETTE_CONTEXT_PLAY),
-		"Available in Play mode",
+		palette_condition(
+			command_palette.Context_Mask(
+				u64(PALETTE_CONTEXT_PLAY) |
+					u64(PALETTE_CONTEXT_PITCH),
+			),
+		),
+		"Available in Play mode with microphone access available",
 	)
 	append_command_palette_entry(
 		&entries,
@@ -8759,7 +8836,12 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"Play the next filtered exercise or a weighted shuffled exercise",
 		"Command",
 		[]string{"exercise", "next", "shuffle"},
-		palette_condition(PALETTE_CONTEXT_PLAY),
+		palette_condition(
+			command_palette.Context_Mask(
+				u64(PALETTE_CONTEXT_PLAY) |
+					u64(PALETTE_CONTEXT_PLAY_NEXT),
+			),
+		),
 		"Available when the current exercise filter has a result",
 	)
 	append_command_palette_entry(
@@ -8854,6 +8936,7 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 
 begin_command_palette :: proc() -> bool {
 	if command_palette.is_open(&command_palette_state) {return true}
+	if global_modal_blocks_commands() {return false}
 	if ui.settings_open {vocal_settings_close()}
 	cancel_ui_flash()
 	if ui.exercise_rename_open {close_exercise_rename()}
@@ -9542,21 +9625,73 @@ on_audio_engine_recover_configuration :: proc "c" (self: Id, command: Sel, engin
 	set_error_status("Audio output changed, but playback could not reconnect")
 }
 
+metal_player_observe_completion :: proc(item: Id) {
+	if item == nil || state.delegate_target == nil {return}
+	center := msg_id(objc_getClass("NSNotificationCenter"), sel_registerName("defaultCenter"))
+	msg_void_id_sel_id_id(
+		center,
+		sel_registerName("addObserver:selector:name:object:"),
+		state.delegate_target,
+		sel_registerName("playerItemDidReachEnd:"),
+		AVPlayerItemDidPlayToEndTimeNotification,
+		item,
+	)
+}
+
+metal_player_stop_observing_completion :: proc(item: Id) {
+	if item == nil || state.delegate_target == nil {return}
+	center := msg_id(objc_getClass("NSNotificationCenter"), sel_registerName("defaultCenter"))
+	msg_void_id_id_id(
+		center,
+		sel_registerName("removeObserver:name:object:"),
+		state.delegate_target,
+		AVPlayerItemDidPlayToEndTimeNotification,
+		item,
+	)
+}
+
+on_player_item_did_reach_end :: proc "c" (
+	self: Id,
+	command: Sel,
+	notification: Id,
+) {
+	context = runtime.default_context()
+	item := msg_id(notification, sel_registerName("object"))
+	if item == nil || item != ui.player_item || state.player == nil {return}
+	ui.playback_completion_pending = true
+	ui.needs_redraw = true
+}
+
+on_application_did_become_active :: proc "c" (
+	self: Id,
+	command: Sel,
+	notification: Id,
+) {
+	context = runtime.default_context()
+	if pitch_monitor_refresh_permission(&ui.pitch) {
+		ui.needs_redraw = true
+	}
+}
+
 metal_player_clear :: proc() {
 	set_source_playback_active(false)
 	ui.source_scrubbing = false
 	ui.source_hint_menu_open = false
 	metal_player_clear_texture()
 	player := state.player
+	item := ui.player_item
 	output := ui.video_output
 	audio_engine, audio_player := ui.audio_engine, ui.audio_player
 	audio_pitch, audio_file := ui.audio_pitch, ui.audio_file
 	state.player = nil
+	ui.player_item = nil
+	ui.playback_completion_pending = false
 	ui.video_output = nil
 	ui.audio_engine, ui.audio_player = nil, nil
 	ui.audio_pitch, ui.audio_file = nil, nil
 	ui.audio_start_frame = 0
 	ui.player_duration = 0
+	metal_player_stop_observing_completion(item)
 	if player != nil {
 		msg_void(player, sel_registerName("pause"))
 		msg_void(player, sel_registerName("release"))
@@ -9608,14 +9743,19 @@ metal_player_load :: proc(path: string) -> bool {
 	}
 
 	old_player := state.player
+	old_item := ui.player_item
 	old_output := ui.video_output
 	old_audio_engine, old_audio_player := ui.audio_engine, ui.audio_player
 	old_audio_pitch, old_audio_file := ui.audio_pitch, ui.audio_file
 	state.player = player
+	ui.player_item = item
+	ui.playback_completion_pending = false
 	ui.video_output = output
 	ui.audio_engine, ui.audio_player = audio_engine, audio_player
 	ui.audio_pitch, ui.audio_file = audio_pitch, audio_file
 	metal_player_clear_texture()
+	metal_player_stop_observing_completion(old_item)
+	metal_player_observe_completion(item)
 	if old_player != nil {
 		msg_void(old_player, sel_registerName("pause"))
 		msg_void(old_player, sel_registerName("release"))
@@ -9640,6 +9780,7 @@ editable_action_for_focus :: proc(
 ) -> (UI_Action_Kind, bool) {
 	#partial switch focus {
 	case .Command_Palette: return .Command_Palette_Search, true
+	case .Settings_Search: return .Settings_Search, true
 	case .URL:              return .URL, true
 	case .Source_Search:    return .Source_Search, true
 	case .Transcript_Search:return .Transcript_Search, true
@@ -9759,6 +9900,8 @@ activate_registered_target_at_point :: proc(
 	#partial switch control.action.kind {
 	case .Command_Palette_Search:
 		begin_text_pointer_selection(control, .Command_Palette, point, click_count)
+	case .Settings_Search:
+		begin_text_pointer_selection(control, .Settings_Search, point, click_count)
 	case .URL:
 		if ui.source_modal_refetch_index >= 0 {return true}
 		begin_text_pointer_selection(control, .URL, point, click_count)
@@ -10027,6 +10170,20 @@ on_metal_mouse_up :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 }
 
+modal_consumes_content_scroll :: proc() -> bool {
+	return library_recovery_state.required ||
+	       major_change_pending.open ||
+	       ui.settings_open ||
+	       ui.shortcut_open ||
+	       ui.source_modal_open ||
+	       ui.source_details_open ||
+	       ui.exercise_rename_open ||
+	       ui.exercise_metadata_open ||
+	       ui.randomize_help_open ||
+	       ui.pitch.help_open ||
+	       ui.data_modal_open
+}
+
 on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -10050,11 +10207,7 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 		ui.needs_redraw = true
 		return
 	}
-	if ui.source_modal_open || ui.source_details_open ||
-	   ui.exercise_rename_open || ui.exercise_metadata_open ||
-	   ui.randomize_help_open || ui.pitch.help_open || ui.data_modal_open {
-		return
-	}
+	if modal_consumes_content_scroll() {return}
 	delta := msg_f64(event, sel_registerName("scrollingDeltaY"))
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(
@@ -10361,6 +10514,14 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	)
 	shortcut_text, has_shortcut_text :=
 		text_input_string(shortcut_characters)
+	if global_modal_blocks_commands() {
+		if ui.shortcut_open {vocal_shortcut_recorder_close()}
+		if ui.settings_open {vocal_settings_close()}
+		if command_palette.is_open(&command_palette_state) {
+			close_command_palette(false)
+		}
+		cancel_ui_flash()
+	}
 	if ui.shortcut_open {
 		if key == 53 {
 			vocal_shortcut_recorder_close()
@@ -10373,16 +10534,17 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 			NSEventModifierFlagCommand
 		if modifiers & relevant == 0 {
 			if digit, found := number_digit_for_key_code(key); found {
-				switch digit {
-				case 1:
+				route := shortcut_digit_route(digit)
+				switch route {
+				case .Save:
 					_ = vocal_shortcut_recorder_save()
-				case 2:
+				case .Reset:
 					_ = vocal_shortcut_recorder_reset()
-				case 3:
+				case .Cancel:
 					vocal_shortcut_recorder_close()
-				case:
+				case .Capture:
 				}
-				return
+				if route != .Capture {return}
 			}
 		}
 		if has_shortcut_text {
@@ -10703,28 +10865,23 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	}
 	playback_active := state.player != nil &&
 	                   msg_f32(state.player, sel_registerName("rate")) > 0
-	if ui.exercise_autoplay &&
-	   ui.playback_was_active &&
-	   !playback_active {
-		seconds, has_seconds := current_seconds()
-		if has_seconds &&
-		   exercise_autoplay_should_advance(
-				ui.exercise_autoplay,
-				ui.source_playback_active,
-				ui.playback_was_active,
-				playback_active,
-				seconds,
-				ui.player_duration,
-		   ) {
-			_ = play_next_exercise()
-			playback_active = state.player != nil &&
-			                  msg_f32(
-								state.player,
-								sel_registerName("rate"),
-			                  ) > 0
-		}
+	completion_pending := ui.playback_completion_pending
+	ui.playback_completion_pending = false
+	if exercise_autoplay_should_advance(
+		ui.exercise_autoplay,
+		completion_pending,
+		ui.source_playback_active,
+		ui.mode,
+		ui.active_exercise,
+		len(state.exercises),
+	) {
+		_ = play_next_exercise()
+		playback_active = state.player != nil &&
+		                  msg_f32(
+							state.player,
+							sel_registerName("rate"),
+		                  ) > 0
 	}
-	ui.playback_was_active = playback_active
 	frame := msg_rect(ui.view, sel_registerName("bounds"))
 	if ui.width != frame.size.width || ui.height != frame.size.height {
 		cancel_ui_flash()
@@ -10800,6 +10957,18 @@ register_delegate :: proc(app: Id) {
 		delegate_class,
 		sel_registerName("recoverAudioEngineConfiguration:"),
 		rawptr(on_audio_engine_recover_configuration),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
+		sel_registerName("playerItemDidReachEnd:"),
+		rawptr(on_player_item_did_reach_end),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
+		sel_registerName("applicationDidBecomeActive:"),
+		rawptr(on_application_did_become_active),
 		"v@:@",
 	)
 	class_addMethod(
@@ -10975,18 +11144,10 @@ launch_should_activate :: proc(
 	return !launch_in_background
 }
 
-vocal_gui_initialize :: proc(
-	services: ^hot_reload.Host_Services = nil,
-) -> bool {
+vocal_gui_initialize :: proc() -> bool {
 	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
-	if services != nil {app = Id(services.app)}
 	msg_void_i(app, sel_registerName("setActivationPolicy:"), 0)
-	if services == nil {
-		register_delegate(app)
-	} else {
-		state.delegate_target = Id(services.delegate)
-		msg_void_id(app, sel_registerName("setDelegate:"), state.delegate_target)
-	}
+	register_delegate(app)
 
 	state.url_input = CONTROL_URL
 	state.status = CONTROL_STATUS
@@ -11029,7 +11190,7 @@ vocal_gui_initialize :: proc(
 	assert(settings_error == nil, "Unable to initialize Settings search")
 
 	frame := Rect{Point{120, 100}, Size{1100, 720}}
-	window_class := Id(services.window_class) if services != nil else register_window_class()
+	window_class := register_window_class()
 	state.window = msg_id_rect_u_u_b(
 		msg_id(window_class, sel_registerName("alloc")),
 		sel_registerName("initWithContentRect:styleMask:backing:defer:"),
@@ -11047,8 +11208,8 @@ vocal_gui_initialize :: proc(
 		Size{WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT},
 	)
 	msg_void_bool(state.window, sel_registerName("setAcceptsMouseMovedEvents:"), true)
-	if services == nil {register_accessibility_class()}
-	view_class := Id(services.view_class) if services != nil else register_metal_view_class()
+	register_accessibility_class()
+	view_class := register_metal_view_class()
 	ui.view = msg_id_rect(
 		msg_id(view_class, sel_registerName("alloc")),
 		sel_registerName("initWithFrame:"),
@@ -11082,26 +11243,24 @@ vocal_gui_initialize :: proc(
 	if len(state.sources) > 0 {load_source_player(len(state.sources) - 1)}
 	// The Objective-C runtime requires the exact floating-point signature, so
 	// construct the repeating timer through a typed send.
-	if services == nil {
-		timer_send := transmute(proc "c" (
-			_: Id,
-			_: Sel,
-			_: f64,
-			_: Id,
-			_: Sel,
-			_: Id,
-			_: bool,
-		) -> Id)send_address
-		_ = timer_send(
-			objc_getClass("NSTimer"),
-			sel_registerName("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
-			1.0 / 60.0,
-			state.delegate_target,
-			sel_registerName("metalFrame:"),
-			nil,
-			true,
-		)
-	}
+	timer_send := transmute(proc "c" (
+		_: Id,
+		_: Sel,
+		_: f64,
+		_: Id,
+		_: Sel,
+		_: Id,
+		_: bool,
+	) -> Id)send_address
+	_ = timer_send(
+		objc_getClass("NSTimer"),
+		sel_registerName("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+		1.0 / 60.0,
+		state.delegate_target,
+		sel_registerName("metalFrame:"),
+		nil,
+		true,
+	)
 
 	screen := msg_id(objc_getClass("NSScreen"), sel_registerName("mainScreen"))
 	msg_void_rect_b(
@@ -11111,10 +11270,8 @@ vocal_gui_initialize :: proc(
 		true,
 	)
 	msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
-	launch_in_background := services != nil && services.launch_in_background
 	if launch_should_activate(
 		getenv("VT_ACTIVATE_ON_LAUNCH"),
-		launch_in_background,
 	) {
 		msg_void_id(state.window, sel_registerName("makeKeyAndOrderFront:"), nil)
 		msg_void_i(app, sel_registerName("activateIgnoringOtherApps:"), 1)

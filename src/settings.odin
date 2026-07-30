@@ -201,7 +201,12 @@ vocal_settings_category_match_count :: proc(
 	return count
 }
 
+vocal_settings_commands_available :: proc() -> bool {
+	return !library_recovery_state.required && !major_change_pending.open
+}
+
 vocal_settings_open :: proc() -> bool {
+	if !vocal_settings_commands_available() {return false}
 	if ui.settings_open {
 		focus_text_input(.Settings_Search)
 		return true
@@ -244,6 +249,7 @@ vocal_settings_close :: proc() {
 }
 
 vocal_settings_apply_theme :: proc(dark: bool) -> bool {
+	if !vocal_settings_commands_available() {return false}
 	if dark == ui.dark_theme {return true}
 	if !database_interface_theme_save(library_database, dark) {
 		ui_set_string(&ui.settings_error, "THE THEME COULD NOT BE SAVED")
@@ -256,7 +262,8 @@ vocal_settings_apply_theme :: proc(dark: bool) -> bool {
 	return true
 }
 
-vocal_shortcut_recorder_open :: proc() {
+vocal_shortcut_recorder_open :: proc() -> bool {
+	if !vocal_settings_commands_available() {return false}
 	vocal_shortcut_destroy(&ui.shortcut_candidate)
 	ui.shortcut_candidate_valid = false
 	ui_set_string(&ui.shortcut_collision, "")
@@ -268,6 +275,7 @@ vocal_shortcut_recorder_open :: proc() {
 	if ui.focus == .Settings_Search {_ = unfocus_text_input()}
 	cancel_ui_flash()
 	ui.needs_redraw = true
+	return true
 }
 
 vocal_shortcut_recorder_close :: proc() {
