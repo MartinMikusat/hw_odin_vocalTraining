@@ -1,5 +1,6 @@
 package main
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import os2 "core:os/os2"
@@ -19,6 +20,412 @@ recovery_test_temp_path :: proc() -> (string, bool) {
 	if clone_error != nil {return "", false}
 	_ = os.remove(path)
 	return path, true
+}
+
+legacy_workflow_test_database_create :: proc(path: string) -> bool {
+	database, opened := library_database_open_path(
+		path,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+	)
+	if !opened {return false}
+	defer sqlite3_close(database)
+	return sqlite_execute(database, `
+		PRAGMA foreign_keys = ON;
+		CREATE TABLE sources (
+			id TEXT PRIMARY KEY,
+			video_id TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL,
+			url TEXT NOT NULL,
+			media_path TEXT NOT NULL,
+			duration REAL NOT NULL,
+			position INTEGER NOT NULL,
+			metadata_status INTEGER NOT NULL DEFAULT 0,
+			width INTEGER NOT NULL DEFAULT 0,
+			height INTEGER NOT NULL DEFAULT 0,
+			fps REAL NOT NULL DEFAULT 0,
+			video_codec TEXT NOT NULL DEFAULT '',
+			audio_codec TEXT NOT NULL DEFAULT '',
+			container TEXT NOT NULL DEFAULT '',
+			format_id TEXT NOT NULL DEFAULT '',
+			file_size INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE transcript_segments (
+			id TEXT PRIMARY KEY,
+			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+			start_seconds REAL NOT NULL,
+			duration_seconds REAL NOT NULL,
+			text TEXT NOT NULL,
+			position INTEGER NOT NULL
+		);
+		CREATE TABLE import_hints (
+			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+			seconds REAL NOT NULL,
+			position INTEGER NOT NULL,
+			PRIMARY KEY(source_id, seconds)
+		);
+		CREATE TABLE exercises (
+			id TEXT PRIMARY KEY,
+			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			start_seconds REAL NOT NULL,
+			end_seconds REAL NOT NULL,
+			clip_path TEXT NOT NULL,
+			position INTEGER NOT NULL
+		);
+		CREATE TABLE exercise_randomization (
+			exercise_id TEXT PRIMARY KEY,
+			last_sequence INTEGER NOT NULL
+		);
+		CREATE TABLE library_meta (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			current_revision INTEGER NOT NULL
+		);
+		CREATE TABLE library_revisions (
+			revision INTEGER PRIMARY KEY,
+			committed_at_ms INTEGER NOT NULL
+		);
+		CREATE TABLE library_changes (
+			revision INTEGER NOT NULL REFERENCES library_revisions(revision)
+				ON DELETE CASCADE,
+			entity_kind INTEGER NOT NULL,
+			entity_id TEXT NOT NULL,
+			numeric_key INTEGER NOT NULL DEFAULT 0,
+			operation INTEGER NOT NULL,
+			PRIMARY KEY (
+				revision, entity_kind, entity_id, numeric_key
+			)
+		);
+		INSERT INTO library_meta VALUES (1, 1);
+		INSERT INTO library_revisions VALUES (1, 0);
+		INSERT INTO sources VALUES (
+			'source-vocal', 'video-vocal', 'Legacy source',
+			'https://youtu.be/video-vocal', 'sources/video-vocal.mp4',
+			120, 0, 1, 1920, 1080, 30, 'h264', 'aac', 'mp4',
+			'legacy', 1000
+		);
+		INSERT INTO transcript_segments VALUES (
+			'segment-1', 'source-vocal', 1, 2, 'Legacy text', 0
+		);
+		INSERT INTO import_hints VALUES ('source-vocal', 5, 0);
+		INSERT INTO exercises VALUES (
+			'clip-keep', 'source-vocal', 'Legacy keep',
+			10, 20, 'clips/clip-keep.mp4', 0
+		);
+		INSERT INTO exercises VALUES (
+			'clip-delete', 'source-vocal', 'Legacy delete',
+			30, 40, 'clips/clip-delete.mp4', 1
+		);
+		INSERT INTO exercises VALUES (
+			'clip-restore', 'source-vocal', 'Legacy restore',
+			50, 60, 'clips/clip-restore.mp4', 2
+		);
+		INSERT INTO exercise_randomization VALUES ('clip-restore', 11);
+		PRAGMA user_version = 5;
+	`)
+}
+
+@(test)
+schema_v7_repairs_missing_vocal_clips_without_resurrecting_deletions_test :: proc(
+	t: ^testing.T,
+) {
+	previous_support, support_found := os.lookup_env(
+		"HW_VIDEO_CLIPS_APP_SUPPORT_DIR",
+	)
+	defer {
+		recovery_activation_test_restore_environment(
+			previous_support,
+			support_found,
+		)
+		delete(previous_support)
+	}
+	root, created := recovery_test_temp_path()
+	testing.expect(t, created)
+	if !created {return}
+	testing.expect(t, os.make_directory(root) == nil)
+	defer {
+		_ = os2.remove_all(root)
+		delete(root)
+	}
+	testing.expect(t, os.set_env(
+		"HW_VIDEO_CLIPS_APP_SUPPORT_DIR",
+		root,
+	) == nil)
+	testing.expect(t, os.make_directory(library_backups_dir()) == nil)
+	backup_path := fmt.tprintf(
+		"%s/library-r00000000000000000001-legacy.sqlite3",
+		library_backups_dir(),
+	)
+	testing.expect(t, legacy_workflow_test_database_create(backup_path))
+	_, backup_valid := library_backup_verify(
+		backup_path,
+		1,
+		5,
+	)
+	testing.expect(t, backup_valid)
+
+	database, opened := library_database_open_path(
+		database_path(),
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+	)
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema_v7(database))
+	source := Source_Video{
+		id = "source-vocal",
+		workflow = .Vocal,
+		video_id = "video-vocal",
+		title = "Current source",
+		url = "https://youtu.be/video-vocal",
+		media_path = fmt.tprintf("%s/sources/video-vocal.mp4", root),
+		duration = 120,
+	}
+	keep := Clip{
+		id = "clip-keep",
+		source_id = "source-vocal",
+		workflow = .Vocal,
+		name = "Current keep",
+		start_seconds = 10,
+		end_seconds = 20,
+		clip_path = fmt.tprintf("%s/clips/clip-keep.mp4", root),
+		dance_count_in_bpm = 120,
+		dance_playback_rate = 1,
+	}
+	deleted := Clip{
+		id = "clip-delete",
+		source_id = "source-vocal",
+		workflow = .Vocal,
+		name = "Current delete",
+		start_seconds = 30,
+		end_seconds = 40,
+		clip_path = fmt.tprintf("%s/clips/clip-delete.mp4", root),
+		dance_count_in_bpm = 120,
+		dance_playback_rate = 1,
+	}
+	testing.expect(t, database_save_collections(
+		database,
+		[]Source_Video{source},
+		nil,
+		nil,
+		[]Clip{keep, deleted},
+	))
+	testing.expect(t, database_save_collections(
+		database,
+		[]Source_Video{source},
+		nil,
+		nil,
+		[]Clip{keep},
+	))
+	testing.expect(t, database_clip_delete_logged(database, "clip-delete"))
+	testing.expect(t, sqlite_execute(database, "PRAGMA user_version = 6"))
+
+	testing.expect(t, database_create_schema(database))
+	version, version_read := library_database_user_version(database)
+	testing.expect(t, version_read)
+	testing.expect_value(t, version, LIBRARY_SCHEMA_VERSION)
+	loaded: App_State
+	testing.expect(t, database_load_state(database, &loaded))
+	defer app_state_collections_destroy(&loaded)
+	testing.expect_value(t, len(loaded.clips), 2)
+	keep_index := library_clip_index(loaded.clips[:], "clip-keep")
+	restore_index := library_clip_index(loaded.clips[:], "clip-restore")
+	testing.expect(t, keep_index >= 0 && restore_index >= 0)
+	testing.expect_value(t, loaded.clips[keep_index].name, "Current keep")
+	testing.expect_value(
+		t,
+		loaded.clips[restore_index].workflow,
+		Workflow_Kind.Vocal,
+	)
+	testing.expect_value(
+		t,
+		loaded.clips[restore_index].dance_count_in_bpm,
+		120,
+	)
+	testing.expect_value(
+		t,
+		loaded.clips[restore_index].dance_playback_rate,
+		f32(1),
+	)
+	testing.expect_value(
+		t,
+		loaded.clips[restore_index].last_randomized_sequence,
+		i64(11),
+	)
+	testing.expect_value(
+		t,
+		library_clip_index(loaded.clips[:], "clip-delete"),
+		-1,
+	)
+	notification_count, notifications_counted := database_count(
+		database,
+		"notifications",
+	)
+	testing.expect(t, notifications_counted)
+	testing.expect_value(t, notification_count, 1)
+	revision := library_revision_current(database)
+	testing.expect(t, database_create_schema(database))
+	testing.expect_value(t, library_revision_current(database), revision)
+}
+
+legacy_manifest_test_write :: proc(root: string) -> bool {
+	data := Persisted_State{version=1}
+	data.sources = make([dynamic]Source_Video, context.temp_allocator)
+	data.exercises = make([dynamic]Legacy_Exercise, context.temp_allocator)
+	append(&data.sources, Source_Video{
+		id = "json-source",
+		video_id = "json-video",
+		title = "JSON source",
+		url = "https://youtu.be/json-video",
+		media_path = fmt.tprintf("%s/sources/json-video.mp4", root),
+		duration = 60,
+	})
+	append(&data.exercises, Legacy_Exercise{
+		id = "json-clip",
+		source_id = "json-source",
+		name = "JSON exercise",
+		start_seconds = 10,
+		end_seconds = 20,
+		clip_path = fmt.tprintf("%s/clips/json-clip.mp4", root),
+	})
+	encoded, encode_error := json.marshal(
+		data,
+		{pretty=true, use_spaces=true, spaces=2},
+		context.temp_allocator,
+	)
+	if encode_error != nil {return false}
+	return os.write_entire_file(
+		fmt.tprintf("%s/library.json", root),
+		encoded,
+	)
+}
+
+@(test)
+json_only_legacy_exercises_import_as_vocal_clips_test :: proc(
+	t: ^testing.T,
+) {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	previous_support, support_found := os.lookup_env(
+		"HW_VIDEO_CLIPS_APP_SUPPORT_DIR",
+	)
+	defer {
+		recovery_activation_test_restore_environment(
+			previous_support,
+			support_found,
+		)
+		delete(previous_support)
+	}
+	root, created := recovery_test_temp_path()
+	testing.expect(t, created)
+	if !created {return}
+	testing.expect(t, os.make_directory(root) == nil)
+	defer {
+		_ = os2.remove_all(root)
+		delete(root)
+	}
+	testing.expect(t, os.set_env(
+		"HW_VIDEO_CLIPS_APP_SUPPORT_DIR",
+		root,
+	) == nil)
+	testing.expect(t, legacy_manifest_test_write(root))
+
+	previous_state := state
+	previous_recovery := library_recovery_state
+	previous_mode := library_storage_mode
+	previous_fallback := library_legacy_fallback
+	state = {}
+	library_recovery_state = {}
+	library_storage_mode = .Closed
+	library_legacy_fallback = false
+	defer {
+		database_close()
+		app_state_collections_destroy(&state)
+		library_recovery_state_destroy()
+		state = previous_state
+		library_recovery_state = previous_recovery
+		library_storage_mode = previous_mode
+		library_legacy_fallback = previous_fallback
+	}
+	result := load_library()
+	defer library_load_result_destroy(&result)
+	testing.expect_value(t, result.mode, Library_Storage_Mode.Ready)
+	testing.expect_value(t, len(state.sources), 1)
+	testing.expect_value(t, len(state.clips), 1)
+	testing.expect_value(t, state.clips[0].id, "json-clip")
+	testing.expect_value(t, state.clips[0].workflow, Workflow_Kind.Vocal)
+	testing.expect_value(t, state.clips[0].dance_count_in_bpm, 120)
+	testing.expect_value(t, state.clips[0].dance_playback_rate, f32(1))
+	testing.expect(t, !os.exists(fmt.tprintf("%s/library.json", root)))
+	testing.expect(t, os.exists(fmt.tprintf("%s/Legacy", root)))
+}
+
+@(test)
+stale_legacy_manifest_does_not_replace_migrated_database_test :: proc(
+	t: ^testing.T,
+) {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	previous_support, support_found := os.lookup_env(
+		"HW_VIDEO_CLIPS_APP_SUPPORT_DIR",
+	)
+	defer {
+		recovery_activation_test_restore_environment(
+			previous_support,
+			support_found,
+		)
+		delete(previous_support)
+	}
+	root, created := recovery_test_temp_path()
+	testing.expect(t, created)
+	if !created {return}
+	testing.expect(t, os.make_directory(root) == nil)
+	defer {
+		_ = os2.remove_all(root)
+		delete(root)
+	}
+	testing.expect(t, os.set_env(
+		"HW_VIDEO_CLIPS_APP_SUPPORT_DIR",
+		root,
+	) == nil)
+	testing.expect(t, legacy_workflow_test_database_create(database_path()))
+	empty_manifest := `{
+		"version": 1,
+		"sources": [],
+		"segments": [],
+		"hints": [],
+		"exercises": []
+	}`
+	testing.expect(t, os.write_entire_file(
+		manifest_path(),
+		transmute([]byte)empty_manifest,
+	))
+
+	previous_state := state
+	previous_recovery := library_recovery_state
+	previous_mode := library_storage_mode
+	previous_fallback := library_legacy_fallback
+	state = {}
+	library_recovery_state = {}
+	library_storage_mode = .Closed
+	library_legacy_fallback = false
+	defer {
+		database_close()
+		app_state_collections_destroy(&state)
+		library_recovery_state_destroy()
+		state = previous_state
+		library_recovery_state = previous_recovery
+		library_storage_mode = previous_mode
+		library_legacy_fallback = previous_fallback
+	}
+	result := load_library()
+	defer library_load_result_destroy(&result)
+	testing.expect_value(t, result.mode, Library_Storage_Mode.Ready)
+	testing.expect_value(t, len(state.sources), 1)
+	testing.expect_value(t, len(state.clips), 3)
+	testing.expect(t, database_foreign_keys_ok(library_database))
+	for clip in state.clips {
+		testing.expect_value(t, clip.workflow, Workflow_Kind.Vocal)
+	}
+	testing.expect(t, !os.exists(manifest_path()))
+	testing.expect(t, os.exists(fmt.tprintf("%s/Legacy", root)))
 }
 
 @(test)
@@ -665,7 +1072,11 @@ newer_schema_is_rejected_without_modifying_the_database_test :: proc(
 	)
 	testing.expect(t, opened)
 	if !opened {return}
-	testing.expect(t, sqlite_execute(database, "PRAGMA user_version = 7"))
+	newer_schema := LIBRARY_SCHEMA_VERSION+1
+	testing.expect(t, sqlite_execute(
+		database,
+		fmt.tprintf("PRAGMA user_version = %d", newer_schema),
+	))
 	sqlite3_close(database)
 	before, before_hashed := library_recovery_file_fingerprint(path)
 	testing.expect(t, before_hashed)
@@ -684,7 +1095,7 @@ newer_schema_is_rejected_without_modifying_the_database_test :: proc(
 	defer library_load_result_destroy(&result)
 	testing.expect(t, result.mode == .Recovery_Required)
 	testing.expect(t, result.stage == .Schema)
-	testing.expect_value(t, result.schema_version, 7)
+	testing.expect_value(t, result.schema_version, newer_schema)
 	testing.expect(t, library_database == nil)
 	testing.expect(t, !library_recovery_state.recovery_allowed)
 	after, after_hashed := library_recovery_file_fingerprint(path)
@@ -696,7 +1107,7 @@ newer_schema_is_rejected_without_modifying_the_database_test :: proc(
 	version, version_read := library_database_user_version(database)
 	sqlite3_close(database)
 	testing.expect(t, version_read)
-	testing.expect_value(t, version, 7)
+	testing.expect_value(t, version, newer_schema)
 }
 
 @(test)

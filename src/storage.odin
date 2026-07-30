@@ -421,16 +421,36 @@ load_youtube_transcript :: proc(source: ^Source_Video) -> int {
 	return count
 }
 
+Legacy_Exercise :: struct {
+	id: string,
+	source_id: string,
+	name: string,
+	start_seconds: f64,
+	end_seconds: f64,
+	clip_path: string,
+}
+
 Persisted_State :: struct {
 	version: int,
 	sources: [dynamic]Source_Video,
 	segments: [dynamic]Transcript_Segment,
 	hints: [dynamic]Import_Hint,
 	clips: [dynamic]Clip,
+	exercises: [dynamic]Legacy_Exercise,
 }
 
 manifest_path :: proc() -> string {
 	return fmt.tprintf("%s/library.json", app_support_dir())
+}
+
+archive_legacy_manifest :: proc() -> bool {
+	path := manifest_path()
+	if !os.exists(path) {return true}
+	directory := fmt.tprintf("%s/Legacy", app_support_dir())
+	os.make_directory(directory)
+	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
+	archive := fmt.tprintf("%s/library-%020d.json", directory, now_ms)
+	return os.rename(path, archive)
 }
 
 save_legacy_library_state :: proc(value: ^App_State) -> bool {
@@ -456,15 +476,17 @@ save_legacy_library :: proc() -> bool {
 	return save_legacy_library_state(&state)
 }
 
-load_legacy_library :: proc() {
+load_legacy_library :: proc() -> bool {
 	scratch, ok := growing_arena_create()
-	if !ok { return }
+	if !ok {return false}
 	defer growing_arena_destroy(scratch)
 	allocator := mem_virtual.arena_allocator(scratch)
 	bytes, read_ok := os.read_entire_file(manifest_path(), allocator)
-	if !read_ok { return }
+	if !read_ok {return false}
 	data: Persisted_State
-	if err := json.unmarshal(bytes, &data, .JSON, allocator); err != nil { return }
+	if err := json.unmarshal(bytes, &data, .JSON, allocator); err != nil {
+		return false
+	}
 
 	sources := make([dynamic]Source_Video, 0, len(data.sources))
 	hints := make([dynamic]Import_Hint, 0, len(data.hints))
@@ -485,28 +507,45 @@ load_legacy_library :: proc() {
 	}
 	for source in data.sources {
 		copy, copied := clone_source_video(source)
-		if !copied { return }
+		if !copied {return false}
 		copy.media_available = os.exists(copy.media_path)
 		append(&sources, copy)
 	}
 	for hint in data.hints {
 		copy, copied := clone_import_hint(hint)
-		if !copied { return }
+		if !copied {return false}
 		append(&hints, copy)
 	}
 	for clip in data.clips {
 		copy, copied := clone_clip(clip)
-		if !copied { return }
+		if !copied {return false}
+		append(&clips, copy)
+	}
+	for exercise in data.exercises {
+		if clip_index_for_id(clips[:], exercise.id) >= 0 {continue}
+		copy, copied := clone_clip(Clip{
+			id = exercise.id,
+			source_id = exercise.source_id,
+			workflow = .Vocal,
+			name = exercise.name,
+			start_seconds = exercise.start_seconds,
+			end_seconds = exercise.end_seconds,
+			clip_path = exercise.clip_path,
+			dance_count_in_bpm = 120,
+			dance_playback_rate = 1,
+		})
+		if !copied {return false}
 		append(&clips, copy)
 	}
 	transcripts, copied = transcript_generation_copy(data.segments[:])
-	if !copied { return }
+	if !copied {return false}
 
 	state.sources = sources
 	state.hints = hints
 	state.clips = clips
 	state.transcripts = transcripts
 	loaded = true
+	return true
 }
 
 library_database: ^SQLite_DB
@@ -532,7 +571,7 @@ database_file_path_for_runtime :: proc(path: string, allocator := context.alloca
 	return resolved, err == nil
 }
 
-database_create_schema_v6 :: proc(database: ^SQLite_DB) -> bool {
+database_create_schema_v7 :: proc(database: ^SQLite_DB) -> bool {
 	return sqlite_execute(database, `
 		PRAGMA foreign_keys = ON;
 		CREATE TABLE IF NOT EXISTS sources (
@@ -629,7 +668,7 @@ database_create_schema_v6 :: proc(database: ^SQLite_DB) -> bool {
 		INSERT OR IGNORE INTO library_revisions (
 			revision, committed_at_ms
 		) VALUES (1, 0);
-		PRAGMA user_version = 6;
+		PRAGMA user_version = 7;
 	`)
 }
 
@@ -671,7 +710,7 @@ database_migrate_v5_to_v6 :: proc(database: ^SQLite_DB) -> bool {
 
 		CREATE TABLE transcript_segments_v6 (
 			id TEXT PRIMARY KEY,
-			source_id TEXT NOT NULL REFERENCES sources_v6(id) ON DELETE CASCADE,
+			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
 			start_seconds REAL NOT NULL,
 			duration_seconds REAL NOT NULL,
 			text TEXT NOT NULL,
@@ -682,7 +721,7 @@ database_migrate_v5_to_v6 :: proc(database: ^SQLite_DB) -> bool {
 		FROM transcript_segments;
 
 		CREATE TABLE import_hints_v6 (
-			source_id TEXT NOT NULL REFERENCES sources_v6(id) ON DELETE CASCADE,
+			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
 			seconds REAL NOT NULL,
 			position INTEGER NOT NULL,
 			PRIMARY KEY(source_id, seconds)
@@ -692,7 +731,7 @@ database_migrate_v5_to_v6 :: proc(database: ^SQLite_DB) -> bool {
 
 		CREATE TABLE clips_v6 (
 			id TEXT PRIMARY KEY,
-			source_id TEXT NOT NULL REFERENCES sources_v6(id) ON DELETE CASCADE,
+			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
 			workflow INTEGER NOT NULL,
 			name TEXT NOT NULL,
 			start_seconds REAL NOT NULL,
@@ -740,10 +779,8 @@ database_migrate_v5_to_v6 :: proc(database: ^SQLite_DB) -> bool {
 		_ = sqlite_execute(database, "ROLLBACK; PRAGMA foreign_keys = ON;")
 		return false
 	}
-	return sqlite_execute(
-		database,
-		"PRAGMA foreign_keys = ON; PRAGMA foreign_key_check;",
-	)
+	return sqlite_execute(database, "PRAGMA foreign_keys = ON") &&
+	       database_foreign_keys_ok(database)
 }
 
 database_prepare_legacy_schema_for_v6 :: proc(database: ^SQLite_DB) -> bool {
@@ -795,6 +832,231 @@ database_prepare_legacy_schema_for_v6 :: proc(database: ^SQLite_DB) -> bool {
 	`)
 }
 
+database_load_legacy_state :: proc(
+	database: ^SQLite_DB,
+	destination: ^App_State,
+) -> bool {
+	if database == nil || destination == nil {return false}
+	version, version_read := library_database_user_version(database)
+	if !version_read || version <= 0 || version >= 6 {return false}
+	migrated, opened := library_database_open_path(
+		":memory:",
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+	)
+	if !opened {return false}
+	defer sqlite3_close(migrated)
+	backup := sqlite3_backup_init(
+		migrated,
+		cstring("main"),
+		database,
+		cstring("main"),
+	)
+	copied := backup != nil &&
+	          sqlite3_backup_step(backup, -1) == SQLITE_DONE
+	if backup != nil {
+		copied = sqlite3_backup_finish(backup) == SQLITE_OK && copied
+	}
+	if !copied ||
+	   !database_prepare_legacy_schema_for_v6(migrated) ||
+	   !database_migrate_v5_to_v6(migrated) {
+		return false
+	}
+	return database_load_state(migrated, destination)
+}
+
+database_load_legacy_state_path :: proc(
+	path: string,
+	destination: ^App_State,
+) -> bool {
+	database, opened := library_database_open_path(path, SQLITE_OPEN_READONLY)
+	if !opened {return false}
+	defer sqlite3_close(database)
+	if !database_integrity_ok(database) ||
+	   !database_foreign_keys_ok(database) {
+		return false
+	}
+	return database_load_legacy_state(database, destination)
+}
+
+database_clip_delete_logged :: proc(
+	database: ^SQLite_DB,
+	clip_id: string,
+) -> bool {
+	statement, prepared := sqlite_prepare(
+		database,
+		`SELECT operation
+		 FROM library_changes
+		 WHERE entity_kind = ? AND entity_id = ?
+		 ORDER BY revision DESC
+		 LIMIT 1`,
+	)
+	if !prepared {return false}
+	defer sqlite3_finalize(statement)
+	if sqlite3_bind_int(
+		statement,
+		1,
+		i32(Library_Entity_Kind.Clip),
+	) != SQLITE_OK ||
+	   !sqlite_bind_text_value(statement, 2, clip_id) ||
+	   sqlite3_step(statement) != SQLITE_ROW {
+		return false
+	}
+	return Library_Change_Operation(
+		sqlite3_column_int(statement, 0),
+	) == .Delete
+}
+
+database_restore_legacy_randomization :: proc(
+	database: ^SQLite_DB,
+	clips: []Clip,
+) -> bool {
+	if !sqlite_execute(database, "BEGIN IMMEDIATE") {return false}
+	committed := false
+	defer if !committed {_ = sqlite_execute(database, "ROLLBACK")}
+	statement, prepared := sqlite_prepare(
+		database,
+		`INSERT OR IGNORE INTO clip_randomization (
+			clip_id, last_sequence
+		) VALUES (?, ?)`,
+	)
+	if !prepared {return false}
+	defer sqlite3_finalize(statement)
+	for clip in clips {
+		if clip.last_randomized_sequence <= 0 {continue}
+		if sqlite3_reset(statement) != SQLITE_OK ||
+		   !sqlite_bind_text_value(statement, 1, clip.id) ||
+		   sqlite3_bind_int64(
+				statement,
+				2,
+				clip.last_randomized_sequence,
+		   ) != SQLITE_OK ||
+		   sqlite3_step(statement) != SQLITE_DONE {
+			return false
+		}
+	}
+	if !sqlite_execute(database, "COMMIT") {return false}
+	committed = true
+	return true
+}
+
+database_insert_vocal_clip_repair_notification :: proc(
+	database: ^SQLite_DB,
+	restored: int,
+	backup_name: string,
+) -> bool {
+	now_ms := time.to_unix_nanoseconds(time.now()) / 1_000_000
+	summary := fmt.tprintf("Restored %d Vocal clips", restored)
+	detail := fmt.tprintf(
+		"The workflow migration restored missing Vocal clips from %s. Existing clips and logged deletions were preserved.",
+		backup_name,
+	)
+	statement, prepared := sqlite_prepare(
+		database,
+		`INSERT INTO notifications (
+			created_at_ms, updated_at_ms, kind, summary, detail,
+			context_json, action_kind, action_target
+		) VALUES (?, ?, ?, ?, ?, '[]', 0, '')`,
+	)
+	if !prepared {return false}
+	defer sqlite3_finalize(statement)
+	return sqlite3_bind_int64(statement, 1, now_ms) == SQLITE_OK &&
+	       sqlite3_bind_int64(statement, 2, now_ms) == SQLITE_OK &&
+	       sqlite3_bind_int(
+				statement,
+				3,
+				i32(Notification_Kind.Success),
+		   ) == SQLITE_OK &&
+	       sqlite_bind_text_value(statement, 4, summary) &&
+	       sqlite_bind_text_value(statement, 5, detail) &&
+	       sqlite3_step(statement) == SQLITE_DONE
+}
+
+database_repair_legacy_vocal_clips :: proc(
+	database: ^SQLite_DB,
+) -> bool {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	backup, found := library_legacy_backup_latest(context.temp_allocator)
+	if !found {return true}
+	legacy: App_State
+	if !database_load_legacy_state_path(backup.path, &legacy) {
+		return true
+	}
+	defer app_state_collections_destroy(&legacy)
+	current: App_State
+	if !database_load_state(database, &current) {return false}
+	defer app_state_collections_destroy(&current)
+
+	ordered := make(
+		[dynamic]Clip,
+		0,
+		len(legacy.clips)+len(current.clips),
+		context.temp_allocator,
+	)
+	restored := 0
+	for clip in legacy.clips {
+		if clip.workflow != .Vocal {continue}
+		if index := library_clip_index(current.clips[:], clip.id);
+		   index >= 0 {
+			append(&ordered, current.clips[index])
+			continue
+		}
+		source_index := source_index_for_id(current.sources[:], clip.source_id)
+		if source_index < 0 ||
+		   current.sources[source_index].workflow != .Vocal ||
+		   database_clip_delete_logged(database, clip.id) {
+			continue
+		}
+		append(&ordered, clip)
+		restored += 1
+	}
+	for clip in current.clips {
+		if clip.workflow != .Vocal ||
+		   library_clip_index(legacy.clips[:], clip.id) >= 0 {
+			continue
+		}
+		append(&ordered, clip)
+	}
+	for clip in current.clips {
+		if clip.workflow == .Dancing {append(&ordered, clip)}
+	}
+
+	if restored > 0 {
+		candidate, copied := app_state_collections_copy(
+			current.sources[:],
+			current.transcripts.segments[:],
+			current.hints[:],
+			ordered[:],
+		)
+		if !copied {return false}
+		defer app_state_collections_destroy(&candidate)
+		if !database_save_collections(
+			database,
+			candidate.sources[:],
+			candidate.transcripts.segments[:],
+			candidate.hints[:],
+			candidate.clips[:],
+		) {
+			return false
+		}
+	}
+	if !database_restore_legacy_randomization(database, ordered[:]) {
+		return false
+	}
+	if restored > 0 {
+		_ = database_insert_vocal_clip_repair_notification(
+			database,
+			restored,
+			backup.name,
+		)
+	}
+	return true
+}
+
+database_migrate_v6_to_v7 :: proc(database: ^SQLite_DB) -> bool {
+	if !database_repair_legacy_vocal_clips(database) {return false}
+	return sqlite_execute(database, "PRAGMA user_version = 7")
+}
+
 database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 	version, version_read := library_database_user_version(database)
 	if !version_read {return false}
@@ -803,8 +1065,12 @@ database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 		if !database_migrate_v5_to_v6(database) {return false}
 		version = 6
 	}
+	if version == 6 {
+		if !database_migrate_v6_to_v7(database) {return false}
+		version = 7
+	}
 	if version != 0 && version != LIBRARY_SCHEMA_VERSION {return false}
-	return database_create_schema_v6(database)
+	return database_create_schema_v7(database)
 }
 
 database_source_auth_browser_load :: proc(
@@ -2065,7 +2331,11 @@ load_library :: proc() -> Library_Load_Result {
 		}
 		if schema_version < LIBRARY_SCHEMA_VERSION {
 			database_needs_migration = true
-			backup := library_backup_create(read_database, false)
+			backup := library_backup_create(
+				read_database,
+				false,
+				schema_version,
+			)
 			backup_created := backup.status != .Failed
 			library_backup_result_destroy(&backup)
 			if !backup_created {
@@ -2133,17 +2403,21 @@ load_library :: proc() -> Library_Load_Result {
 	}
 	source_auth_saved_browser = database_source_auth_browser_load(database)
 	legacy_exists := os.exists(manifest_path())
-	if legacy_exists {
+	if legacy_exists && !database_exists {
 		app_state_collections_destroy(&state)
-		load_legacy_library()
-		if !database_save_state(database) || !database_state_counts_match(database) || !database_integrity_ok(database) {
+		if !load_legacy_library() ||
+		   !database_save_state(database) ||
+		   !database_state_counts_match(database) ||
+		   !database_integrity_ok(database) {
 			failure := library_load_failure(database, .Migration, "Unable to migrate the legacy library")
 			sqlite3_close(database)
 			library_database = nil
 			library_recovery_require(failure)
 			return failure
 		}
-		_ = os.remove(manifest_path())
+		_ = archive_legacy_manifest()
+	} else if legacy_exists {
+		_ = archive_legacy_manifest()
 	}
 	if _, found := library_backup_latest(context.temp_allocator); !found {
 		backup := library_backup_create(database)

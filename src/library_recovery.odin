@@ -11,7 +11,7 @@ import "core:strings"
 import "core:time"
 import "base:runtime"
 
-LIBRARY_SCHEMA_VERSION :: 6
+LIBRARY_SCHEMA_VERSION :: 7
 LIBRARY_BACKUP_RETENTION :: 10
 
 Library_Storage_Mode :: enum {
@@ -549,6 +549,7 @@ library_database_open_path :: proc(
 library_backup_verify :: proc(
 	path: string,
 	expected_revision: i64 = -1,
+	expected_schema := LIBRARY_SCHEMA_VERSION,
 ) -> (i64, bool) {
 	database, opened := library_database_open_path(path, SQLITE_OPEN_READONLY)
 	if !opened {return 0, false}
@@ -556,10 +557,18 @@ library_backup_verify :: proc(
 	if !database_integrity_ok(database) || !database_foreign_keys_ok(database) {
 		return 0, false
 	}
+	schema, schema_read := library_database_user_version(database)
+	if !schema_read || schema != expected_schema {return 0, false}
 	revision := library_revision_current(database)
 	if expected_revision >= 0 && revision != expected_revision {return 0, false}
 	loaded: App_State
-	if !database_load_state(database, &loaded) {return 0, false}
+	loaded_ok := false
+	if schema < 6 {
+		loaded_ok = database_load_legacy_state(database, &loaded)
+	} else {
+		loaded_ok = database_load_state(database, &loaded)
+	}
+	if !loaded_ok {return 0, false}
 	app_state_collections_destroy(&loaded)
 	return revision, true
 }
@@ -610,6 +619,49 @@ library_backup_latest :: proc(
 	return files[len(files)-1], true
 }
 
+library_legacy_backup_latest :: proc(
+	allocator := context.allocator,
+) -> (Library_Backup_File, bool) {
+	files := make([dynamic]Library_Backup_File, allocator)
+	handle, open_error := os.open(library_backups_dir())
+	if open_error != nil {return {}, false}
+	entries, read_error := os.read_dir(handle, -1, allocator)
+	os.close(handle)
+	if read_error != nil {return {}, false}
+	for entry in entries {
+		if entry.is_dir ||
+		   !strings.has_prefix(entry.name, "library-r") ||
+		   !strings.has_suffix(entry.name, ".sqlite3") {
+			continue
+		}
+		database, opened := library_database_open_path(
+			entry.fullpath,
+			SQLITE_OPEN_READONLY,
+		)
+		if !opened {continue}
+		schema, schema_read := library_database_user_version(database)
+		sqlite3_close(database)
+		if !schema_read || schema <= 0 || schema >= 6 {continue}
+		revision, valid := library_backup_verify(
+			entry.fullpath,
+			expected_schema = schema,
+		)
+		if !valid {continue}
+		append(&files, Library_Backup_File{
+			path = entry.fullpath,
+			name = entry.name,
+			modified_nano = time.time_to_unix_nano(entry.modification_time),
+			revision = revision,
+		})
+	}
+	if len(files) == 0 {return {}, false}
+	slice.sort_by(files[:], proc(a, b: Library_Backup_File) -> bool {
+		if a.modified_nano == b.modified_nano {return a.name < b.name}
+		return a.modified_nano < b.modified_nano
+	})
+	return files[len(files)-1], true
+}
+
 library_backup_prune :: proc() {
 	files := library_backup_files(context.temp_allocator)
 	if len(files) <= LIBRARY_BACKUP_RETENTION {return}
@@ -622,6 +674,7 @@ library_backup_prune :: proc() {
 library_backup_create :: proc(
 	database: ^SQLite_DB,
 	reuse_same_revision := true,
+	schema_version := LIBRARY_SCHEMA_VERSION,
 ) -> Library_Backup_Result {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if database == nil {
@@ -629,6 +682,7 @@ library_backup_create :: proc(
 	}
 	revision := library_revision_current(database)
 	if latest, found := library_backup_latest(context.temp_allocator);
+	   schema_version == LIBRARY_SCHEMA_VERSION &&
 	   reuse_same_revision &&
 	   found && latest.revision == revision {
 		return {
@@ -667,7 +721,11 @@ library_backup_create :: proc(
 			detail = strings.clone("SQLite could not copy the library"),
 		}
 	}
-	if _, valid := library_backup_verify(temporary_path, revision); !valid {
+	if _, valid := library_backup_verify(
+		temporary_path,
+		revision,
+		schema_version,
+	); !valid {
 		_ = os.remove(temporary_path)
 		return {
 			status = .Failed,

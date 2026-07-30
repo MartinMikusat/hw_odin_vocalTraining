@@ -22,7 +22,9 @@ validate_database() {
     return 1
   }
   schema_version=$(sqlite3 "$database" "PRAGMA user_version")
-  [ "$schema_version" = "2" ] || [ "$schema_version" = "6" ] || {
+  [ "$schema_version" = "2" ] ||
+    [ "$schema_version" = "6" ] ||
+    [ "$schema_version" = "7" ] || {
     echo "[hw_videoClips] unsupported database schema: $database" >&2
     return 1
   }

@@ -43,9 +43,11 @@ The application stores its SQLite library and downloaded media in
 `~/Library/Application Support/hw_videoClips`. On first launch, it moves an
 existing `~/Library/Application Support/VocalTraining` directory to the new
 location. It retains both directories when both contain a database. Existing
-sources and clips migrate into the Vocal workflow. It also removes the old
-`library.json` file after it verifies the SQLite database. Only download media
-you are authorized to download.
+sources and clips migrate into the Vocal workflow. A pre-workflow backup can
+restore missing Vocal clips once while preserving current clips and logged
+deletions. The application archives an old `library.json` file after it
+verifies the SQLite database. It never replaces an existing SQLite library
+with the JSON file. Only download media you are authorized to download.
 
 The application validates all required library rows before it enables writes.
 If the read fails, the application blocks normal controls and opens Library
