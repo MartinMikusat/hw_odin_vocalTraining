@@ -138,6 +138,7 @@ DANCE_COUNT_EACH_LOOP_ACTION_INDEX :: 18
 PLAYBACK_FULLSCREEN_ACTION_INDEX :: 19
 
 PLAYBACK_FULLSCREEN_CONTROL_TIMEOUT_MS :: i64(2_000)
+PLAYER_SURFACE_DOUBLE_CLICK_INTERVAL_MS :: i64(180)
 NSApplicationPresentationAutoHideDock :: uint(1 << 0)
 NSApplicationPresentationHideDock :: uint(1 << 1)
 NSApplicationPresentationAutoHideMenuBar :: uint(1 << 2)
@@ -1545,11 +1546,16 @@ toggle_playback_fullscreen :: proc() -> Playback_Fullscreen_Result {
 }
 
 player_surface_double_click_interval_ms :: proc() -> i64 {
-	seconds := msg_f64(
-		objc_getClass("NSEvent"),
-		sel_registerName("doubleClickInterval"),
-	)
-	return i64(max(0.1, seconds)*1_000)
+	return PLAYER_SURFACE_DOUBLE_CLICK_INTERVAL_MS
+}
+
+player_surface_click_is_double :: proc(
+	click_count: uint,
+	pending: bool,
+	now_ms,
+	deadline_ms: i64,
+) -> bool {
+	return click_count >= 2 && pending && now_ms < deadline_ms
 }
 
 cancel_player_surface_click :: proc() {
@@ -11762,11 +11768,18 @@ activate_registered_target_at_point :: proc(
 		ui.source_scrubbing = true
 		seek_player_timeline_rect(point, control.rect)
 	case .Player_Surface:
-		if click_count >= 2 {
+		now_ms := numbered_action_time_ms()
+		if player_surface_click_is_double(
+			click_count,
+			ui.player_surface_click_pending,
+			now_ms,
+			ui.player_surface_click_deadline_ms,
+		) {
 			cancel_player_surface_click()
 			_ = toggle_playback_fullscreen()
 		} else {
-			schedule_player_surface_click()
+			_ = advance_player_surface_click(now_ms)
+			schedule_player_surface_click(now_ms)
 			playback_fullscreen_show_controls()
 		}
 	case:

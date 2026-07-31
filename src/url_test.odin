@@ -279,6 +279,21 @@ playback_fullscreen_geometry_and_visibility_policy_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+player_surface_double_click_uses_short_pending_window_test :: proc(
+	t: ^testing.T,
+) {
+	testing.expect_value(
+		t,
+		player_surface_double_click_interval_ms(),
+		i64(180),
+	)
+	testing.expect(t, player_surface_click_is_double(2, true, 1_179, 1_180))
+	testing.expect(t, !player_surface_click_is_double(1, true, 1_179, 1_180))
+	testing.expect(t, !player_surface_click_is_double(2, false, 1_179, 1_180))
+	testing.expect(t, !player_surface_click_is_double(2, true, 1_180, 1_180))
+}
+
+@(test)
 playback_fullscreen_presentation_and_shortcut_test :: proc(t: ^testing.T) {
 	unrelated := uint(1 << 12)
 	current := unrelated |
