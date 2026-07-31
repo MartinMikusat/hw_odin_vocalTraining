@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "name": "warm-immediate",
+  "mutation": "transient",
+  "setup": {
+    "workflow": "dancing",
+    "mode": "play",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "steps": [
+    {"op": "assert", "condition": {"kind": "surface", "field": "viewport.width", "operator": "eq", "value": 1280}},
+    {"op": "assert", "condition": {"kind": "surface", "field": "viewport.height", "operator": "eq", "value": 800}},
+    {"op": "activate", "control": "settings"},
+    {"op": "assert", "condition": {"kind": "surface", "field": "overlay", "operator": "eq", "value": "settings"}},
+    {"op": "assert", "condition": {"kind": "control", "field": "close settings", "operator": "present"}},
+    {"op": "activate", "control": "close settings"},
+    {"op": "assert", "condition": {"kind": "surface", "field": "overlay", "operator": "eq", "value": "none"}},
+    {"op": "activate", "control": "settings"},
+    {"op": "activate", "control": "close settings"},
+    {"op": "assert", "condition": {"kind": "control", "field": "settings", "operator": "enabled"}}
+  ]
+}

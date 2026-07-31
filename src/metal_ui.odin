@@ -274,6 +274,8 @@ UI_State :: struct {
 	activity_tick:      uint,
 	frame_tick:         uint,
 	render_count:         uint,
+	overlay_revision:     uint,
+	pointer_event_count:  uint,
 	url_probe_due_tick: uint,
 	url_probe_pending:  bool,
 	save_source_browser_choice: bool,
@@ -670,6 +672,11 @@ msg_bool_id_id :: proc(receiver: Id, selector: Sel, a, b: Id) -> bool {
 	return p(receiver, selector, a, b)
 }
 
+msg_bool_uint :: proc(receiver: Id, selector: Sel, value: uint) -> bool {
+	p := transmute(proc "c" (_: Id, _: Sel, _: uint) -> bool)send_address
+	return p(receiver, selector, value)
+}
+
 msg_void_bool :: proc(receiver: Id, selector: Sel, value: bool) {
 	p := transmute(proc "c" (_: Id, _: Sel, _: bool))send_address
 	p(receiver, selector, value)
@@ -698,6 +705,46 @@ msg_i64 :: proc(receiver: Id, selector: Sel) -> i64 {
 msg_void_id_id_id :: proc(receiver: Id, selector: Sel, a, b, c: Id) {
 	p := transmute(proc "c" (_: Id, _: Sel, _: Id, _: Id, _: Id))send_address
 	p(receiver, selector, a, b, c)
+}
+
+msg_id_mouse_event :: proc(
+	receiver: Id,
+	selector: Sel,
+	event_type: uint,
+	location: Point,
+	modifiers: uint,
+	timestamp: f64,
+	window_number: int,
+	ctx: Id,
+	event_number, click_count: int,
+	pressure: f32,
+) -> Id {
+	p := transmute(proc "c" (
+		_: Id,
+		_: Sel,
+		_: uint,
+		_: Point,
+		_: uint,
+		_: f64,
+		_: int,
+		_: Id,
+		_: int,
+		_: int,
+		_: f32,
+	) -> Id)send_address
+	return p(
+		receiver,
+		selector,
+		event_type,
+		location,
+		modifiers,
+		timestamp,
+		window_number,
+		ctx,
+		event_number,
+		click_count,
+		pressure,
+	)
 }
 
 msg_void_id_sel_id_id :: proc(receiver: Id, selector: Sel, observer: Id, action: Sel, name, object: Id) {
@@ -787,6 +834,25 @@ msg_void_region_u_ptr_u :: proc(
 		_: uint,
 	))send_address
 	p(receiver, selector, region, level, bytes, bytes_per_row)
+}
+
+msg_void_ptr_u_region_u :: proc(
+	receiver: Id,
+	selector: Sel,
+	bytes: rawptr,
+	bytes_per_row: uint,
+	region: MTL_Region,
+	level: uint,
+) {
+	p := transmute(proc "c" (
+		_: Id,
+		_: Sel,
+		_: rawptr,
+		_: uint,
+		_: MTL_Region,
+		_: uint,
+	))send_address
+	p(receiver, selector, bytes, bytes_per_row, region, level)
 }
 
 msg_id_rect_id :: proc(receiver: Id, selector: Sel, rect: Rect, view: Id) -> Id {
@@ -1337,6 +1403,13 @@ playback_fullscreen_screen :: proc() -> Id {
 	return screen
 }
 
+playback_fullscreen_frame :: proc(screen: Id) -> Rect {
+	if ui_automation_enabled() {
+		return Rect{Point{80, 80}, Size{1280, 800}}
+	}
+	return msg_rect(screen, sel_registerName("frame"))
+}
+
 playback_fullscreen_set_cursor_hidden_until_move :: proc(hidden: bool) {
 	msg_void_bool(
 		objc_getClass("NSCursor"),
@@ -1445,7 +1518,7 @@ reapply_playback_fullscreen_frame :: proc() {
 	if !ui.playback_fullscreen_active || state.window == nil {return}
 	screen := playback_fullscreen_screen()
 	if screen == nil {return}
-	frame := msg_rect(screen, sel_registerName("frame"))
+	frame := playback_fullscreen_frame(screen)
 	if msg_rect(state.window, sel_registerName("frame")) != frame {
 		msg_void_rect_b(
 			state.window,
@@ -1496,7 +1569,7 @@ set_playback_fullscreen :: proc(
 		msg_void_rect_b(
 			state.window,
 			sel_registerName("setFrame:display:"),
-			msg_rect(screen, sel_registerName("frame")),
+			playback_fullscreen_frame(screen),
 			true,
 		)
 		playback_fullscreen_set_cursor_hidden_until_move(false)
@@ -2462,7 +2535,7 @@ persist_active_view_preference :: proc() {
 	}
 }
 
-set_ui_mode :: proc(mode: UI_Mode) {
+set_ui_mode :: proc(mode: UI_Mode, persist := true) {
 	if ui.mode == mode {return}
 	if !flush_active_clip_draft() {return}
 	cancel_ui_flash()
@@ -2492,7 +2565,7 @@ set_ui_mode :: proc(mode: UI_Mode) {
 	clear_marked_text()
 	normalize_scroll_offsets()
 	ui.needs_redraw = true
-	persist_active_view_preference()
+	if persist {persist_active_view_preference()}
 }
 
 last_source_index_for_workflow :: proc(workflow: Workflow_Kind) -> int {
@@ -2502,7 +2575,7 @@ last_source_index_for_workflow :: proc(workflow: Workflow_Kind) -> int {
 	return -1
 }
 
-set_ui_workflow :: proc(workflow: Workflow_Kind) {
+set_ui_workflow :: proc(workflow: Workflow_Kind, persist := true) {
 	if ui.workflow == workflow {return}
 	if !flush_active_clip_draft() {return}
 	cancel_ui_flash()
@@ -2539,7 +2612,7 @@ set_ui_workflow :: proc(workflow: Workflow_Kind) {
 	clear_marked_text()
 	normalize_scroll_offsets()
 	ui.needs_redraw = true
-	persist_active_view_preference()
+	if persist {persist_active_view_preference()}
 }
 
 layout_rects :: proc(
@@ -3708,6 +3781,7 @@ normalize_scroll_offsets :: proc() {
 
 push_rect :: proc(vertices: ^[dynamic]Solid_Vertex, rect: UI_Rect, color: [4]f32) {
 	if rect.w <= 0 || rect.h <= 0 || ui.width <= 0 || ui.height <= 0 {return}
+	ui_render_trace_record_solid_rect(rect, color)
 	x0 := f32(rect.x / ui.width * 2 - 1)
 	x1 := f32((rect.x + rect.w) / ui.width * 2 - 1)
 	y0 := f32(rect.y / ui.height * 2 - 1)
@@ -3908,6 +3982,7 @@ draw_text_in_rect :: proc(
 	clip := true,
 ) {
 	if ctx == nil || rect.w <= 0 || rect.h <= 0 || len(text) == 0 {return}
+	ui_render_trace_record_text(text, rect, color)
 	run := make_text_run(font, text)
 	defer delete_text_run(&run)
 	available_width := max(0, (rect.w - inset * 2) * ui.scale)
@@ -4196,6 +4271,7 @@ draw_timestamp_text_in_rect :: proc(
 }
 
 fill_overlay_rect :: proc(ctx: rawptr, rect: UI_Rect, color: [4]f64) {
+	ui_render_trace_record_overlay_rect(rect, color)
 	CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], color[3])
 	CGContextFillRect(
 		ctx,
@@ -8204,6 +8280,16 @@ find_ui_control_by_action_and_index :: proc(kind: UI_Action_Kind, index: int) ->
 	return nil
 }
 
+find_ui_control_by_functional_name :: proc(
+	controls: []UI_Control,
+	functional_name: string,
+) -> ^UI_Control {
+	for &control in controls {
+		if control.functional_name == functional_name {return &control}
+	}
+	return nil
+}
+
 ui_control_rect :: proc(kind: UI_Action_Kind, index: int = -1) -> UI_Rect {
 	control: ^UI_Control
 	if index < 0 {
@@ -10871,17 +10957,10 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 	return nil
 }
 
-on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
-	context = runtime.default_context()
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	control := find_ax_control(self)
-	if control == nil || .Editable not_in control.flags {return}
-	utf8 := msg_id(value, sel_registerName("UTF8String"))
-	if utf8 == nil {return}
-	text := string(cstring(utf8))
-	#partial switch control.action.kind {
+set_ui_control_value :: proc(action: UI_Action, text: string) -> bool {
+	#partial switch action.kind {
 	case .Command_Palette_Search:
-		ui_set_string(&ui.command_palette_query, string(cstring(utf8)))
+		ui_set_string(&ui.command_palette_query, text)
 		search_error := command_palette.set_query(
 			&command_palette_state,
 			ui.command_palette_query,
@@ -10916,9 +10995,20 @@ on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
 	case .Clip_Rename:
 		ui_set_string(&ui.clip_rename, text)
 	case:
-		return
+		return false
 	}
 	ui.needs_redraw = true
+	return true
+}
+
+on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	control := find_ax_control(self)
+	if control == nil || .Editable not_in control.flags {return}
+	utf8 := msg_id(value, sel_registerName("UTF8String"))
+	if utf8 == nil {return}
+	_ = set_ui_control_value(control.action, string(cstring(utf8)))
 }
 
 on_metal_ax_children :: proc "c" (self: Id, command: Sel) -> Id {
@@ -10987,25 +11077,29 @@ current_video_texture :: proc() -> (Id, uint, uint, bool) {
 	return retained, width, height, true
 }
 
-render_frame :: proc() {
-	if ui.layer == nil || ui.width <= 0 || ui.height <= 0 {return}
-	drawable := msg_id(ui.layer, sel_registerName("nextDrawable"))
-	if drawable == nil {return}
-	arena_reset(&memory.frame, &memory.frame_stats)
-	frame_allocator := mem_virtual.arena_allocator(&memory.frame)
-	texture := msg_id(drawable, sel_registerName("texture"))
-	command_buffer := msg_id(ui.queue, sel_registerName("commandBuffer"))
+Frame_Encode_Result :: struct {
+	overlay_uploaded: bool,
+	encoder_created:  bool,
+}
+
+encode_frame_to_target :: proc(
+	command_buffer, target: Id,
+	frame_allocator: runtime.Allocator,
+	force_redraw: bool,
+) -> Frame_Encode_Result {
+	if command_buffer == nil || target == nil {return {}}
 	pass := msg_id(
 		objc_getClass("MTLRenderPassDescriptor"),
 		sel_registerName("renderPassDescriptor"),
 	)
 	attachments := msg_id(pass, sel_registerName("colorAttachments"))
 	attachment := msg_id_uint(attachments, sel_registerName("objectAtIndexedSubscript:"), 0)
-	msg_void_id(attachment, sel_registerName("setTexture:"), texture)
+	msg_void_id(attachment, sel_registerName("setTexture:"), target)
 	msg_void_i(attachment, sel_registerName("setLoadAction:"), 2)
 	msg_void_i(attachment, sel_registerName("setStoreAction:"), 1)
 	clear_color := ui_theme_colors().chassis
 	if ui.playback_fullscreen_active {clear_color = {0, 0, 0, 1}}
+	ui_render_trace_set_clear(clear_color)
 	msg_void_clear_color(
 		attachment,
 		sel_registerName("setClearColor:"),
@@ -11020,7 +11114,7 @@ render_frame :: proc() {
 	pixel_width := uint(max(1, ui.width * ui.scale))
 	pixel_height := uint(max(1, ui.height * ui.scale))
 	texture_resized := ensure_text_texture(pixel_width, pixel_height)
-	redraw_requested := ui.needs_redraw || texture_resized
+	redraw_requested := force_redraw || ui.needs_redraw || texture_resized
 	build_ui_controls(redraw_requested, frame_allocator)
 	overlay_uploaded := !redraw_requested
 	if redraw_requested {
@@ -11036,6 +11130,7 @@ render_frame :: proc() {
 				pixel_width * 4,
 			)
 			overlay_uploaded = true
+			ui.overlay_revision += 1
 		}
 	}
 
@@ -11044,12 +11139,22 @@ render_frame :: proc() {
 		sel_registerName("renderCommandEncoderWithDescriptor:"),
 		pass,
 	)
+	if encoder == nil {
+		return {overlay_uploaded=overlay_uploaded}
+	}
 
 	vertices, vertices_error := make([dynamic]Solid_Vertex, 0, 1024, frame_allocator)
 	if vertices_error != nil {arena_note_failure(&memory.frame_stats)}
 	if vertices_error == nil {build_geometry(&vertices)}
 	msg_void_id(encoder, sel_registerName("setRenderPipelineState:"), ui.solid_pipeline)
-	if vertices_error == nil {encode_solid_vertices(encoder, vertices[:])}
+	if vertices_error == nil {
+		ui_render_trace_record(
+			"draw",
+			pipeline = "solid",
+			vertex_count = len(vertices),
+		)
+		encode_solid_vertices(encoder, vertices[:])
+	}
 
 	_, _, _, _, player, _, _, _, _, _, _ := layout_rects()
 	player_rect := player_content_rect(player)
@@ -11071,9 +11176,24 @@ render_frame :: proc() {
 			ui.active_clip >= 0 &&
 			ui.active_clip < len(state.clips) &&
 			state.clips[ui.active_clip].dance_mirrored
+		seconds, _ := current_seconds()
+		ui_render_trace_record(
+			"texture",
+			draw_rect,
+			pipeline = "texture",
+			texture = "video",
+			mirrored = mirrored,
+			timestamp_seconds = seconds,
+		)
 		encode_texture(encoder, video_texture, draw_rect, 1, mirrored)
 	}
 
+	ui_render_trace_record(
+		"texture",
+		{0, 0, ui.width, ui.height},
+		pipeline = "texture",
+		texture = "overlay",
+	)
 	encode_texture(encoder, ui.text_texture, UI_Rect{0, 0, ui.width, ui.height}, 1)
 
 	fullscreen_timeline_vertices, timeline_vertices_error :=
@@ -11085,6 +11205,11 @@ render_frame :: proc() {
 			&fullscreen_timeline_vertices,
 		)
 		if len(fullscreen_timeline_vertices) > 0 {
+			ui_render_trace_record(
+				"draw",
+				pipeline = "fullscreen-timeline",
+				vertex_count = len(fullscreen_timeline_vertices),
+			)
 			msg_void_id(
 				encoder,
 				sel_registerName("setRenderPipelineState:"),
@@ -11098,12 +11223,36 @@ render_frame :: proc() {
 	}
 
 	msg_void(encoder, sel_registerName("endEncoding"))
+	return {
+		overlay_uploaded = overlay_uploaded,
+		encoder_created = true,
+	}
+}
+
+render_frame :: proc() {
+	if ui.layer == nil || ui.width <= 0 || ui.height <= 0 {return}
+	drawable := msg_id(ui.layer, sel_registerName("nextDrawable"))
+	if drawable == nil {return}
+	arena_reset(&memory.frame, &memory.frame_stats)
+	frame_allocator := mem_virtual.arena_allocator(&memory.frame)
+	texture := msg_id(drawable, sel_registerName("texture"))
+	command_buffer := msg_id(ui.queue, sel_registerName("commandBuffer"))
+	encoded := encode_frame_to_target(
+		command_buffer,
+		texture,
+		frame_allocator,
+		false,
+	)
+	if !encoded.encoder_created {
+		ui.needs_redraw = true
+		return
+	}
 	msg_void_id(command_buffer, sel_registerName("presentDrawable:"), drawable)
 	msg_void(command_buffer, sel_registerName("commit"))
 	ui.render_count += 1
 	memory.frame_stats.high_water = max(memory.frame_stats.high_water, memory.frame.total_used)
 	memory.redraw_stats.high_water = max(memory.redraw_stats.high_water, memory.redraw.total_used)
-	ui.needs_redraw = !overlay_uploaded
+	ui.needs_redraw = !encoded.overlay_uploaded
 }
 
 ui_memory_destroy :: proc() {
@@ -11545,6 +11694,8 @@ metal_player_clear :: proc() {
 }
 
 metal_player_load :: proc(path: string) -> bool {
+	media_setup_started_ms := ui_automation_media_setup_begin()
+	defer ui_automation_media_setup_finish(media_setup_started_ms)
 	url := msg_id_id(objc_getClass("NSURL"), sel_registerName("fileURLWithPath:"), nsstring(path))
 	if url == nil {return false}
 	item := msg_id_id(objc_getClass("AVPlayerItem"), sel_registerName("playerItemWithURL:"), url)
@@ -11926,6 +12077,7 @@ resize_window_from_current_mouse :: proc() {
 on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	ui.pointer_event_count += 1
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	ui.mouse = msg_point_point_id(
 		self,
@@ -12893,6 +13045,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 		)
 		render_frame()
 	}
+	ui_automation_advance()
 }
 
 register_delegate :: proc(app: Id) {
@@ -13265,10 +13418,14 @@ video_clips_gui_initialize :: proc() -> bool {
 	)
 
 	screen := msg_id(objc_getClass("NSScreen"), sel_registerName("mainScreen"))
+	window_frame := msg_rect(screen, sel_registerName("visibleFrame"))
+	if ui_automation_enabled() {
+		window_frame = playback_fullscreen_frame(screen)
+	}
 	msg_void_rect_b(
 		state.window,
 		sel_registerName("setFrame:display:"),
-		msg_rect(screen, sel_registerName("visibleFrame")),
+		window_frame,
 		true,
 	)
 	msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
@@ -13282,7 +13439,7 @@ video_clips_gui_initialize :: proc() -> bool {
 	}
 	if !cli_ipc_server_start() {set_text(state.status, "CLI control socket is unavailable")}
 	validate_startup_helpers()
-	request_next_missing_source_metadata()
+	if !ui_automation_enabled() {request_next_missing_source_metadata()}
 	return true
 }
 

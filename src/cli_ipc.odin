@@ -258,7 +258,12 @@ cli_ipc_request_destroy :: proc(request: ^CLI_Request) {
 	delete(request.name)
 	delete(request.baseline_path)
 	delete(request.scenario)
+	delete(request.scenario_file)
+	delete(request.scenario_json)
 	delete(request.fullscreen_state)
+	delete(request.target_control)
+	delete(request.key_modifiers)
+	delete(request.key_text)
 	request^ = {}
 }
 
@@ -272,6 +277,10 @@ on_cli_ipc_request :: proc "c" (self: Id, command: Sel, sender: Id) {
 	}
 	if cli_ipc_work.request.command == .Clip_Create &&
 	   cli_clip_create_enqueue(cli_ipc_work.request, cli_ipc_work) {
+		return
+	}
+	if cli_ipc_work.request.command == .UI_Run &&
+	   ui_automation_start(cli_ipc_work.request, cli_ipc_work) {
 		return
 	}
 	result := cli_execute(cli_ipc_work.request)

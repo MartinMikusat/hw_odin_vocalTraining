@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "add-source-during-task",
+  "mutation": "transient",
+  "setup": {
+    "workflow": "dancing",
+    "mode": "create",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "steps": [
+    {"op": "assert", "condition": {"kind": "surface", "field": "background", "operator": "eq", "value": "simulated-task"}},
+    {"op": "assert", "condition": {"kind": "control", "field": "add source", "operator": "present"}},
+    {"op": "assert", "condition": {"kind": "control", "field": "add source", "operator": "enabled"}}
+  ]
+}

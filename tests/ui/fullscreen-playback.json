@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "name": "fullscreen-playback-progress",
+  "mutation": "transient",
+  "setup": {
+    "workflow": "dancing",
+    "mode": "play",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "steps": [
+    {"op": "activate", "control": "select clip ui-test-clip"},
+    {"op": "wait", "condition": {"kind": "surface", "field": "media.loaded", "operator": "eq", "value": true}, "timeout_ms": 1000},
+    {"op": "activate", "control": "player full screen toggle"},
+    {"op": "assert", "condition": {"kind": "surface", "field": "playback.fullscreen", "operator": "eq", "value": true}},
+    {"op": "assert", "condition": {"kind": "surface", "field": "playback.transport_visible", "operator": "eq", "value": true}},
+    {"op": "wait", "condition": {"kind": "surface", "field": "playback.seconds", "operator": "increase_by", "value": 0.1}, "timeout_ms": 1000},
+    {"op": "activate", "control": "play pause clip"},
+    {"op": "assert", "condition": {"kind": "surface", "field": "playback.active", "operator": "eq", "value": false}},
+    {"op": "assert", "condition": {"kind": "surface", "field": "playback.seconds", "operator": "lte", "value": 0.8}},
+    {"op": "activate", "control": "play pause clip"},
+    {"op": "assert", "condition": {"kind": "surface", "field": "playback.active", "operator": "eq", "value": true}},
+    {"op": "wait", "condition": {"kind": "surface", "field": "playback.seconds", "operator": "gte", "value": 0.85}, "timeout_ms": 1500},
+    {"op": "wait", "condition": {"kind": "surface", "field": "playback.active", "operator": "eq", "value": false}, "timeout_ms": 1000},
+    {"op": "assert", "condition": {"kind": "surface", "field": "playback.fullscreen", "operator": "eq", "value": true}},
+    {"op": "assert", "condition": {"kind": "surface", "field": "playback.transport_visible", "operator": "eq", "value": true}},
+    {"op": "activate", "control": "play pause clip"},
+    {"op": "assert", "condition": {"kind": "surface", "field": "playback.active", "operator": "eq", "value": true}},
+    {"op": "wait", "condition": {"kind": "surface", "field": "playback.seconds", "operator": "lte", "value": 0.2}, "timeout_ms": 500},
+    {"op": "wait", "condition": {"kind": "surface", "field": "playback.seconds", "operator": "increase_by", "value": 0.2}, "timeout_ms": 1000},
+    {"op": "assert", "condition": {"kind": "surface", "field": "render.count", "operator": "gte", "value": 1}},
+    {"op": "assert", "condition": {"kind": "surface", "field": "overlay.revision", "operator": "gte", "value": 1}},
+    {"op": "assert", "condition": {"kind": "surface", "field": "playback.timeline_progress", "operator": "gte", "value": 0.05}}
+  ]
+}

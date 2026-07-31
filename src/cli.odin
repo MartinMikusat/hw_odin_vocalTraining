@@ -27,6 +27,10 @@ CLI_Command :: enum {
 	Clip_Create,
 	Clip_List,
 	Playback_Fullscreen,
+	UI_Run,
+	UI_Capture,
+	UI_Bridge_Pointer,
+	UI_Bridge_Key,
 	UI_Snapshot,
 	UI_Check,
 	UI_Simulate_Tasks,
@@ -44,7 +48,14 @@ CLI_Request :: struct {
 	allow_without_backup: bool,
 	baseline_path: string,
 	scenario: string,
+	scenario_file: string,
+	scenario_json: string,
 	fullscreen_state: string,
+	gpu_trace: bool,
+	target_control: string,
+	key_code: int,
+	key_modifiers: string,
+	key_text: string,
 }
 
 CLI_Result :: struct {
@@ -223,6 +234,10 @@ cli_command_name :: proc(command: CLI_Command) -> string {
 	case .Clip_Create: return "clip.create"
 	case .Clip_List: return "clip.list"
 	case .Playback_Fullscreen: return "playback.fullscreen"
+	case .UI_Run: return "ui.run"
+	case .UI_Capture: return "ui.capture"
+	case .UI_Bridge_Pointer: return "ui.bridge-pointer"
+	case .UI_Bridge_Key: return "ui.bridge-key"
 	case .UI_Snapshot: return "ui.snapshot"
 	case .UI_Check: return "ui.check"
 	case .UI_Simulate_Tasks: return "ui.simulate-tasks"
@@ -233,6 +248,10 @@ cli_command_name :: proc(command: CLI_Command) -> string {
 
 cli_command_requires_gui :: proc(command: CLI_Command) -> bool {
 	return command == .UI_Snapshot ||
+	       command == .UI_Run ||
+	       command == .UI_Capture ||
+	       command == .UI_Bridge_Pointer ||
+	       command == .UI_Bridge_Key ||
 	       command == .UI_Check ||
 	       command == .UI_Simulate_Tasks ||
 	       command == .Playback_Fullscreen
@@ -276,6 +295,26 @@ cli_parse_workflow :: proc(value: string) -> (Workflow_Kind, bool) {
 	return .Vocal, false
 }
 
+cli_read_stdin :: proc() -> ([]u8, bool) {
+	contents := make([dynamic]u8, 0, 4096, context.temp_allocator)
+	defer delete(contents)
+	buffer: [4096]u8
+	for {
+		count, read_error := os.read(os.stdin, buffer[:])
+		if read_error != nil {
+			return nil, false
+		}
+		if count == 0 {break}
+		if len(contents)+count > CLI_IPC_MAX_REQUEST_BYTES {
+			return nil, false
+		}
+		append(&contents, ..buffer[:count])
+	}
+	result := make([]u8, len(contents))
+	copy(result, contents[:])
+	return result, true
+}
+
 cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string) -> (string, bool) {
 	for index := 0; index < len(args); {
 		flag := args[index]
@@ -284,6 +323,11 @@ cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string
 		if !valid {return fmt.tprintf("Unknown option: %s", flag), false}
 		if flag == "--allow-without-backup" {
 			request.allow_without_backup = true
+			index += 1
+			continue
+		}
+		if flag == "--gpu-trace" {
+			request.gpu_trace = true
 			index += 1
 			continue
 		}
@@ -297,6 +341,16 @@ cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string
 		case "--name": request.name = value
 		case "--baseline": request.baseline_path = value
 		case "--scenario": request.scenario = value
+		case "--file": request.scenario_file = value
+		case "--control": request.target_control = value
+		case "--key-code":
+			key_code, ok := strconv.parse_int(value)
+			if !ok || key_code < 0 || key_code > 65535 {
+				return "--key-code must be between 0 and 65535", false
+			}
+			request.key_code = key_code
+		case "--modifiers": request.key_modifiers = value
+		case "--text": request.key_text = value
 		case "--state": request.fullscreen_state = value
 		case "--workflow":
 			workflow, ok := cli_parse_workflow(value)
@@ -313,14 +367,14 @@ cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string
 }
 
 cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
-	request := CLI_Request{max_height=1080}
+	request := CLI_Request{max_height=1080, key_code=-1}
 	if len(args) == 2 && args[0] == "--import" {
 		request.command = .Source_Add
 		request.url = args[1]
 		return request, {}, true
 	}
 	if len(args) < 2 {
-		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, playback fullscreen, or ui snapshot|check"), false
+		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, playback fullscreen, or ui run|capture|snapshot|check"), false
 	}
 	group, action := args[0], args[1]
 	remaining := args[2:]
@@ -344,6 +398,18 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 	case group == "playback" && action == "fullscreen":
 		request.command = .Playback_Fullscreen
 		allowed = []string{"--state"}
+	case group == "ui" && action == "run":
+		request.command = .UI_Run
+		allowed = []string{"--file"}
+	case group == "ui" && action == "capture":
+		request.command = .UI_Capture
+		allowed = []string{"--gpu-trace"}
+	case group == "ui" && action == "bridge-pointer":
+		request.command = .UI_Bridge_Pointer
+		allowed = []string{"--control"}
+	case group == "ui" && action == "bridge-key":
+		request.command = .UI_Bridge_Key
+		allowed = []string{"--key-code", "--modifiers", "--text"}
 	case group == "ui" && action == "snapshot":
 		request.command = .UI_Snapshot
 		if len(remaining) != 0 {return {}, cli_error(request.command, .Usage, "usage", "ui snapshot does not accept options"), false}
@@ -359,7 +425,7 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 			return {}, cli_error(.None, .Usage, "usage", "Unknown command"), false
 		}
 	case:
-		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, playback fullscreen, or ui snapshot|check"), false
+		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, playback fullscreen, or ui run|capture|snapshot|check"), false
 	}
 	if message, ok := cli_parse_flags(&request, remaining, allowed); !ok {
 		return {}, cli_error(request.command, .Usage, "usage", message), false
@@ -375,6 +441,45 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 		}
 	case .UI_Check:
 		if len(strings.trim_space(request.baseline_path)) == 0 {return {}, cli_error(request.command, .Usage, "usage", "ui check requires --baseline"), false}
+	case .UI_Run:
+		if len(strings.trim_space(request.scenario_file)) == 0 {
+			return {}, cli_error(request.command, .Usage, "usage", "ui run requires --file <path|->"), false
+		}
+		bytes: []u8
+		read_ok := false
+		if request.scenario_file == "-" {
+			bytes, read_ok = cli_read_stdin()
+		} else {
+			bytes, read_ok =
+				os.read_entire_file(request.scenario_file)
+		}
+		if !read_ok {
+			return {}, cli_error(request.command, .Usage, "scenario_read_failed", "Unable to read the UI scenario"), false
+		}
+		if len(bytes) == 0 {
+			delete(bytes)
+			return {}, cli_error(request.command, .Usage, "scenario_empty", "The UI scenario is empty"), false
+		}
+		request.scenario_json = string(bytes)
+	case .UI_Bridge_Pointer:
+		if len(strings.trim_space(request.target_control)) == 0 {
+			return {}, cli_error(
+				request.command,
+				.Usage,
+				"usage",
+				"ui bridge-pointer requires --control",
+			), false
+		}
+	case .UI_Bridge_Key:
+		if request.key_code < 0 &&
+		   len(request.key_text) == 0 {
+			return {}, cli_error(
+				request.command,
+				.Usage,
+				"usage",
+				"ui bridge-key requires --key-code or --text",
+			), false
+		}
 	case .Playback_Fullscreen:
 		if request.fullscreen_state != "on" &&
 		   request.fullscreen_state != "off" {
@@ -398,7 +503,7 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 				"ui simulate-tasks requires --scenario parallel|completed|overflow|clear",
 			), false
 		}
-	case .None, .Source_List, .Clip_List, .UI_Snapshot:
+	case .None, .Source_List, .Clip_List, .UI_Capture, .UI_Snapshot:
 	}
 	return request, {}, true
 }
@@ -1277,9 +1382,14 @@ cli_execute :: proc(request: CLI_Request) -> CLI_Result {
 	case .Clip_Create: return cli_clip_create(request)
 	case .Clip_List: return cli_clip_list(request)
 	case .Playback_Fullscreen: return cli_playback_fullscreen(request)
+	case .UI_Capture: return cli_ui_capture(request)
+	case .UI_Bridge_Pointer: return cli_ui_bridge_pointer(request)
+	case .UI_Bridge_Key: return cli_ui_bridge_key(request)
 	case .UI_Snapshot: return cli_ui_snapshot(request)
 	case .UI_Check: return cli_ui_check(request)
 	case .UI_Simulate_Tasks: return cli_ui_simulate_tasks(request)
+	case .UI_Run:
+		return cli_error(request.command, .Busy, "runner_not_started", "The UI runner must execute in the running application")
 	case .None: return cli_error(request.command, .Usage, "usage", "Unknown command")
 	}
 	return cli_error(request.command, .Usage, "usage", "Unknown command")

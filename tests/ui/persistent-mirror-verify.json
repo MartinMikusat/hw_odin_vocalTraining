@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "name": "persistent-dancing-mirror-verify",
+  "mutation": "transient",
+  "setup": {
+    "workflow": "dancing",
+    "mode": "play",
+    "viewport": {"width": 1280, "height": 800}
+  },
+  "steps": [
+    {"op": "activate", "control": "select clip ui-test-clip"},
+    {"op": "wait", "condition": {"kind": "surface", "field": "media.loaded", "operator": "eq", "value": true}, "timeout_ms": 1000},
+    {"op": "assert", "condition": {"kind": "surface", "field": "dance.mirrored", "operator": "eq", "value": true}}
+  ]
+}

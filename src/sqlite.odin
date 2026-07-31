@@ -30,6 +30,7 @@ foreign sqlite {
 	sqlite3_column_int64 :: proc "c" (statement: ^SQLite_Statement, index: c.int) -> i64 ---
 	sqlite3_column_double :: proc "c" (statement: ^SQLite_Statement, index: c.int) -> f64 ---
 	sqlite3_last_insert_rowid :: proc "c" (database: ^SQLite_DB) -> i64 ---
+	sqlite3_total_changes :: proc "c" (database: ^SQLite_DB) -> c.int ---
 	sqlite3_backup_init :: proc "c" (destination: ^SQLite_DB, destination_name: cstring, source: ^SQLite_DB, source_name: cstring) -> ^SQLite_Backup ---
 	sqlite3_backup_step :: proc "c" (backup: ^SQLite_Backup, pages: c.int) -> c.int ---
 	sqlite3_backup_finish :: proc "c" (backup: ^SQLite_Backup) -> c.int ---

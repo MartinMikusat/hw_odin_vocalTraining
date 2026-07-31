@@ -11,15 +11,25 @@ import "core:time"
 import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
 
-UI_DIAGNOSTIC_SCHEMA_VERSION :: 4
+UI_DIAGNOSTIC_SCHEMA_VERSION :: 6
 UI_DIAGNOSTIC_ARTIFACT_RETENTION :: 20
 
 UI_Diagnostic_Surface :: struct {
 	mode:                 string,
+	workflow:             string,
 	overlay:              string,
 	background:           string,
+	media_loaded:         bool,
+	media_id:             string,
 	playback_active:      bool,
+	playback_seconds:     f64,
+	playback_duration:    f64,
 	playback_fullscreen:  bool,
+	playback_transport_visible: bool,
+	playback_timeline_progress: f64,
+	viewport_width:        f64,
+	viewport_height:       f64,
+	dance_mirrored:        bool,
 	audio_engine_running: bool,
 	pitch_tracking:       bool,
 	pitch_permission:     int,
@@ -27,6 +37,8 @@ UI_Diagnostic_Surface :: struct {
 	pitch_frequency_hz:   f64,
 	pitch_confidence:     f64,
 	rendered_frame_count: uint,
+	overlay_revision:     uint,
+	pointer_event_count:  uint,
 }
 
 UI_Diagnostic_Rect :: struct {
@@ -113,14 +125,39 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 	case import_jobs_any(): background = "import"
 	case export_jobs_any(): background = "export"
 	case source_probe_job != nil: background = "source-probe"
+	case notification_simulation_active(): background = "simulated-task"
+	}
+	seconds, _ := current_seconds()
+	media_id := ""
+	if ui.active_clip >= 0 && ui.active_clip < len(state.clips) {
+		media_id = state.clips[ui.active_clip].id
+	} else if state.active_source >= 0 &&
+	          state.active_source < len(state.sources) {
+		media_id = state.sources[state.active_source].id
+	}
+	timeline_progress := 0.0
+	if ui.player_duration > 0 {
+		timeline_progress =
+			playback_timeline_progress(seconds, ui.player_duration)
 	}
 	return UI_Diagnostic_Surface{
 		mode = strings.clone(mode, allocator),
+		workflow = strings.clone(cli_workflow_name(ui.workflow), allocator),
 		overlay = strings.clone(overlay, allocator),
 		background = strings.clone(background, allocator),
+		media_loaded = state.player != nil,
+		media_id = strings.clone(media_id, allocator),
 		playback_active = state.player != nil &&
 		                  msg_f32(state.player, sel_registerName("rate")) > 0,
+		playback_seconds = seconds,
+		playback_duration = ui.player_duration,
 		playback_fullscreen = ui.playback_fullscreen_active,
+		playback_transport_visible =
+			ui.playback_fullscreen_controls_visible,
+		playback_timeline_progress = timeline_progress,
+		viewport_width = ui.width,
+		viewport_height = ui.height,
+		dance_mirrored = active_dance_clip_mirrored(),
 		audio_engine_running = metal_audio_engine_running(),
 		pitch_tracking = ui.pitch.tracking,
 		pitch_permission = int(ui.pitch.permission),
@@ -128,6 +165,8 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 		pitch_frequency_hz = ui.pitch.current_hz,
 		pitch_confidence = ui.pitch.current_confidence,
 		rendered_frame_count = ui.render_count,
+		overlay_revision = ui.overlay_revision,
+		pointer_event_count = ui.pointer_event_count,
 	}
 }
 
@@ -164,10 +203,22 @@ ui_diagnostic_snapshot :: proc(
 		frame = frame,
 		surface = UI_Diagnostic_Surface{
 			mode = strings.clone(surface.mode, allocator),
+			workflow = strings.clone(surface.workflow, allocator),
 			overlay = strings.clone(surface.overlay, allocator),
 			background = strings.clone(surface.background, allocator),
+			media_loaded = surface.media_loaded,
+			media_id = strings.clone(surface.media_id, allocator),
 			playback_active = surface.playback_active,
+			playback_seconds = surface.playback_seconds,
+			playback_duration = surface.playback_duration,
 			playback_fullscreen = surface.playback_fullscreen,
+			playback_transport_visible =
+				surface.playback_transport_visible,
+			playback_timeline_progress =
+				surface.playback_timeline_progress,
+			viewport_width = surface.viewport_width,
+			viewport_height = surface.viewport_height,
+			dance_mirrored = surface.dance_mirrored,
 			audio_engine_running = surface.audio_engine_running,
 			pitch_tracking = surface.pitch_tracking,
 			pitch_permission = surface.pitch_permission,
@@ -175,6 +226,8 @@ ui_diagnostic_snapshot :: proc(
 			pitch_frequency_hz = surface.pitch_frequency_hz,
 			pitch_confidence = surface.pitch_confidence,
 			rendered_frame_count = surface.rendered_frame_count,
+			overlay_revision = surface.overlay_revision,
+			pointer_event_count = surface.pointer_event_count,
 		},
 		controls = outputs,
 	}

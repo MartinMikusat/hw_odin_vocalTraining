@@ -38,6 +38,7 @@ Notification :: struct {
 	action_kind:          Notification_Action_Kind,
 	action_target:        string,
 	simulated:            bool,
+	automation_transient: bool,
 }
 
 Notification_History :: struct {
@@ -443,6 +444,10 @@ notification_simulation_clear :: proc() {
 			notification_history_remove_at(index)
 		}
 	}
+	notification_present_latest()
+}
+
+notification_present_latest :: proc() {
 	latest := notification_latest()
 	if latest != nil {
 		notification_present(latest)
@@ -453,6 +458,16 @@ notification_simulation_clear :: proc() {
 		ui.status_error = false
 		ui.needs_redraw = true
 	}
+}
+
+notification_automation_transient_clear :: proc() {
+	if !notification_history.initialized {return}
+	for index := len(notification_history.entries) - 1; index >= 0; index -= 1 {
+		if notification_history.entries[index].automation_transient {
+			notification_history_remove_at(index)
+		}
+	}
+	notification_present_latest()
 }
 
 notification_simulation_active :: proc() -> bool {
@@ -537,6 +552,11 @@ notification_post :: proc(
 	simulated := false,
 ) -> i64 {
 	if !notification_history.initialized {notification_history_initialize()}
+	automation_transient :=
+		!simulated &&
+		ui_automation_runner.active &&
+		ui_automation_runner.scenario.mutation != "persistent"
+	effective_persist := persist && !automation_transient
 	now_ms := notification_now_ms()
 	stored_detail := detail
 	if len(stored_detail) == 0 {stored_detail = summary}
@@ -549,18 +569,19 @@ notification_post :: proc(
 		action_kind = action_kind,
 		action_target = strings.clone(action_target),
 		simulated = simulated,
+		automation_transient = automation_transient,
 	}
 	notification.fields, _ = notification_fields_clone(fields)
-	if !persist || !notification_database_insert(&notification) {
+	if !effective_persist || !notification_database_insert(&notification) {
 		notification.id = notification_history.next_memory_id
 		notification_history.next_memory_id -= 1
-		if persist {notification_history.persistence_available = false}
+		if effective_persist {notification_history.persistence_available = false}
 	}
 	append(&notification_history.entries, notification)
 	for len(notification_history.entries) > NOTIFICATION_HISTORY_LIMIT {
 		notification_history_remove_oldest()
 	}
-	if persist && notification.id > 0 {_ = notification_database_prune()}
+	if effective_persist && notification.id > 0 {_ = notification_database_prune()}
 	stored := &notification_history.entries[len(notification_history.entries) - 1]
 	notification_present(stored)
 	return stored.id
@@ -687,14 +708,14 @@ notification_set_action :: proc(
 	return true
 }
 
-notification_post_info :: proc(text: string) -> i64 {
-	return notification_post(.Info, text)
+notification_post_info :: proc(text: string, persist := true) -> i64 {
+	return notification_post(.Info, text, persist=persist)
 }
 
-notification_post_success :: proc(text: string) -> i64 {
-	return notification_post(.Success, text)
+notification_post_success :: proc(text: string, persist := true) -> i64 {
+	return notification_post(.Success, text, persist=persist)
 }
 
-notification_post_error :: proc(text: string) -> i64 {
-	return notification_post(.Error, text)
+notification_post_error :: proc(text: string, persist := true) -> i64 {
+	return notification_post(.Error, text, persist=persist)
 }

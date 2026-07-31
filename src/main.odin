@@ -403,7 +403,10 @@ nsstring :: proc(s: string) -> Id {
 
 set_text :: proc(control: Id, text: string) {
 	if control == state.status {
-		_ = notification_post_info(text)
+		_ = notification_post_info(
+			text,
+			persist = ui_automation_persistent_side_effects_allowed(),
+		)
 		return
 	}
 	if control == state.clip_name_input {
@@ -415,11 +418,17 @@ set_text :: proc(control: Id, text: string) {
 }
 
 set_success_status :: proc(text: string) {
-	_ = notification_post_success(text)
+	_ = notification_post_success(
+		text,
+		persist = ui_automation_persistent_side_effects_allowed(),
+	)
 }
 
 set_error_status :: proc(text: string) {
-	_ = notification_post_error(text)
+	_ = notification_post_error(
+		text,
+		persist = ui_automation_persistent_side_effects_allowed(),
+	)
 }
 
 set_status_source :: proc(video_id: string) {
@@ -3928,6 +3937,10 @@ video_clips_process_main :: proc(args := os.args) {
 	ui.mode = active_view.mode
 	ui.playback_rate =
 		ui.workflow == .Vocal ? ui.vocal_playback_rate : 1
+	if !ui_automation_seed_fixture() {
+		fmt.eprintln("Unable to seed the isolated UI test fixture")
+		return
+	}
 	notification_history_initialize()
 	if app_support_migration_conflict {
 		_ = notification_post(

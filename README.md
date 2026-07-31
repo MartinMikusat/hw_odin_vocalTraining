@@ -617,6 +617,78 @@ Run the complete test suite against an isolated copy:
 ./test.sh
 ```
 
+### Automated interface tests
+
+The interface harness keeps one isolated application instance behind active
+applications. It exposes its temporary support directory through
+`build/ui-test-support/app-support`. This avoids detached-process access stalls
+under the repository's Documents path. Each checkout receives a separate
+launch job and support directory. The harness leaves its instance running
+between commands.
+
+The harness currently requires `jq`. Install it with `brew install jq` when the
+command is unavailable.
+
+Run a batched scenario, an individual integration gate, or the complete
+interface suite:
+
+```sh
+./scripts/ui-test.sh run tests/ui/fast.json
+./scripts/ui-test.sh persistence \
+  tests/ui/persistent-mirror.json \
+  tests/ui/persistent-mirror-verify.json
+./scripts/ui-test.sh bridge
+./scripts/ui-test.sh benchmark
+./scripts/ui-test.sh visual
+./scripts/ui-test.sh suite
+```
+
+Use `./scripts/ui-test.sh reset` for a fresh database. Use
+`./scripts/ui-test.sh stop` to stop only the harness-owned instance.
+
+A scenario sends one JSON request to the running app. Its steps can activate an
+exact functional control, set an editable value, assert state, wait for state,
+or capture a frame. The result separates startup, immediate, media, wait, and
+capture time.
+
+Mark a scenario as `transient` unless it must test a database write. A transient
+scenario rejects persistent and external actions. It also fails when the
+SQLite total-change count moves. The `persistence` command runs a persistent
+mutation, restarts the application against the same database, and runs a
+transient verification. It resets the isolated database when the pair ends.
+
+The bridge suite routes the full-screen action through pointer input, keyboard,
+the numbered action bar, Accessibility, Flash, the command menu, and the public
+CLI. AppKit events enter the real view handlers without activating the window.
+The Accessibility check requires permission for the shell that starts the
+suite.
+
+The benchmark runs the ten-step warm scenario 20 times. It fails when the 95th
+percentile reaches 100 milliseconds. Its steps open and close Settings twice,
+so the gate measures typed action dispatch and control reconstruction. The
+visual check applies and verifies a fixed 1280 by 800 point viewport.
+
+Normal successful scenarios return compact JSON only. A failure writes the
+scenario, result, UI snapshot, Metal frame PNG, overlay PNG, ordered render
+trace, and best-effort GPU capture under
+`build/ui-test-support/app-support/ui-runs/`. The app keeps the newest 20
+bundles. The render trace records encoder creation, command-buffer completion,
+and Metal failure text. The visual command writes the same bundle
+intentionally.
+
+`testdata/ui/playback-fixture.mp4` is a generated one-second test asset. It
+contains 320 by 180 H.264 video and AAC audio. FFmpeg 8.0.1 generated it from
+synthetic filters, so it contains no third-party media.
+
+- SHA-256: `a107283834111060004105d689f61913a4faee9d55fd017fb09ebd588d82913b`
+- Size: 16,151 bytes
+
+#### UI test harness TODO
+
+Replace the shell harness JSON operations with an Odin helper. Remove the
+`jq` runtime dependency after the helper validates scenarios, adds result
+timings, aggregates persistence results, and calculates benchmark percentiles.
+
 If the app exits abnormally, the watcher copies the exact executable, its
 dSYM, the newest macOS crash report, the binary UUID, and the Git revision into
 `build/crashes/<timestamp>-<mode>/` before another build can replace them.
