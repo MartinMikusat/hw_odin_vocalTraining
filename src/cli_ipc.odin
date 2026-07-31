@@ -258,6 +258,7 @@ cli_ipc_request_destroy :: proc(request: ^CLI_Request) {
 	delete(request.name)
 	delete(request.baseline_path)
 	delete(request.scenario)
+	delete(request.fullscreen_state)
 	request^ = {}
 }
 

@@ -26,6 +26,7 @@ CLI_Command :: enum {
 	Transcript_Get,
 	Clip_Create,
 	Clip_List,
+	Playback_Fullscreen,
 	UI_Snapshot,
 	UI_Check,
 	UI_Simulate_Tasks,
@@ -43,6 +44,7 @@ CLI_Request :: struct {
 	allow_without_backup: bool,
 	baseline_path: string,
 	scenario: string,
+	fullscreen_state: string,
 }
 
 CLI_Result :: struct {
@@ -151,6 +153,17 @@ CLI_Clip_List_Response :: struct {
 	data: CLI_Clip_List_Data,
 }
 
+CLI_Playback_Fullscreen_Data :: struct {
+	fullscreen: bool,
+	changed: bool,
+}
+
+CLI_Playback_Fullscreen_Response :: struct {
+	ok: bool,
+	command: string,
+	data: CLI_Playback_Fullscreen_Data,
+}
+
 CLI_UI_Snapshot_Data :: struct {
 	state: string,
 	controls: int,
@@ -209,6 +222,7 @@ cli_command_name :: proc(command: CLI_Command) -> string {
 	case .Transcript_Get: return "transcript.get"
 	case .Clip_Create: return "clip.create"
 	case .Clip_List: return "clip.list"
+	case .Playback_Fullscreen: return "playback.fullscreen"
 	case .UI_Snapshot: return "ui.snapshot"
 	case .UI_Check: return "ui.check"
 	case .UI_Simulate_Tasks: return "ui.simulate-tasks"
@@ -220,7 +234,8 @@ cli_command_name :: proc(command: CLI_Command) -> string {
 cli_command_requires_gui :: proc(command: CLI_Command) -> bool {
 	return command == .UI_Snapshot ||
 	       command == .UI_Check ||
-	       command == .UI_Simulate_Tasks
+	       command == .UI_Simulate_Tasks ||
+	       command == .Playback_Fullscreen
 }
 
 cli_command_mutates_library :: proc(command: CLI_Command) -> bool {
@@ -282,6 +297,7 @@ cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string
 		case "--name": request.name = value
 		case "--baseline": request.baseline_path = value
 		case "--scenario": request.scenario = value
+		case "--state": request.fullscreen_state = value
 		case "--workflow":
 			workflow, ok := cli_parse_workflow(value)
 			if !ok {return "--workflow must be vocal or dancing", false}
@@ -304,7 +320,7 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 		return request, {}, true
 	}
 	if len(args) < 2 {
-		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, or ui snapshot|check"), false
+		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, playback fullscreen, or ui snapshot|check"), false
 	}
 	group, action := args[0], args[1]
 	remaining := args[2:]
@@ -325,6 +341,9 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 	case group == "clip" && action == "list":
 		request.command = .Clip_List
 		allowed = []string{"--source", "--workflow"}
+	case group == "playback" && action == "fullscreen":
+		request.command = .Playback_Fullscreen
+		allowed = []string{"--state"}
 	case group == "ui" && action == "snapshot":
 		request.command = .UI_Snapshot
 		if len(remaining) != 0 {return {}, cli_error(request.command, .Usage, "usage", "ui snapshot does not accept options"), false}
@@ -340,7 +359,7 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 			return {}, cli_error(.None, .Usage, "usage", "Unknown command"), false
 		}
 	case:
-		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, or ui snapshot|check"), false
+		return {}, cli_error(.None, .Usage, "usage", "Expected: source add|list, transcript get, clip create|list, playback fullscreen, or ui snapshot|check"), false
 	}
 	if message, ok := cli_parse_flags(&request, remaining, allowed); !ok {
 		return {}, cli_error(request.command, .Usage, "usage", message), false
@@ -356,6 +375,16 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 		}
 	case .UI_Check:
 		if len(strings.trim_space(request.baseline_path)) == 0 {return {}, cli_error(request.command, .Usage, "usage", "ui check requires --baseline"), false}
+	case .Playback_Fullscreen:
+		if request.fullscreen_state != "on" &&
+		   request.fullscreen_state != "off" {
+			return {}, cli_error(
+				request.command,
+				.Usage,
+				"usage",
+				"playback fullscreen requires --state on|off",
+			), false
+		}
 	case .UI_Simulate_Tasks:
 		valid := request.scenario == "parallel" ||
 		         request.scenario == "completed" ||
@@ -1084,6 +1113,31 @@ cli_clip_list :: proc(request: CLI_Request) -> CLI_Result {
 	return CLI_Result{output=cli_encode(response), exit_code=.Success}
 }
 
+cli_playback_fullscreen :: proc(request: CLI_Request) -> CLI_Result {
+	desired := request.fullscreen_state == "on"
+	result := set_playback_fullscreen(desired)
+	if result == .Player_Unavailable {
+		return cli_error(
+			request.command,
+			.Invalid,
+			"player_not_loaded",
+			"Full screen playback requires a loaded source or clip",
+		)
+	}
+	response := CLI_Playback_Fullscreen_Response{
+		ok = true,
+		command = cli_command_name(request.command),
+		data = {
+			fullscreen = ui.playback_fullscreen_active,
+			changed = result == .Changed,
+		},
+	}
+	return CLI_Result{
+		output = cli_encode(response),
+		exit_code = .Success,
+	}
+}
+
 cli_ui_snapshot :: proc(request: CLI_Request) -> CLI_Result {
 	snapshot, snapshot_ok := ui_diagnostic_capture_current(context.temp_allocator)
 	if !snapshot_ok {
@@ -1222,6 +1276,7 @@ cli_execute :: proc(request: CLI_Request) -> CLI_Result {
 	case .Transcript_Get: return cli_transcript_get(request)
 	case .Clip_Create: return cli_clip_create(request)
 	case .Clip_List: return cli_clip_list(request)
+	case .Playback_Fullscreen: return cli_playback_fullscreen(request)
 	case .UI_Snapshot: return cli_ui_snapshot(request)
 	case .UI_Check: return cli_ui_check(request)
 	case .UI_Simulate_Tasks: return cli_ui_simulate_tasks(request)

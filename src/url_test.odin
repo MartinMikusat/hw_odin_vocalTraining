@@ -254,6 +254,54 @@ window_zoom_geometry_fills_and_restores_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+playback_fullscreen_geometry_and_visibility_policy_test :: proc(t: ^testing.T) {
+	container := UI_Rect{0, 0, 1000, 1000}
+	fitted := aspect_fit_rect(container, 1920, 1080)
+	testing.expect_value(t, fitted.w, 1000.0)
+	testing.expect_value(t, fitted.h, 562.5)
+	testing.expect_value(t, fitted.x, 0.0)
+	testing.expect_value(t, fitted.y, 218.75)
+
+	transport := playback_fullscreen_transport_rect_for_size(1920, 1080)
+	testing.expect_value(t, transport, UI_Rect{18, 18, 1884, 64})
+	testing.expect(
+		t,
+		playback_fullscreen_controls_stay_visible(false, false, false, false),
+	)
+	testing.expect(
+		t,
+		playback_fullscreen_controls_stay_visible(true, true, false, false),
+	)
+	testing.expect(
+		t,
+		!playback_fullscreen_controls_stay_visible(true, false, false, false),
+	)
+}
+
+@(test)
+playback_fullscreen_presentation_and_shortcut_test :: proc(t: ^testing.T) {
+	unrelated := uint(1 << 12)
+	current := unrelated |
+		NSApplicationPresentationHideDock |
+		NSApplicationPresentationHideMenuBar
+	actual := playback_fullscreen_presentation_options(current)
+	testing.expect(t, actual&unrelated != 0)
+	testing.expect(t, actual&NSApplicationPresentationAutoHideDock != 0)
+	testing.expect(t, actual&NSApplicationPresentationAutoHideMenuBar != 0)
+	testing.expect(t, actual&NSApplicationPresentationHideDock == 0)
+	testing.expect(t, actual&NSApplicationPresentationHideMenuBar == 0)
+	testing.expect(t, playback_fullscreen_shortcut_matches("f", 0))
+	testing.expect(t, playback_fullscreen_shortcut_matches("F", 0))
+	testing.expect(
+		t,
+		!playback_fullscreen_shortcut_matches(
+			"f",
+			NSEventModifierFlagCommand,
+		),
+	)
+}
+
+@(test)
 window_controls_remain_registered_over_modal_content_test :: proc(
 	t: ^testing.T,
 ) {
@@ -2592,6 +2640,66 @@ cli_ui_commands_parse_and_require_the_running_gui_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+cli_playback_fullscreen_requires_explicit_state_and_running_gui_test :: proc(
+	t: ^testing.T,
+) {
+	on, on_result, on_ok := cli_parse_request(
+		[]string{"playback", "fullscreen", "--state", "on"},
+	)
+	defer delete(on_result.output)
+	testing.expect(t, on_ok)
+	testing.expect_value(t, on.command, CLI_Command.Playback_Fullscreen)
+	testing.expect_value(t, on.fullscreen_state, "on")
+	testing.expect(t, cli_command_requires_gui(on.command))
+	testing.expect(t, !cli_command_mutates_library(on.command))
+
+	off, off_result, off_ok := cli_parse_request(
+		[]string{"playback", "fullscreen", "--state", "off"},
+	)
+	defer delete(off_result.output)
+	testing.expect(t, off_ok)
+	testing.expect_value(t, off.fullscreen_state, "off")
+
+	_, missing_result, missing_ok := cli_parse_request(
+		[]string{"playback", "fullscreen"},
+	)
+	defer delete(missing_result.output)
+	testing.expect(t, !missing_ok)
+	testing.expect_value(t, missing_result.exit_code, CLI_Exit.Usage)
+
+	_, invalid_result, invalid_ok := cli_parse_request(
+		[]string{"playback", "fullscreen", "--state", "toggle"},
+	)
+	defer delete(invalid_result.output)
+	testing.expect(t, !invalid_ok)
+	testing.expect_value(t, invalid_result.exit_code, CLI_Exit.Usage)
+}
+
+@(test)
+cli_playback_fullscreen_off_is_idempotent_without_a_player_test :: proc(
+	t: ^testing.T,
+) {
+	previous_player := state.player
+	previous_fullscreen := ui.playback_fullscreen_active
+	defer {
+		state.player = previous_player
+		ui.playback_fullscreen_active = previous_fullscreen
+	}
+	state.player = nil
+	ui.playback_fullscreen_active = false
+	result := cli_playback_fullscreen(
+		CLI_Request{
+			command = .Playback_Fullscreen,
+			fullscreen_state = "off",
+		},
+	)
+	defer delete(result.output)
+	testing.expect_value(t, result.exit_code, CLI_Exit.Success)
+	testing.expect(t, strings.contains(result.output, `"fullscreen":false`))
+	testing.expect(t, strings.contains(result.output, `"changed":false`))
+}
+
+@(test)
 cli_ui_check_failure_encodes_compact_json_test :: proc(t: ^testing.T) {
 	response := CLI_UI_Check_Failure_Response{
 		ok = false,
@@ -3126,6 +3234,7 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 	active := palette_active_context()
 	found_mark_in := false
 	found_data := false
+	found_fullscreen := false
 	for entry in entries {
 		if entry.title == "Mark In" {
 			found_mark_in = true
@@ -3136,9 +3245,15 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 			found_data = true
 			testing.expect(t, command_palette.context_matches(active, entry.contexts))
 		}
+		if entry.title == "Enter full screen playback" {
+			found_fullscreen = true
+			testing.expect(t, !command_palette.context_matches(active, entry.contexts))
+			testing.expect(t, len(entry.unavailable_reason) > 0)
+		}
 	}
 	testing.expect(t, found_mark_in)
 	testing.expect(t, found_data)
+	testing.expect(t, found_fullscreen)
 }
 
 @(test)
@@ -4339,12 +4454,12 @@ mode_control_slots_expose_only_relevant_actions_test :: proc(t: ^testing.T) {
 	previous_workflow := ui.workflow
 	defer ui.workflow = previous_workflow
 	ui.workflow = .Vocal
-	create_actions := [8]int{5, 7, 3, 4, 6, 0, 1, 2}
+	create_actions := [9]int{5, 7, 3, 4, 6, PLAYBACK_FULLSCREEN_ACTION_INDEX, 0, 1, 2}
 	for action, slot in create_actions {
 		testing.expect_value(t, control_action_for_slot(.Create, slot), action)
 		testing.expect_value(t, control_slot_for_action(.Create, action), slot)
 	}
-	play_actions := [10]int{12, 10, 8, 9, 7, 3, 4, 13, 14, 11}
+	play_actions := [11]int{12, 10, 8, 9, 7, 3, 4, 13, 14, PLAYBACK_FULLSCREEN_ACTION_INDEX, 11}
 	for action, slot in play_actions {
 		testing.expect_value(t, control_action_for_slot(.Play, slot), action)
 		testing.expect_value(t, control_slot_for_action(.Play, action), slot)
@@ -4357,9 +4472,10 @@ dancing_control_slots_replace_pitch_with_dance_tools_test :: proc(t: ^testing.T)
 	previous_workflow := ui.workflow
 	defer ui.workflow = previous_workflow
 	ui.workflow = .Dancing
-	actions := [13]int{
+	actions := [14]int{
 		12, 10, 8, 9, 7,
 		3, 4, 13, 14,
+		PLAYBACK_FULLSCREEN_ACTION_INDEX,
 		DANCE_MIRROR_ACTION_INDEX,
 		DANCE_LOOP_ACTION_INDEX,
 		DANCE_COUNT_IN_ACTION_INDEX,
@@ -4379,9 +4495,9 @@ numbered_action_codes_match_interface_sections_test :: proc(t: ^testing.T) {
 	previous_workflow := ui.workflow
 	defer ui.workflow = previous_workflow
 	ui.workflow = .Vocal
-	create_codes := [8]Numbered_Action_Code{
+	create_codes := [9]Numbered_Action_Code{
 		{1, 1}, {1, 2}, {2, 1}, {2, 2},
-		{2, 3}, {3, 1}, {3, 2}, {3, 3},
+		{2, 3}, {2, 4}, {3, 1}, {3, 2}, {3, 3},
 	}
 	for code, slot in create_codes {
 		action := control_action_for_slot(.Create, slot)
@@ -4394,9 +4510,9 @@ numbered_action_codes_match_interface_sections_test :: proc(t: ^testing.T) {
 			action,
 		)
 	}
-	play_codes := [10]Numbered_Action_Code{
+	play_codes := [11]Numbered_Action_Code{
 		{1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5},
-		{2, 1}, {2, 2}, {2, 3}, {2, 4}, {3, 1},
+		{2, 1}, {2, 2}, {2, 3}, {2, 4}, {2, 5}, {3, 1},
 	}
 	for code, slot in play_codes {
 		action := control_action_for_slot(.Play, slot)
@@ -6063,6 +6179,55 @@ source_timeline_maps_and_clamps_pointer_position_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+playback_timeline_geometry_tracks_current_playback_time_test :: proc(
+	t: ^testing.T,
+) {
+	timeline := UI_Rect{100, 20, 400, 18}
+	progress := playback_timeline_progress(25, 100)
+	completed, thumb := playback_timeline_geometry(timeline, progress)
+	testing.expect_value(t, progress, 0.25)
+	testing.expect_value(t, completed, UI_Rect{100, 27, 100, 4})
+	testing.expect_value(t, thumb, UI_Rect{197, 22, 6, 14})
+	testing.expect_value(t, playback_timeline_progress(-10, 100), 0.0)
+	testing.expect_value(t, playback_timeline_progress(110, 100), 1.0)
+	testing.expect_value(t, playback_timeline_progress(10, 0), 0.0)
+}
+
+@(test)
+playback_fullscreen_timestamp_redraws_once_per_elapsed_second_test :: proc(
+	t: ^testing.T,
+) {
+	testing.expect(t, playback_fullscreen_timestamp_needs_redraw(
+		true,
+		true,
+		true,
+		0.25,
+		-1,
+	))
+	testing.expect(t, !playback_fullscreen_timestamp_needs_redraw(
+		true,
+		true,
+		true,
+		0.75,
+		0,
+	))
+	testing.expect(t, playback_fullscreen_timestamp_needs_redraw(
+		true,
+		true,
+		true,
+		1.0,
+		0,
+	))
+	testing.expect(t, !playback_fullscreen_timestamp_needs_redraw(
+		true,
+		false,
+		true,
+		1.0,
+		0,
+	))
+}
+
+@(test)
 source_and_clip_id_lookups_return_stable_indices_test :: proc(t: ^testing.T) {
 	sources := []Source_Video{{id="source-a"}, {id="source-b"}}
 	clips := []Clip{{id="clip-a"}, {id="clip-b"}}
@@ -6786,6 +6951,30 @@ ui_background_comparison_accepts_disabling_and_rejects_structural_changes_test :
 	)
 	testing.expect(t, !unexpected_diff.ok)
 	testing.expect_value(t, len(unexpected_diff.unexpected), 1)
+}
+
+@(test)
+ui_diagnostic_state_names_fullscreen_before_overlay_and_activity_test :: proc(
+	t: ^testing.T,
+) {
+	surface := UI_Diagnostic_Surface{
+		mode = "play",
+		overlay = "none",
+		background = "none",
+		playback_fullscreen = true,
+	}
+	testing.expect_value(
+		t,
+		ui_diagnostic_state_name(surface, context.temp_allocator),
+		"play.fullscreen.idle",
+	)
+	surface.overlay = "command-palette"
+	surface.background = "export"
+	testing.expect_value(
+		t,
+		ui_diagnostic_state_name(surface, context.temp_allocator),
+		"play.fullscreen.command-palette.exporting",
+	)
 }
 
 @(test)

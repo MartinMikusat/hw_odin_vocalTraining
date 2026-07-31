@@ -11,7 +11,7 @@ import "core:time"
 import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
 
-UI_DIAGNOSTIC_SCHEMA_VERSION :: 3
+UI_DIAGNOSTIC_SCHEMA_VERSION :: 4
 UI_DIAGNOSTIC_ARTIFACT_RETENTION :: 20
 
 UI_Diagnostic_Surface :: struct {
@@ -19,6 +19,7 @@ UI_Diagnostic_Surface :: struct {
 	overlay:              string,
 	background:           string,
 	playback_active:      bool,
+	playback_fullscreen:  bool,
 	audio_engine_running: bool,
 	pitch_tracking:       bool,
 	pitch_permission:     int,
@@ -119,6 +120,7 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 		background = strings.clone(background, allocator),
 		playback_active = state.player != nil &&
 		                  msg_f32(state.player, sel_registerName("rate")) > 0,
+		playback_fullscreen = ui.playback_fullscreen_active,
 		audio_engine_running = metal_audio_engine_running(),
 		pitch_tracking = ui.pitch.tracking,
 		pitch_permission = int(ui.pitch.permission),
@@ -165,6 +167,7 @@ ui_diagnostic_snapshot :: proc(
 			overlay = strings.clone(surface.overlay, allocator),
 			background = strings.clone(surface.background, allocator),
 			playback_active = surface.playback_active,
+			playback_fullscreen = surface.playback_fullscreen,
 			audio_engine_running = surface.audio_engine_running,
 			pitch_tracking = surface.pitch_tracking,
 			pitch_permission = surface.pitch_permission,
@@ -283,7 +286,9 @@ ui_diagnostic_compare_background :: proc(
 		append(&diff.contract_issues, strings.clone("frame-did-not-advance", allocator))
 	}
 	if baseline.surface.mode != current.surface.mode ||
-	   baseline.surface.overlay != current.surface.overlay {
+	   baseline.surface.overlay != current.surface.overlay ||
+	   baseline.surface.playback_fullscreen !=
+	     current.surface.playback_fullscreen {
 		append(&diff.contract_issues, strings.clone("surface-changed", allocator))
 	}
 	if baseline.surface.background != "none" {
@@ -351,6 +356,7 @@ ui_diagnostic_state_name :: proc(
 	allocator := context.allocator,
 ) -> string {
 	activity := surface.background
+	mode_suffix := surface.playback_fullscreen ? ".fullscreen" : ""
 	switch activity {
 	case "none": activity = "idle"
 	case "import": activity = "importing"
@@ -360,23 +366,26 @@ ui_diagnostic_state_name :: proc(
 	if surface.overlay != "none" {
 		if surface.background == "none" {
 			return fmt.aprintf(
-				"%s.%s",
+				"%s%s.%s",
 				surface.mode,
+				mode_suffix,
 				surface.overlay,
 				allocator = allocator,
 			)
 		}
 		return fmt.aprintf(
-			"%s.%s.%s",
+			"%s%s.%s.%s",
 			surface.mode,
+			mode_suffix,
 			surface.overlay,
 			activity,
 			allocator = allocator,
 		)
 	}
 	return fmt.aprintf(
-		"%s.%s",
+		"%s%s.%s",
 		surface.mode,
+		mode_suffix,
 		activity,
 		allocator = allocator,
 	)

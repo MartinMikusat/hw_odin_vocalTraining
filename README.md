@@ -202,6 +202,12 @@ If a source has multiple imported timestamps, the Reset control becomes a
 timestamp selector. Selecting a value seeks there and saves it as the source's
 active timestamp.
 The speed controls adjust playback from `0.1x` to `2.0x` in `0.1x` steps.
+Select the expand control in the playback transport to fill the current
+display without entering a macOS full-screen Space. The video keeps its aspect
+ratio and uses black bars for the remaining area. While playback runs, the
+transport and pointer hide after two seconds. Move the pointer or press a
+playback key to reveal them. Press **F**, press **Escape**, double-click the
+video, or select the collapse control to restore the previous window frame.
 
 When no text field has focus, press **Space** to toggle playback or enter an
 action's two-digit code. The first digit selects an action-bar section for one
@@ -210,12 +216,13 @@ clears the selected section. Play and Space restart a completed video from the
 beginning.
 
 The Sources actions are **11 Captions**, **12 Data**, **21 Play**,
-**22 Pause**, **23 Preview**, **31 Mark In**, **32 Mark Out**, and
-**33 Commit**.
+**22 Pause**, **23 Preview**, **24 Fullscreen**, **31 Mark In**,
+**32 Mark Out**, and **33 Commit**.
 
 The Vocal Clips actions are **11 Play Next**, **12 Randomize**, **13 Rename**,
 **14 Metadata**, **15 Data**, **21 Play**, **22 Pause**, **23 Shuffle**,
-**24 Autoplay**, and **31 Start Pitch** or **31 Stop Pitch**.
+**24 Autoplay**, **25 Fullscreen**, and **31 Start Pitch** or
+**31 Stop Pitch**.
 
 The Dancing Clips actions replace Pitch with **31 Mirror**, **32 Loop**,
 **33 Count-in**, and **34 Count Each Loop**. Dance Tools exposes BPM minus and
@@ -299,6 +306,8 @@ build/hw_videoClips clip create \
   --to-segment VIDEO_ID-18 \
   --name 'Descending scale'
 build/hw_videoClips clip list --source VIDEO_ID
+build/hw_videoClips playback fullscreen --state on
+build/hw_videoClips playback fullscreen --state off
 ```
 
 Source, transcript, and clip commands accept `--workflow vocal|dancing`.
@@ -318,6 +327,10 @@ media queue and wait for the result without blocking the interface. Other CLI
 commands use its private local socket. When the GUI is closed, the CLI locks
 and updates the library directly.
 
+`playback fullscreen` requires the running GUI. It applies the exact requested
+`on` or `off` state without activating or raising the application. Its JSON
+result reports the resulting `fullscreen` state and whether it `changed`.
+
 Structural UI commands require the running development application. Capture a
 baseline before an interaction, then check the completed background state:
 
@@ -332,9 +345,9 @@ removed, changed, and unexpected controls. Complete artifacts stay in
 `build/dev-support/ui-checks/`. The app keeps the newest 20 artifacts and
 removes older files after each successful write. UI commands return
 `gui_not_running` when the development application is closed. Each snapshot
-records playback state, audio engine state, pitch tracking state, microphone
-permission, detected frequency, pitch confidence, trace count, and the
-submitted frame count.
+records playback and full-screen state, audio engine state, pitch tracking
+state, microphone permission, detected frequency, pitch confidence, trace
+count, and the submitted frame count.
 
 The debug build can simulate concurrent task notifications without running
 FFmpeg or `yt-dlp`:
@@ -390,14 +403,16 @@ Bundled font provenance:
 - SHA-256: `2fe6f742431e66f218b713ecca986370612bc27594a96a8ab45a41e9ebbaf5e3`
 - License: [SIL Open Font License, Version 1.1](resources/fonts/IOSEVKA-LICENSE.md)
 
-Bundled window icon provenance:
+Bundled interface icon provenance:
 
-- Assets: Iconoir xmark, minus, maximize, and settings from version 7.11.1
-- Source: [Iconoir commit `59e3d5d969c59b3fb652a556795e08c1b3371c5b`](https://github.com/iconoir-icons/iconoir/tree/59e3d5d969c59b3fb652a556795e08c1b3371c5b/icons/regular)
+- Assets: Iconoir xmark, minus, maximize, settings, expand, and collapse from version 7.11.1
+- Source: [Iconoir commit `3497016dcb93122b5a64a2df1221598a14ecf4f3`](https://github.com/iconoir-icons/iconoir/tree/3497016dcb93122b5a64a2df1221598a14ecf4f3/icons/regular)
 - Xmark SHA-256: `61aa0a4913a440aaafcc45064a87e24fe8eb22ba4abc4c5ef020530928ed8daf`
 - Minus SHA-256: `babb05bca016bffdd38cbd1dcaeef6ccdf42fc8654124dee169a412eeed6d425`
 - Maximize SHA-256: `3a3048cdc0e8e4aef5d68353b5434f0c0e074dc672b6c0abf25a5a64bc5cc8f4`
 - Settings SHA-256: `437c253a1c11ff214c490c766f2a3cdcf8547399fd0be48a7d222bf0703aefb5`
+- Expand SHA-256: `ca71adae412a313c2235ea1c22f7b4ea40abef1563995de827665bf89779a97d`
+- Collapse SHA-256: `750107f450834d90a0f41e01d7c220d3c96f066af5c87d631006d1f1e19cc5fe`
 - License: [MIT License](resources/icons/iconoir/LICENSE)
 
 The application builds each visible interactive control once per frame. Each

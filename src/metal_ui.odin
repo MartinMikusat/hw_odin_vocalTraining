@@ -135,6 +135,19 @@ DANCE_MIRROR_ACTION_INDEX :: 15
 DANCE_LOOP_ACTION_INDEX :: 16
 DANCE_COUNT_IN_ACTION_INDEX :: 17
 DANCE_COUNT_EACH_LOOP_ACTION_INDEX :: 18
+PLAYBACK_FULLSCREEN_ACTION_INDEX :: 19
+
+PLAYBACK_FULLSCREEN_CONTROL_TIMEOUT_MS :: i64(2_000)
+NSApplicationPresentationAutoHideDock :: uint(1 << 0)
+NSApplicationPresentationHideDock :: uint(1 << 1)
+NSApplicationPresentationAutoHideMenuBar :: uint(1 << 2)
+NSApplicationPresentationHideMenuBar :: uint(1 << 3)
+NSApplicationPresentationDisplayMask :: uint(
+	NSApplicationPresentationAutoHideDock |
+	NSApplicationPresentationHideDock |
+	NSApplicationPresentationAutoHideMenuBar |
+	NSApplicationPresentationHideMenuBar,
+)
 
 Source_Hint_Control :: enum {
 	None,
@@ -268,6 +281,14 @@ UI_State :: struct {
 	resize_start_frame:  Rect,
 	window_zoom_restore_frame: Rect,
 	window_has_zoom_restore: bool,
+	playback_fullscreen_active: bool,
+	playback_fullscreen_controls_visible: bool,
+	playback_fullscreen_controls_deadline_ms: i64,
+	playback_fullscreen_timestamp_second: i64,
+	playback_fullscreen_restore_frame: Rect,
+	playback_fullscreen_restore_presentation: uint,
+	player_surface_click_pending: bool,
+	player_surface_click_deadline_ms: i64,
 	needs_redraw:       bool,
 }
 
@@ -491,6 +512,7 @@ UI_Action_Kind :: enum {
 	Source_Reset,
 	Source_Hint_Menu,
 	Source_Hint,
+	Playback_Fullscreen_Toggle,
 	Start,
 	End,
 	Save,
@@ -1267,6 +1289,349 @@ toggle_window_zoom :: proc() {
 		next,
 		true,
 	)
+	ui.needs_redraw = true
+}
+
+Playback_Fullscreen_Result :: enum {
+	Unchanged,
+	Changed,
+	Player_Unavailable,
+}
+
+playback_fullscreen_presentation_options :: proc(current: uint) -> uint {
+	return current &~ NSApplicationPresentationDisplayMask |
+	       NSApplicationPresentationAutoHideDock |
+	       NSApplicationPresentationAutoHideMenuBar
+}
+
+rects_intersect :: proc(a, b: Rect) -> bool {
+	return a.origin.x < b.origin.x+b.size.width &&
+	       a.origin.x+a.size.width > b.origin.x &&
+	       a.origin.y < b.origin.y+b.size.height &&
+	       a.origin.y+a.size.height > b.origin.y
+}
+
+playback_restore_frame_is_visible :: proc(frame: Rect) -> bool {
+	screens := msg_id(objc_getClass("NSScreen"), sel_registerName("screens"))
+	if screens == nil {return false}
+	for index in 0..<int(msg_uint(screens, sel_registerName("count"))) {
+		screen := msg_id_uint(
+			screens,
+			sel_registerName("objectAtIndex:"),
+			uint(index),
+		)
+		if screen != nil &&
+		   rects_intersect(frame, msg_rect(screen, sel_registerName("frame"))) {
+			return true
+		}
+	}
+	return false
+}
+
+playback_fullscreen_screen :: proc() -> Id {
+	screen := msg_id(state.window, sel_registerName("screen"))
+	if screen == nil {
+		screen = msg_id(objc_getClass("NSScreen"), sel_registerName("mainScreen"))
+	}
+	return screen
+}
+
+playback_fullscreen_set_cursor_hidden_until_move :: proc(hidden: bool) {
+	msg_void_bool(
+		objc_getClass("NSCursor"),
+		sel_registerName("setHiddenUntilMouseMoves:"),
+		hidden,
+	)
+}
+
+playback_fullscreen_show_controls :: proc(
+	now_ms: i64 = 0,
+) {
+	if !ui.playback_fullscreen_active {return}
+	effective_now_ms := now_ms
+	if effective_now_ms == 0 {
+		effective_now_ms = numbered_action_time_ms()
+	}
+	changed := !ui.playback_fullscreen_controls_visible
+	ui.playback_fullscreen_controls_visible = true
+	ui.playback_fullscreen_controls_deadline_ms =
+		effective_now_ms+PLAYBACK_FULLSCREEN_CONTROL_TIMEOUT_MS
+	if changed {
+		ui.playback_fullscreen_timestamp_second = -1
+	}
+	playback_fullscreen_set_cursor_hidden_until_move(false)
+	ui.needs_redraw = ui.needs_redraw || changed
+}
+
+playback_fullscreen_hide_controls :: proc() {
+	if !ui.playback_fullscreen_active ||
+	   !ui.playback_fullscreen_controls_visible {
+		return
+	}
+	ui.playback_fullscreen_controls_visible = false
+	ui.playback_fullscreen_timestamp_second = -1
+	playback_fullscreen_set_cursor_hidden_until_move(true)
+	ui.needs_redraw = true
+}
+
+playback_fullscreen_input_scope_active :: proc() -> bool {
+	return command_palette.is_open(&command_palette_state) ||
+	       flash.is_active(&flash_state) ||
+	       ui.settings_open ||
+	       ui.shortcut_open ||
+	       ui.source_modal_open ||
+	       ui.source_details_open ||
+	       ui.clip_rename_open ||
+	       ui.clip_metadata_open ||
+	       ui.randomize_help_open ||
+	       ui.pitch.help_open ||
+	       ui.data_modal_open ||
+	       ui.notification_modal_open ||
+	       global_modal_blocks_commands()
+}
+
+playback_fullscreen_controls_stay_visible :: proc(
+	playing,
+	scrubbing,
+	pointer_over_controls,
+	input_scope_active: bool,
+) -> bool {
+	return !playing ||
+	       scrubbing ||
+	       pointer_over_controls ||
+	       input_scope_active
+}
+
+playback_fullscreen_transport_rect_for_size :: proc(
+	width, height: f64,
+) -> UI_Rect {
+	return {18, 18, max(0, width-36), min(64, max(0, height-36))}
+}
+
+playback_fullscreen_transport_rect :: proc() -> UI_Rect {
+	return playback_fullscreen_transport_rect_for_size(ui.width, ui.height)
+}
+
+player_fullscreen_toggle_rect :: proc(player: UI_Rect) -> UI_Rect {
+	return {player.x+max(0, player.w-34), player.y+3, 24, 24}
+}
+
+player_fullscreen_toggle_control :: proc() -> ^UI_Control {
+	return find_ui_control(ui_control_id("player full screen toggle"))
+}
+
+aspect_fit_rect :: proc(
+	container: UI_Rect,
+	source_width, source_height: f64,
+) -> UI_Rect {
+	if container.w <= 0 || container.h <= 0 ||
+	   source_width <= 0 || source_height <= 0 {
+		return {}
+	}
+	aspect := source_width/source_height
+	result := container
+	if result.w/result.h > aspect {
+		result.w = result.h*aspect
+		result.x += (container.w-result.w)/2
+	} else {
+		result.h = result.w/aspect
+		result.y += (container.h-result.h)/2
+	}
+	return result
+}
+
+reapply_playback_fullscreen_frame :: proc() {
+	if !ui.playback_fullscreen_active || state.window == nil {return}
+	screen := playback_fullscreen_screen()
+	if screen == nil {return}
+	frame := msg_rect(screen, sel_registerName("frame"))
+	if msg_rect(state.window, sel_registerName("frame")) != frame {
+		msg_void_rect_b(
+			state.window,
+			sel_registerName("setFrame:display:"),
+			frame,
+			true,
+		)
+	}
+	ui.needs_redraw = true
+}
+
+set_playback_fullscreen :: proc(
+	desired: bool,
+) -> Playback_Fullscreen_Result {
+	if desired == ui.playback_fullscreen_active {
+		return .Unchanged
+	}
+	if desired && state.player == nil {
+		return .Player_Unavailable
+	}
+	cancel_ui_flash()
+	clear_number_prefix()
+	ui.player_surface_click_pending = false
+	ui.player_surface_click_deadline_ms = 0
+	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
+	if desired {
+		screen := playback_fullscreen_screen()
+		if screen == nil || state.window == nil {return .Player_Unavailable}
+		ui.playback_fullscreen_restore_frame =
+			msg_rect(state.window, sel_registerName("frame"))
+		ui.playback_fullscreen_restore_presentation =
+			msg_uint(app, sel_registerName("presentationOptions"))
+		ui.playback_fullscreen_active = true
+		ui.playback_fullscreen_controls_visible = true
+		ui.playback_fullscreen_controls_deadline_ms =
+			numbered_action_time_ms()+PLAYBACK_FULLSCREEN_CONTROL_TIMEOUT_MS
+		ui.playback_fullscreen_timestamp_second = -1
+		ui.focus = .None
+		text_input.end_pointer_selection(&ui.input_state)
+		clear_marked_text()
+		msg_void_i(
+			app,
+			sel_registerName("setPresentationOptions:"),
+			int(playback_fullscreen_presentation_options(
+				ui.playback_fullscreen_restore_presentation,
+			)),
+		)
+		msg_void_rect_b(
+			state.window,
+			sel_registerName("setFrame:display:"),
+			msg_rect(screen, sel_registerName("frame")),
+			true,
+		)
+		playback_fullscreen_set_cursor_hidden_until_move(false)
+	} else {
+		ui.playback_fullscreen_active = false
+		ui.playback_fullscreen_controls_visible = false
+		ui.playback_fullscreen_controls_deadline_ms = 0
+		ui.playback_fullscreen_timestamp_second = -1
+		restore := ui.playback_fullscreen_restore_frame
+		if !playback_restore_frame_is_visible(restore) {
+			screen := msg_id(
+				objc_getClass("NSScreen"),
+				sel_registerName("mainScreen"),
+			)
+			if screen != nil {
+				restore = msg_rect_rect_id(
+					state.window,
+					sel_registerName("constrainFrameRect:toScreen:"),
+					restore,
+					screen,
+				)
+			}
+		}
+		if state.window != nil {
+			msg_void_rect_b(
+				state.window,
+				sel_registerName("setFrame:display:"),
+				restore,
+				true,
+			)
+		}
+		msg_void_i(
+			app,
+			sel_registerName("setPresentationOptions:"),
+			int(ui.playback_fullscreen_restore_presentation),
+		)
+		ui.playback_fullscreen_restore_frame = {}
+		ui.playback_fullscreen_restore_presentation = 0
+		playback_fullscreen_set_cursor_hidden_until_move(false)
+	}
+	ui.needs_redraw = true
+	return .Changed
+}
+
+toggle_playback_fullscreen :: proc() -> Playback_Fullscreen_Result {
+	return set_playback_fullscreen(!ui.playback_fullscreen_active)
+}
+
+player_surface_double_click_interval_ms :: proc() -> i64 {
+	seconds := msg_f64(
+		objc_getClass("NSEvent"),
+		sel_registerName("doubleClickInterval"),
+	)
+	return i64(max(0.1, seconds)*1_000)
+}
+
+cancel_player_surface_click :: proc() {
+	ui.player_surface_click_pending = false
+	ui.player_surface_click_deadline_ms = 0
+}
+
+schedule_player_surface_click :: proc(now_ms: i64 = 0) {
+	effective_now_ms := now_ms
+	if effective_now_ms == 0 {
+		effective_now_ms = numbered_action_time_ms()
+	}
+	ui.player_surface_click_pending = true
+	ui.player_surface_click_deadline_ms =
+		effective_now_ms+player_surface_double_click_interval_ms()
+}
+
+advance_player_surface_click :: proc(now_ms: i64) -> bool {
+	if !ui.player_surface_click_pending ||
+	   now_ms < ui.player_surface_click_deadline_ms {
+		return false
+	}
+	cancel_player_surface_click()
+	on_toggle_playback(nil, nil, nil)
+	return true
+}
+
+playback_fullscreen_tick :: proc(
+	now_ms: i64,
+	playing: bool,
+) {
+	if !ui.playback_fullscreen_active {return}
+	stay_visible := playback_fullscreen_controls_stay_visible(
+		playing,
+		ui.source_scrubbing,
+		contains(playback_fullscreen_transport_rect(), ui.mouse),
+		playback_fullscreen_input_scope_active() ||
+			ui.source_hint_menu_open,
+	)
+	if stay_visible {
+		if !ui.playback_fullscreen_controls_visible {
+			playback_fullscreen_show_controls(now_ms)
+		}
+		return
+	}
+	if ui.playback_fullscreen_controls_visible &&
+	   now_ms >= ui.playback_fullscreen_controls_deadline_ms {
+		playback_fullscreen_hide_controls()
+	}
+}
+
+playback_fullscreen_timestamp_second_for_time :: proc(seconds: f64) -> i64 {
+	return i64(max(0, seconds))
+}
+
+playback_fullscreen_timestamp_needs_redraw :: proc(
+	active,
+	controls_visible,
+	has_seconds: bool,
+	seconds: f64,
+	current_second: i64,
+) -> bool {
+	return active &&
+	       controls_visible &&
+	       has_seconds &&
+	       playback_fullscreen_timestamp_second_for_time(seconds) !=
+	       current_second
+}
+
+playback_fullscreen_refresh_timestamp :: proc() {
+	seconds, has_seconds := current_seconds()
+	if !playback_fullscreen_timestamp_needs_redraw(
+		ui.playback_fullscreen_active,
+		ui.playback_fullscreen_controls_visible,
+		has_seconds,
+		seconds,
+		ui.playback_fullscreen_timestamp_second,
+	) {
+		return
+	}
+	ui.playback_fullscreen_timestamp_second =
+		playback_fullscreen_timestamp_second_for_time(seconds)
 	ui.needs_redraw = true
 }
 
@@ -2231,8 +2596,8 @@ layout_rects :: proc(
 }
 
 control_slot_count :: proc(mode: UI_Mode) -> int {
-	if mode == .Create {return 8}
-	return ui.workflow == .Vocal ? 10 : 13
+	if mode == .Create {return 9}
+	return ui.workflow == .Vocal ? 11 : 14
 }
 
 control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
@@ -2243,9 +2608,10 @@ control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
 		case 2: return 3
 		case 3: return 4
 		case 4: return 6
-		case 5: return 0
-		case 6: return 1
-		case 7: return 2
+		case 5: return PLAYBACK_FULLSCREEN_ACTION_INDEX
+		case 6: return 0
+		case 7: return 1
+		case 8: return 2
 		}
 		return -1
 	}
@@ -2260,11 +2626,13 @@ control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
 	case 7: return 13
 	case 8: return 14
 	case 9:
+		return PLAYBACK_FULLSCREEN_ACTION_INDEX
+	case 10:
 		if ui.workflow == .Vocal {return PITCH_ACTION_INDEX}
 		return DANCE_MIRROR_ACTION_INDEX
-	case 10: return DANCE_LOOP_ACTION_INDEX
-	case 11: return DANCE_COUNT_IN_ACTION_INDEX
-	case 12: return DANCE_COUNT_EACH_LOOP_ACTION_INDEX
+	case 11: return DANCE_LOOP_ACTION_INDEX
+	case 12: return DANCE_COUNT_IN_ACTION_INDEX
+	case 13: return DANCE_COUNT_EACH_LOOP_ACTION_INDEX
 	}
 	return -1
 }
@@ -2287,6 +2655,7 @@ numbered_action_code_for_action :: proc(
 		case 3: return {2, 1}, true
 		case 4: return {2, 2}, true
 		case 6: return {2, 3}, true
+		case PLAYBACK_FULLSCREEN_ACTION_INDEX: return {2, 4}, true
 		case 0: return {3, 1}, true
 		case 1: return {3, 2}, true
 		case 2: return {3, 3}, true
@@ -2303,6 +2672,7 @@ numbered_action_code_for_action :: proc(
 	case 4:  return {2, 2}, true
 	case 13: return {2, 3}, true
 	case 14: return {2, 4}, true
+	case PLAYBACK_FULLSCREEN_ACTION_INDEX: return {2, 5}, true
 	case PITCH_ACTION_INDEX: return {3, 1}, true
 	case DANCE_MIRROR_ACTION_INDEX: return {3, 1}, true
 	case DANCE_LOOP_ACTION_INDEX: return {3, 2}, true
@@ -2456,6 +2826,20 @@ timeline_scrub_delta :: proc(key, modifiers: uint) -> (f64, bool) {
 	}
 	if key == 123 {step = -step}
 	return step, true
+}
+
+playback_fullscreen_shortcut_matches :: proc(
+	text: string,
+	modifiers: uint,
+) -> bool {
+	relevant :=
+		NSEventModifierFlagShift |
+		NSEventModifierFlagControl |
+		NSEventModifierFlagOption |
+		NSEventModifierFlagCommand
+	return modifiers&relevant == 0 &&
+	       len(text) == 1 &&
+	       (text[0] == 'f' || text[0] == 'F')
 }
 
 command_palette_modifiers :: proc(modifiers: uint) -> command_palette.Modifier_Set {
@@ -2878,6 +3262,33 @@ timeline_seconds_at_point :: proc(point: Point, timeline: UI_Rect, duration: f64
 	if timeline.w <= 0 {return 0}
 	ratio := min(max((point.x - timeline.x) / timeline.w, 0), 1)
 	return ratio * max(0, duration)
+}
+
+playback_timeline_progress :: proc(seconds, duration: f64) -> f64 {
+	if duration <= 0 {return 0}
+	return min(max(seconds/duration, 0), 1)
+}
+
+playback_timeline_geometry :: proc(
+	timeline: UI_Rect,
+	progress: f64,
+) -> (completed, thumb: UI_Rect) {
+	normalized := min(max(progress, 0), 1)
+	track := UI_Rect{
+		timeline.x,
+		timeline.y+timeline.h/2-2,
+		timeline.w,
+		4,
+	}
+	completed = {
+		track.x,
+		track.y,
+		track.w*normalized,
+		track.h,
+	}
+	thumb_x := track.x+track.w*normalized
+	thumb = {thumb_x-3, timeline.y+2, 6, timeline.h-4}
+	return
 }
 
 seek_player_timeline :: proc(point: Point, player: UI_Rect) {
@@ -3838,6 +4249,56 @@ window_icon_maximize_points :: proc() -> [12]Window_Icon_Point {
 	}
 }
 
+player_fullscreen_expand_points :: proc() -> [20]Window_Icon_Point {
+	return {
+		{{9, 9}, true},
+		{{4, 4}, false},
+		{{4, 8}, true},
+		{{4, 4}, false},
+		{{8, 4}, false},
+		{{15, 9}, true},
+		{{20, 4}, false},
+		{{20, 8}, true},
+		{{20, 4}, false},
+		{{16, 4}, false},
+		{{9, 15}, true},
+		{{4, 20}, false},
+		{{4, 16}, true},
+		{{4, 20}, false},
+		{{8, 20}, false},
+		{{15, 15}, true},
+		{{20, 20}, false},
+		{{20, 16}, true},
+		{{20, 20}, false},
+		{{16, 20}, false},
+	}
+}
+
+player_fullscreen_collapse_points :: proc() -> [20]Window_Icon_Point {
+	return {
+		{{20, 20}, true},
+		{{15, 15}, false},
+		{{15, 19}, true},
+		{{15, 15}, false},
+		{{19, 15}, false},
+		{{4, 20}, true},
+		{{9, 15}, false},
+		{{9, 19}, true},
+		{{9, 15}, false},
+		{{5, 15}, false},
+		{{20, 4}, true},
+		{{15, 9}, false},
+		{{15, 5}, true},
+		{{15, 9}, false},
+		{{19, 9}, false},
+		{{4, 4}, true},
+		{{9, 9}, false},
+		{{9, 5}, true},
+		{{9, 9}, false},
+		{{5, 9}, false},
+	}
+}
+
 draw_window_icon_path :: proc(
 	ctx: rawptr,
 	rect: UI_Rect,
@@ -3877,6 +4338,21 @@ draw_window_icon_path :: proc(
 		}
 	}
 	CGContextStrokePath(ctx)
+}
+
+draw_player_fullscreen_icon :: proc(
+	ctx: rawptr,
+	rect: UI_Rect,
+	color: [4]f64,
+	collapse: bool,
+) {
+	if collapse {
+		points := player_fullscreen_collapse_points()
+		draw_window_icon_path(ctx, rect, color, points[:])
+		return
+	}
+	points := player_fullscreen_expand_points()
+	draw_window_icon_path(ctx, rect, color, points[:])
 }
 
 settings_icon_point :: proc(rect: UI_Rect, x, y: f64) -> Point {
@@ -5506,6 +5982,10 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	row_color := ui_color_32(theme.row)
 	row_hover := ui_color_32(theme.row_hover)
 	accent := ui_color_32(workflow_accent_color(ui.workflow, ui.dark_theme))
+	if ui.playback_fullscreen_active {
+		push_rect(vertices, UI_Rect{0, 0, ui.width, ui.height}, {0, 0, 0, 1})
+		return
+	}
 	push_rect(vertices, UI_Rect{0, 0, ui.width, ui.height}, chassis)
 	push_rect(vertices, app_header_rect(), ui_color_32(theme.header))
 	workflow_rect := ui_control_rect(.Workflow_Toggle)
@@ -5701,15 +6181,26 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			push_rect(vertices, rect, button_color)
 		}
 		timeline := ui_control_rect(.Source_Timeline)
-		track := UI_Rect{timeline.x, timeline.y + timeline.h / 2 - 2, timeline.w, 4}
 		if ui.player_duration > 0 {
-			duration := ui.player_duration
 			seconds, has_seconds := current_seconds()
 			progress := 0.0
-			if has_seconds && duration > 0 {progress = min(max(seconds / duration, 0), 1)}
-			push_rect(vertices, UI_Rect{track.x, track.y, track.w * progress, track.h}, accent)
-			thumb_x := track.x + track.w * progress
-			push_rect(vertices, UI_Rect{thumb_x - 3, timeline.y + 2, 6, timeline.h - 4}, accent)
+			if has_seconds {
+				progress = playback_timeline_progress(
+					seconds,
+					ui.player_duration,
+				)
+			}
+			completed, thumb := playback_timeline_geometry(timeline, progress)
+			push_rect(vertices, completed, accent)
+			push_rect(vertices, thumb, accent)
+		}
+		if fullscreen_control := player_fullscreen_toggle_control();
+		   fullscreen_control != nil {
+			button_color := field
+			if contains(fullscreen_control.rect, ui.mouse) {
+				button_color = panel_alt
+			}
+			push_rect(vertices, fullscreen_control.rect, button_color)
 		}
 	}
 	if ui.mode == .Create {
@@ -5815,12 +6306,12 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 	}
 
-	control_kinds := [19]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle}
+	control_kinds := [20]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle}
 	valid_range := active_clip_range_is_valid()
 	number_prefix_active :=
 		ui.number_prefix > 0 &&
 		numbered_action_time_ms() < ui.number_prefix_deadline_ms
-	for kind in control_kinds {
+	for kind, action_index in control_kinds {
 		rect := ui_control_rect(kind)
 		if rect.w <= 0 {continue}
 		color := panel_alt
@@ -5857,7 +6348,6 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			push_border(vertices, rect, UI_COLOR_GUM_32)
 			push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
 		}
-		action_index := int(kind)-int(UI_Action_Kind.Start)
 		code, has_code := numbered_action_code_for_action(ui.mode, action_index)
 		if number_prefix_active && has_code &&
 		   code.section == ui.number_prefix {
@@ -6148,6 +6638,204 @@ draw_settings_overlays :: proc(
 	}
 }
 
+build_playback_fullscreen_timeline_geometry :: proc(
+	vertices: ^[dynamic]Solid_Vertex,
+) {
+	if !ui.playback_fullscreen_active ||
+	   !ui.playback_fullscreen_controls_visible ||
+	   state.player == nil ||
+	   ui.player_duration <= 0 {
+		return
+	}
+	timeline := ui_control_rect(.Source_Timeline)
+	if timeline.w <= 0 || timeline.h <= 0 {return}
+	seconds, has_seconds := current_seconds()
+	if !has_seconds {return}
+	completed, thumb := playback_timeline_geometry(
+		timeline,
+		playback_timeline_progress(seconds, ui.player_duration),
+	)
+	accent := ui_color_32(
+		workflow_accent_color(ui.workflow, ui.dark_theme),
+	)
+	push_rect(vertices, completed, accent)
+	push_rect(vertices, thumb, accent)
+}
+
+draw_playback_fullscreen_transport :: proc(
+	ctx, font: rawptr,
+	bright, muted, dim, accent, cyan: [4]f64,
+) {
+	if !ui.playback_fullscreen_controls_visible || state.player == nil {return}
+	theme := ui_theme_colors()
+	player := playback_fullscreen_transport_rect()
+	background := theme.header
+	background[3] = 0.92
+	fill_overlay_rect(ctx, player, background)
+
+	button_kinds := [7]UI_Action_Kind{
+		.Volume_Down,
+		.Volume_Up,
+		.Speed_Down,
+		.Speed_Up,
+		.Source_Play_Pause,
+		.Source_Stop,
+		.Source_Reset,
+	}
+	for kind in button_kinds {
+		rect := ui_control_rect(kind)
+		if kind == .Source_Reset && rect.w == 0 {
+			rect = ui_control_rect(.Source_Hint_Menu)
+		}
+		if rect.w <= 0 {continue}
+		color := theme.field
+		color[3] = 0.94
+		if contains(rect, ui.mouse) {color = theme.row_hover}
+		fill_overlay_rect(ctx, rect, color)
+	}
+	playing := msg_f32(state.player, sel_registerName("rate")) > 0
+	draw_text_in_rect(
+		ctx,
+		font,
+		playing ? "PAUSE" : "PLAY",
+		ui_control_rect(.Source_Play_Pause),
+		.Center,
+		.Center,
+		playing ? accent : cyan,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"STOP",
+		ui_control_rect(.Source_Stop),
+		.Center,
+		.Center,
+		muted,
+	)
+	hint_control := Source_Hint_Control.Reset
+	if ui.source_playback_active {
+		hint_control = source_hint_control(source_hint_count(state.active_source))
+	}
+	if hint_control == .Reset || !ui.source_playback_active {
+		draw_text_in_rect(
+			ctx,
+			font,
+			"RESET",
+			ui_control_rect(.Source_Reset),
+			.Center,
+			.Center,
+			muted,
+		)
+	} else if hint_control == .Menu {
+		draw_timestamp_text_in_rect(
+			ctx,
+			font,
+			format_timestamp(source_initial_seconds(state.active_source)),
+			ui_control_rect(.Source_Hint_Menu),
+			.Center,
+			.Center,
+			cyan,
+		)
+	}
+	draw_text_in_rect(
+		ctx,
+		font,
+		"-",
+		ui_control_rect(.Speed_Down),
+		.Center,
+		.Center,
+		ui.playback_rate <= 0.1 ? dim : cyan,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		fmt.tprintf("SPEED %.1fx", ui.playback_rate),
+		source_speed_value_rect(player),
+		.Center,
+		.Center,
+		cyan,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"+",
+		ui_control_rect(.Speed_Up),
+		.Center,
+		.Center,
+		ui.playback_rate >= 2 ? dim : cyan,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"-",
+		ui_control_rect(.Volume_Down),
+		.Center,
+		.Center,
+		ui.player_volume <= 0 ? dim : cyan,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		fmt.tprintf("VOL %d%%", volume_percent(ui.player_volume)),
+		source_volume_value_rect(player),
+		.Center,
+		.Center,
+		cyan,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"+",
+		ui_control_rect(.Volume_Up),
+		.Center,
+		.Center,
+		ui.player_volume >= 1 ? dim : cyan,
+	)
+	timestamp_rect := source_timestamp_rect(player)
+	if seconds, ok := current_seconds(); ok {
+		draw_timestamp_text_in_rect(
+			ctx,
+			font,
+			fmt.tprintf(
+				"%s / %s",
+				format_timestamp(seconds),
+				format_timestamp(ui.player_duration),
+			),
+			timestamp_rect,
+			.Start,
+			.Center,
+			cyan,
+		)
+	}
+	icon_control := player_fullscreen_toggle_control()
+	if icon_control != nil {
+		if contains(icon_control.rect, ui.mouse) {
+			fill_overlay_rect(ctx, icon_control.rect, theme.row_hover)
+		}
+		code, has_code := numbered_action_code_for_action(
+			ui.mode,
+			PLAYBACK_FULLSCREEN_ACTION_INDEX,
+		)
+		if has_code {
+			draw_text_in_rect(
+				ctx,
+				font,
+				fmt.tprintf("%d%d", code.section, code.action),
+				{icon_control.rect.x-30, icon_control.rect.y, 26, icon_control.rect.h},
+				.End,
+				.Center,
+				muted,
+			)
+		}
+		draw_player_fullscreen_icon(
+			ctx,
+			icon_control.rect,
+			bright,
+			true,
+		)
+	}
+}
+
 build_text_overlay :: proc(width, height: uint) -> []u8 {
 	if height == 0 || width > max(uint) / height || width * height > max(uint) / 4 {
 		arena_note_failure(&memory.redraw_stats)
@@ -6191,6 +6879,28 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	_, _, source_search, source_panel, player, transcript, clip_search, clip_panel, clip_name, pitch_panel, _ :=
 		layout_rects()
 
+	if ui.playback_fullscreen_active {
+		draw_playback_fullscreen_transport(
+			ctx,
+			small_font,
+			bright,
+			muted,
+			dim,
+			accent,
+			cyan,
+		)
+		if ui.count_in_active && count_font != nil {
+			draw_text_in_rect(
+				ctx,
+				count_font,
+				fmt.tprintf("%d", ui.count_in_value),
+				{0, 0, ui.width, ui.height},
+				.Center,
+				.Center,
+				accent,
+			)
+		}
+	} else {
 	draw_header_identity(
 		ctx,
 		small_font,
@@ -6517,6 +7227,17 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				draw_timestamp_text_in_rect(ctx, small_font, format_timestamp(seconds), option, .Center, .Center, seconds == selected ? cyan : bright)
 			}
 		}
+		if fullscreen_control := player_fullscreen_toggle_control();
+		   fullscreen_control != nil {
+			icon_color := muted
+			if contains(fullscreen_control.rect, ui.mouse) {icon_color = bright}
+			draw_player_fullscreen_icon(
+				ctx,
+				fullscreen_control.rect,
+				icon_color,
+				false,
+			)
+		}
 	} else if ui.active_clip >= 0 && ui.active_clip < len(state.clips) {
 		clip := &state.clips[ui.active_clip]
 		metadata := UI_Rect{player.x, player.y, player.w, 30}
@@ -6789,7 +7510,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		CGContextRestoreGState(ctx)
 	}
 
-	labels := [19]string {
+	labels := [20]string {
 		"MARK IN",
 		"MARK OUT",
 		"COMMIT",
@@ -6809,8 +7530,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		"LOOP",
 		"COUNT-IN",
 		"COUNT EACH LOOP",
+		"FULLSCREEN",
 	}
-	control_kinds := [19]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle}
+	control_kinds := [20]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle}
 	valid_range := active_clip_range_is_valid()
 	for label, i in labels {
 		button_label := label
@@ -6828,6 +7550,8 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			button_label = dance_count_in_action_label()
 		} else if control_kinds[i] == .Dance_Count_Each_Loop_Toggle {
 			button_label = active_dance_clip_counts_each_loop() ? "LOOP COUNT ON" : "LOOP COUNT OFF"
+		} else if control_kinds[i] == .Playback_Fullscreen_Toggle {
+			button_label = ui.playback_fullscreen_active ? "EXIT FULLSCREEN" : "FULLSCREEN"
 		}
 		rect := ui_control_rect(control_kinds[i])
 		code, has_code := numbered_action_code_for_action(ui.mode, i)
@@ -6903,7 +7627,8 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		.Center,
 		state.has_start && state.has_end ? cyan : muted,
 	)
-	if len(notification_history.footer_task_ids) > 0 {
+	if !ui.playback_fullscreen_active &&
+	   len(notification_history.footer_task_ids) > 0 {
 		task_layout := footer_task_layout(
 			ui.width,
 			len(notification_history.footer_task_ids),
@@ -7016,7 +7741,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				bright,
 			)
 		}
-	} else {
+	} else if !ui.playback_fullscreen_active {
 		status_rect := footer_status_rect()
 		status_control := find_ui_control_by_action(.Open_Notification_History)
 		if status_control != nil && contains(status_rect, ui.mouse) {
@@ -7050,6 +7775,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				cyan,
 			)
 		}
+	}
 	}
 	draw_source_details(ctx, small_font, bright, muted, cyan)
 	draw_clip_rename(ctx, small_font, bright, muted, dim, accent)
@@ -7350,7 +8076,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		danger,
 	)
 	draw_backup_warning(ctx, small_font, bright, muted, warning, danger)
-	draw_window_controls(ctx)
+	if !ui.playback_fullscreen_active {
+		draw_window_controls(ctx)
+	}
 	draw_flash_hints(ctx, small_font)
 	return pixels
 }
@@ -7548,6 +8276,9 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	}
 	if kind == .Workflow_Toggle || kind == .Mode_Toggle {
 		return true
+	}
+	if kind == .Playback_Fullscreen_Toggle {
+		return state.player != nil || ui.playback_fullscreen_active
 	}
 	if kind == .Activate_Notification_Action {
 		return notification_action_available(notification_selected())
@@ -7800,6 +8531,168 @@ add_pointer_control :: proc(
 	})
 }
 
+add_player_controls :: proc(
+	array, element_class: Id,
+	surface, player: UI_Rect,
+	controls_visible: bool,
+) {
+	if state.player == nil {return}
+	playing := msg_f32(state.player, sel_registerName("rate")) > 0
+	media_name := ui.source_playback_active ? "source" : "clip"
+	add_pointer_control(
+		fmt.tprintf("toggle %s playback from player surface", media_name),
+		surface,
+		.Player_Surface,
+		{.Primary_Press},
+	)
+	if !controls_visible {return}
+	add_pointer_control(
+		fmt.tprintf("scrub %s timeline", media_name),
+		source_timeline_rect(player),
+		.Source_Timeline,
+		{.Primary_Press, .Drag},
+	)
+	add_ax_element(
+		array,
+		element_class,
+		fmt.tprintf("%s %s", playing ? "Pause" : "Play", media_name),
+		"AXButton",
+		source_play_pause_rect(player),
+		.Source_Play_Pause,
+		flash_label = fmt.tprintf("play pause %s", media_name),
+	)
+	add_ax_element(
+		array,
+		element_class,
+		fmt.tprintf("Stop %s and return to zero", media_name),
+		"AXButton",
+		source_stop_rect(player),
+		.Source_Stop,
+		flash_label = fmt.tprintf("stop %s", media_name),
+	)
+	hint_control := Source_Hint_Control.Reset
+	if ui.source_playback_active {
+		hint_control = source_hint_control(source_hint_count(state.active_source))
+	}
+	if hint_control == .Menu {
+		add_ax_element(
+			array,
+			element_class,
+			fmt.tprintf(
+				"Source timestamp %s",
+				format_timestamp(source_initial_seconds(state.active_source)),
+			),
+			"AXButton",
+			source_reset_rect(player),
+			.Source_Hint_Menu,
+			flash_label = "select source timestamp",
+		)
+		if ui.source_hint_menu_open {
+			values := source_hint_values(
+				state.active_source,
+				context.temp_allocator,
+			)
+			for seconds, option_index in values {
+				add_ax_element(
+					array,
+					element_class,
+					format_timestamp(seconds),
+					"AXButton",
+					source_hint_option_rect(
+						player,
+						option_index,
+						len(values),
+					),
+					.Source_Hint,
+					option_index,
+					seconds,
+					flash_label = "timestamp",
+					functional_name = fmt.tprintf(
+						"timestamp %s",
+						format_timestamp(seconds),
+					),
+				)
+			}
+		}
+	}
+	reset_label := "Return to the imported source timestamp"
+	reset_flash_label := "reset source timestamp"
+	if !ui.source_playback_active {
+		reset_label = "Return to the start of the clip"
+		reset_flash_label = "reset clip"
+	}
+	if hint_control == .Reset || !ui.source_playback_active {
+		add_ax_element(
+			array,
+			element_class,
+			reset_label,
+			"AXButton",
+			source_reset_rect(player),
+			.Source_Reset,
+			flash_label = reset_flash_label,
+		)
+	}
+	add_ax_element(
+		array,
+		element_class,
+		fmt.tprintf("Decrease %s playback speed", media_name),
+		"AXButton",
+		source_speed_down_rect(player),
+		.Speed_Down,
+		flash_label = "slower",
+	)
+	add_ax_element(
+		array,
+		element_class,
+		fmt.tprintf("Increase %s playback speed", media_name),
+		"AXButton",
+		source_speed_up_rect(player),
+		.Speed_Up,
+		flash_label = "faster",
+	)
+	percent := volume_percent(ui.player_volume)
+	add_ax_element(
+		array,
+		element_class,
+		fmt.tprintf(
+			"Decrease %s volume, %d percent",
+			media_name,
+			percent,
+		),
+		"AXButton",
+		source_volume_down_rect(player),
+		.Volume_Down,
+		flash_label = "quieter",
+	)
+	add_ax_element(
+		array,
+		element_class,
+		fmt.tprintf(
+			"Increase %s volume, %d percent",
+			media_name,
+			percent,
+		),
+		"AXButton",
+		source_volume_up_rect(player),
+		.Volume_Up,
+		flash_label = "louder",
+	)
+	fullscreen_label := "Enter full screen playback"
+	if ui.playback_fullscreen_active {
+		fullscreen_label = "Exit full screen playback"
+	}
+	add_ax_element(
+		array,
+		element_class,
+		fullscreen_label,
+		"AXButton",
+		player_fullscreen_toggle_rect(player),
+		.Playback_Fullscreen_Toggle,
+		flash_label = "full screen playback",
+		functional_name = "player full screen toggle",
+	)
+}
+
 add_window_controls :: proc(array, element_class: Id) {
 	actions := [3]UI_Action_Kind{
 		.Window_Close,
@@ -7865,7 +8758,9 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 	element_class := objc_getClass("VocalAccessibilityElement")
 	import_field, import_button, source_search, source_panel, player, transcript, clip_search, clip_panel, clip_name, pitch_panel, controls :=
 		layout_rects()
-	add_window_controls(array, element_class)
+	if !ui.playback_fullscreen_active {
+		add_window_controls(array, element_class)
+	}
 	if library_recovery_state.required {
 		modal := recovery_modal_rect()
 		if library_recovery_state.analysis_complete {
@@ -8149,7 +9044,8 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if len(notification_history.footer_task_ids) > 0 {
+	if !ui.playback_fullscreen_active &&
+	   len(notification_history.footer_task_ids) > 0 {
 		task_layout := footer_task_layout(
 			ui.width,
 			len(notification_history.footer_task_ids),
@@ -8237,7 +9133,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				functional_name = "footer notification task overflow",
 			)
 		}
-	} else {
+	} else if !ui.playback_fullscreen_active {
 		add_ax_element(
 			array,
 			element_class,
@@ -8545,6 +9441,17 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
+	if ui.playback_fullscreen_active {
+		add_player_controls(
+			array,
+			element_class,
+			{0, 0, ui.width, ui.height},
+			playback_fullscreen_transport_rect(),
+			ui.playback_fullscreen_controls_visible,
+		)
+		validate_ui_controls()
+		return
+	}
 	workflow_label := "Switch to Dancing workflow"
 	if ui.workflow == .Dancing {workflow_label = "Switch to Vocal workflow"}
 	add_ax_element(
@@ -8819,70 +9726,8 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			)
 		}
 	}
-	if state.player != nil {
-		playing := msg_f32(state.player, sel_registerName("rate")) > 0
-		media_name := ui.source_playback_active ? "source" : "clip"
-		add_pointer_control(fmt.tprintf("toggle %s playback from player surface", media_name), player, .Player_Surface, {.Primary_Press})
-		add_pointer_control(fmt.tprintf("scrub %s timeline", media_name), source_timeline_rect(player), .Source_Timeline, {.Primary_Press, .Drag})
-		add_ax_element(array, element_class, fmt.tprintf("%s %s", playing ? "Pause" : "Play", media_name), "AXButton", source_play_pause_rect(player), .Source_Play_Pause, flash_label = fmt.tprintf("play pause %s", media_name))
-		add_ax_element(array, element_class, fmt.tprintf("Stop %s and return to zero", media_name), "AXButton", source_stop_rect(player), .Source_Stop, flash_label = fmt.tprintf("stop %s", media_name))
-		hint_control := Source_Hint_Control.Reset
-		if ui.source_playback_active {
-			hint_control = source_hint_control(source_hint_count(state.active_source))
-		}
-		if hint_control == .Menu {
-			add_ax_element(array, element_class, fmt.tprintf("Source timestamp %s", format_timestamp(source_initial_seconds(state.active_source))), "AXButton", source_reset_rect(player), .Source_Hint_Menu, flash_label = "select source timestamp")
-			if ui.source_hint_menu_open {
-				values := source_hint_values(state.active_source, context.temp_allocator)
-				for seconds, option_index in values {
-					add_ax_element(
-						array,
-						element_class,
-						format_timestamp(seconds),
-						"AXButton",
-						source_hint_option_rect(player, option_index, len(values)),
-						.Source_Hint,
-						option_index,
-						seconds,
-						flash_label = "timestamp",
-						functional_name = fmt.tprintf("timestamp %s", format_timestamp(seconds)),
-					)
-				}
-			}
-		}
-		reset_label := "Return to the imported source timestamp"
-		reset_flash_label := "reset source timestamp"
-		if !ui.source_playback_active {
-			reset_label = "Return to the start of the clip"
-			reset_flash_label = "reset clip"
-		}
-		if hint_control == .Reset || !ui.source_playback_active {
-			add_ax_element(array, element_class, reset_label, "AXButton", source_reset_rect(player), .Source_Reset, flash_label = reset_flash_label)
-		}
-		add_ax_element(array, element_class, fmt.tprintf("Decrease %s playback speed", media_name), "AXButton", source_speed_down_rect(player), .Speed_Down, flash_label = "slower")
-		add_ax_element(array, element_class, fmt.tprintf("Increase %s playback speed", media_name), "AXButton", source_speed_up_rect(player), .Speed_Up, flash_label = "faster")
-		percent := volume_percent(ui.player_volume)
-		add_ax_element(
-			array,
-			element_class,
-			fmt.tprintf("Decrease %s volume, %d percent", media_name, percent),
-			"AXButton",
-			source_volume_down_rect(player),
-			.Volume_Down,
-			flash_label = "quieter",
-		)
-		add_ax_element(
-			array,
-			element_class,
-			fmt.tprintf("Increase %s volume, %d percent", media_name, percent),
-			"AXButton",
-			source_volume_up_rect(player),
-			.Volume_Up,
-			flash_label = "louder",
-		)
-	}
-	kinds := [19]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle}
-	labels := [19]string {
+	kinds := [20]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle}
+	labels := [20]string {
 		"Set start",
 		"Set end",
 		"Save clip",
@@ -8902,8 +9747,9 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		"Toggle clip loop",
 		"Cycle visual count in",
 		"Toggle count in before each loop",
+		"Enter full screen playback",
 	}
-	flash_labels := [19]string{"mark in", "mark out", "commit", "play", "pause", "captions", "audition", "data", "rename clip", "clip metadata", "randomize clip", "toggle pitch tracking", "play next clip", "toggle shuffle", "toggle autoplay", "toggle mirror", "toggle loop", "cycle count in", "toggle count each loop"}
+	flash_labels := [20]string{"mark in", "mark out", "commit", "play", "pause", "captions", "audition", "data", "rename clip", "clip metadata", "randomize clip", "toggle pitch tracking", "play next clip", "toggle shuffle", "toggle autoplay", "toggle mirror", "toggle loop", "cycle count in", "toggle count each loop", "full screen playback"}
 	slot_count := control_slot_count(ui.mode)
 	for slot in 0 ..< slot_count {
 		action_index := control_action_for_slot(ui.mode, slot)
@@ -8943,6 +9789,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			)
 		}
 	}
+	add_player_controls(array, element_class, player, player, true)
 	if ui.mode == .Play {
 		add_ax_element(
 			array,
@@ -8988,6 +9835,13 @@ flash_target_label :: proc(control: ^UI_Control) -> string {
 }
 
 begin_ui_flash :: proc() -> bool {
+	if ui.playback_fullscreen_active &&
+	   !ui.playback_fullscreen_controls_visible {
+		playback_fullscreen_show_controls()
+		if ui.layer != nil && ui.width > 0 && ui.height > 0 {
+			render_frame()
+		}
+	}
 	targets := make([dynamic]flash.Target, 0, len(ui_build.controls), context.temp_allocator)
 	for &control in ui_build.controls {
 		if .Flash not_in control.flags || .Enabled not_in control.flags {continue}
@@ -9024,6 +9878,13 @@ find_ax_control :: proc(element: Id) -> ^UI_Control {
 
 activate_ui_action :: proc(action: UI_Action) -> bool {
 	if !ui_action_enabled_for_current_job(action.kind) {return false}
+	#partial switch action.kind {
+	case .Volume_Down, .Volume_Up, .Speed_Down, .Speed_Up,
+	     .Source_Play_Pause, .Source_Stop, .Source_Timeline,
+	     .Source_Reset, .Source_Hint_Menu, .Source_Hint:
+		playback_fullscreen_show_controls()
+	case:
+	}
 	clear_number_prefix()
 	#partial switch action.kind {
 	case .Command_Palette_Search:
@@ -9294,6 +10155,8 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 	case .Source_Hint:
 		ui.source_hint_menu_open = false
 		_ = select_source_hint(state.active_source, action.seconds)
+	case .Playback_Fullscreen_Toggle:
+		_ = toggle_playback_fullscreen()
 	case .Start:
 		on_set_start(nil, nil, nil)
 	case .End:
@@ -9634,6 +10497,23 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		"Stop the loaded source or clip and seek to zero",
 		"Command",
 		[]string{"transport", "zero"},
+		palette_condition(PALETTE_CONTEXT_PLAYER),
+		"Available after loading a source or clip",
+	)
+	fullscreen_title := "Enter full screen playback"
+	fullscreen_subtitle :=
+		"Fill the current display without entering a macOS full-screen Space"
+	if ui.playback_fullscreen_active {
+		fullscreen_title = "Exit full screen playback"
+		fullscreen_subtitle = "Restore the previous application window frame"
+	}
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Playback_Fullscreen_Toggle},
+		fullscreen_title,
+		fullscreen_subtitle,
+		"Command",
+		[]string{"video", "player", "display", "expand", "collapse"},
 		palette_condition(PALETTE_CONTEXT_PLAYER),
 		"Available after loading a source or clip",
 	)
@@ -10118,13 +10998,15 @@ render_frame :: proc() {
 	msg_void_id(attachment, sel_registerName("setTexture:"), texture)
 	msg_void_i(attachment, sel_registerName("setLoadAction:"), 2)
 	msg_void_i(attachment, sel_registerName("setStoreAction:"), 1)
+	clear_color := ui_theme_colors().chassis
+	if ui.playback_fullscreen_active {clear_color = {0, 0, 0, 1}}
 	msg_void_clear_color(
 		attachment,
 		sel_registerName("setClearColor:"),
 		MTL_Clear_Color{
-			ui_theme_colors().chassis[0],
-			ui_theme_colors().chassis[1],
-			ui_theme_colors().chassis[2],
+			clear_color[0],
+			clear_color[1],
+			clear_color[2],
 			1,
 		},
 	)
@@ -10165,19 +11047,18 @@ render_frame :: proc() {
 
 	_, _, _, _, player, _, _, _, _, _, _ := layout_rects()
 	player_rect := player_content_rect(player)
+	if ui.playback_fullscreen_active {
+		player_rect = {0, 0, ui.width, ui.height}
+	}
 	video_texture, video_width, video_height, fresh_video_frame :=
 		current_video_texture()
 	if fresh_video_frame {complete_video_frame_refresh()}
 	if video_texture != nil {
-		aspect := f64(video_width) / f64(video_height)
-		draw_rect := player_rect
-		if draw_rect.w / draw_rect.h > aspect {
-			draw_rect.w = draw_rect.h * aspect
-			draw_rect.x += (player_rect.w - draw_rect.w) / 2
-		} else {
-			draw_rect.h = draw_rect.w / aspect
-			draw_rect.y += (player_rect.h - draw_rect.h) / 2
-		}
+		draw_rect := aspect_fit_rect(
+			player_rect,
+			f64(video_width),
+			f64(video_height),
+		)
 		mirrored :=
 			ui.workflow == .Dancing &&
 			!ui.source_playback_active &&
@@ -10188,6 +11069,27 @@ render_frame :: proc() {
 	}
 
 	encode_texture(encoder, ui.text_texture, UI_Rect{0, 0, ui.width, ui.height}, 1)
+
+	fullscreen_timeline_vertices, timeline_vertices_error :=
+		make([dynamic]Solid_Vertex, 0, 12, frame_allocator)
+	if timeline_vertices_error != nil {
+		arena_note_failure(&memory.frame_stats)
+	} else {
+		build_playback_fullscreen_timeline_geometry(
+			&fullscreen_timeline_vertices,
+		)
+		if len(fullscreen_timeline_vertices) > 0 {
+			msg_void_id(
+				encoder,
+				sel_registerName("setRenderPipelineState:"),
+				ui.solid_pipeline,
+			)
+			encode_solid_vertices(
+				encoder,
+				fullscreen_timeline_vertices[:],
+			)
+		}
+	}
 
 	msg_void(encoder, sel_registerName("endEncoding"))
 	msg_void_id(command_buffer, sel_registerName("presentDrawable:"), drawable)
@@ -10594,7 +11496,19 @@ on_application_did_become_active :: proc "c" (
 	}
 }
 
+on_application_did_change_screen_parameters :: proc "c" (
+	self: Id,
+	command: Sel,
+	notification: Id,
+) {
+	context = runtime.default_context()
+	reapply_playback_fullscreen_frame()
+}
+
 metal_player_clear :: proc() {
+	if ui.playback_fullscreen_active {
+		_ = set_playback_fullscreen(false)
+	}
 	set_source_playback_active(false)
 	cancel_dance_count_in()
 	ui.source_scrubbing = false
@@ -10691,8 +11605,14 @@ metal_player_load :: proc(path: string) -> bool {
 }
 
 activate_control :: proc(index: int) {
-	kinds := [19]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle}
+	kinds := [20]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle}
 	if index < 0 || index >= len(kinds) {return}
+	if index == PLAYBACK_FULLSCREEN_ACTION_INDEX {
+		if ui_action_enabled_for_current_job(.Playback_Fullscreen_Toggle) {
+			_ = activate_ui_action({kind = .Playback_Fullscreen_Toggle})
+		}
+		return
+	}
 	control := find_ui_control_by_action(kinds[index])
 	if control != nil && .Enabled in control.flags {_ = activate_ui_action(control.action)}
 }
@@ -10838,9 +11758,19 @@ activate_registered_target_at_point :: proc(
 	case .Clip_Rename:
 		begin_text_pointer_selection(control, .Clip_Rename, point, click_count)
 	case .Source_Timeline:
+		cancel_player_surface_click()
 		ui.source_scrubbing = true
 		seek_player_timeline_rect(point, control.rect)
+	case .Player_Surface:
+		if click_count >= 2 {
+			cancel_player_surface_click()
+			_ = toggle_playback_fullscreen()
+		} else {
+			schedule_player_surface_click()
+			playback_fullscreen_show_controls()
+		}
 	case:
+		cancel_player_surface_click()
 		return activate_ui_action(control.action)
 	}
 	return true
@@ -10942,6 +11872,7 @@ ui_action_is_window :: proc(kind: UI_Action_Kind) -> bool {
 }
 
 begin_window_resize :: proc(point: Point) -> bool {
+	if ui.playback_fullscreen_active {return false}
 	edges := window_resize_edges_for_size(point, ui.width, ui.height)
 	if edges == 0 {return false}
 	cancel_ui_flash()
@@ -10989,6 +11920,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		window_point,
 		nil,
 	)
+	playback_fullscreen_show_controls()
 	if begin_window_resize(ui.mouse) {return}
 	window_control := find_ui_control_at_point(
 		ui_build.controls[:],
@@ -11003,6 +11935,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	click_count := msg_uint(event, sel_registerName("clickCount"))
 	if !command_palette.is_open(&command_palette_state) &&
+	   !ui.playback_fullscreen_active &&
 	   !ui.source_modal_open && !ui.source_details_open &&
 	   !ui.clip_rename_open && !ui.clip_metadata_open &&
 	   !ui.randomize_help_open && !ui.pitch.help_open &&
@@ -11051,6 +11984,7 @@ on_metal_mouse_moved :: proc "c" (self: Id, command: Sel, event: Id) {
 	next := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
 	if next != ui.mouse {
 		ui.mouse = next
+		playback_fullscreen_show_controls()
 		if command_palette.is_open(&command_palette_state) {
 			control := find_ui_control_at_point(ui_build.controls[:], next, .Primary_Press)
 			if control != nil && control.action.kind == .Command_Palette_Result {
@@ -11070,6 +12004,7 @@ on_metal_mouse_dragged :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	ui.mouse = msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
+	playback_fullscreen_show_controls()
 	if update_text_pointer_selection(ui.mouse) {
 		ui.needs_redraw = true
 		return
@@ -11454,6 +12389,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	)
 	shortcut_text, has_shortcut_text :=
 		text_input_string(shortcut_characters)
+	cancel_player_surface_click()
 	if global_modal_blocks_commands() {
 		if ui.shortcut_open {video_clips_shortcut_recorder_close()}
 		if ui.settings_open {video_clips_settings_close()}
@@ -11672,6 +12608,10 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		ui.needs_redraw = true
 		return
 	}
+	if key == 53 && ui.playback_fullscreen_active {
+		_ = set_playback_fullscreen(false)
+		return
+	}
 	if focused_text() != nil && is_copy_shortcut(key, modifiers) {
 		on_metal_copy(self, sel_registerName("copy:"), nil)
 		return
@@ -11712,13 +12652,25 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		   !ui.pitch.help_open &&
 		   !ui.data_modal_open &&
 		   !ui.notification_modal_open
+		if numbered_actions_available &&
+		   has_shortcut_text &&
+		   playback_fullscreen_shortcut_matches(
+				shortcut_text,
+				modifiers,
+		   ) &&
+		   (state.player != nil || ui.playback_fullscreen_active) {
+			_ = toggle_playback_fullscreen()
+			return
+		}
 		if numbered_actions_available && state.player != nil {
 			if delta, scrub := timeline_scrub_delta(key, modifiers); scrub {
+				playback_fullscreen_show_controls()
 				scrub_player_by(delta)
 				return
 			}
 		}
 		if numbered_actions_available && key == 49 {
+			playback_fullscreen_show_controls()
 			on_toggle_playback(nil, nil, nil)
 			return
 		}
@@ -11844,6 +12796,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	}
 	now_ms := numbered_action_time_ms()
 	_ = expire_number_prefix_at(now_ms)
+	_ = advance_player_surface_click(now_ms)
 	if ui.clip_draft_dirty &&
 	   ui.clip_draft_persist_due_ms > 0 &&
 	   now_ms >= ui.clip_draft_persist_due_ms {
@@ -11896,6 +12849,8 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 		                  ) > 0
 	}
 	playback_active = playback_active || ui.count_in_active
+	playback_fullscreen_tick(now_ms, playback_active)
+	playback_fullscreen_refresh_timestamp()
 	frame := msg_rect(ui.view, sel_registerName("bounds"))
 	if ui.width != frame.size.width || ui.height != frame.size.height {
 		cancel_ui_flash()
@@ -11993,6 +12948,12 @@ register_delegate :: proc(app: Id) {
 		delegate_class,
 		sel_registerName("applicationDidBecomeActive:"),
 		rawptr(on_application_did_become_active),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
+		sel_registerName("applicationDidChangeScreenParameters:"),
+		rawptr(on_application_did_change_screen_parameters),
 		"v@:@",
 	)
 	class_addMethod(
