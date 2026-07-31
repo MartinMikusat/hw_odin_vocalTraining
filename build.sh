@@ -7,7 +7,6 @@ UI_FLASH_ROOT="$ROOT/../hw_odin_ui_flash"
 COMMAND_PALETTE_ROOT="$ROOT/../hw_odin_ui_commandPalette"
 COMPONENTS_ROOT="$ROOT/../hw_odin_ui_components"
 TASK_QUEUE_ROOT="$ROOT/../hw_odin_concurrency_taskQueue"
-FONT_ROOT="$ROOT/resources/fonts"
 ICON_ROOT="$ROOT/resources/icons/iconoir"
 if [ ! -f "$MATCH_SORTER_ROOT/match_sorter.odin" ]; then
   echo "[hw_videoClips] missing Odin match-sorter checkout: $MATCH_SORTER_ROOT" >&2
@@ -27,10 +26,6 @@ if [ ! -f "$COMPONENTS_ROOT/text_input/text_input.odin" ]; then
 fi
 if [ ! -f "$TASK_QUEUE_ROOT/task_queue.odin" ]; then
   echo "[hw_videoClips] missing Odin task queue checkout: $TASK_QUEUE_ROOT" >&2
-  exit 1
-fi
-if [ ! -f "$FONT_ROOT/Iosevka-Regular.ttf" ]; then
-  echo "[hw_videoClips] missing bundled Iosevka font: $FONT_ROOT/Iosevka-Regular.ttf" >&2
   exit 1
 fi
 "$ROOT/scripts/dependencies.sh" check
@@ -60,6 +55,7 @@ case "$MODE" in
     ;;
 esac
 
+rm -rf "$APP/Contents/Resources/Fonts"
 mkdir -p "$APP/Contents/MacOS"
 EXECUTABLE="$APP/Contents/MacOS/hw_videoClips"
 TEMP="$ROOT/build/temp/$MODE"
@@ -80,9 +76,6 @@ odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
   -collection:task_queue="$TASK_QUEUE_ROOT" \
   -extra-linker-flags:"$PITCH_CAPTURE_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics -framework ImageIO"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
-mkdir -p "$APP/Contents/Resources/Fonts"
-cp "$FONT_ROOT/Iosevka-Regular.ttf" "$APP/Contents/Resources/Fonts/Iosevka-Regular.ttf"
-cp "$FONT_ROOT/IOSEVKA-LICENSE.md" "$APP/Contents/Resources/Fonts/IOSEVKA-LICENSE.md"
 mkdir -p "$APP/Contents/Resources/Icons/Iconoir"
 cp "$ICON_ROOT/xmark.svg" "$APP/Contents/Resources/Icons/Iconoir/xmark.svg"
 cp "$ICON_ROOT/minus.svg" "$APP/Contents/Resources/Icons/Iconoir/minus.svg"

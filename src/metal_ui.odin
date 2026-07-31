@@ -326,7 +326,6 @@ CF_Range :: struct {
 	location, length: int,
 }
 
-UI_FONT_NAME :: "Iosevka"
 SMALL_FONT_SIZE :: 10.5
 APP_HEADER_HEIGHT :: 38.0
 UI_COLOR_SAND_32 :: [4]f32{0.882353, 0.850980, 0.788235, 1}
@@ -347,6 +346,17 @@ UI_COLOR_FOREST_64 :: [4]f64{0.090196, 0.192157, 0.145098, 1}
 UI_COLOR_BASALT_64 :: [4]f64{0.129412, 0.180392, 0.250980, 1}
 UI_COLOR_DANCING_LIGHT_64 :: [4]f64{0.211765, 0.317647, 0.435294, 1}
 UI_COLOR_DANCING_DARK_64 :: [4]f64{0.470588, 0.588235, 0.701961, 1}
+
+system_monospaced_font :: proc(size: f64) -> rawptr {
+	font := msg_id_f64_f64(
+		objc_getClass("NSFont"),
+		sel_registerName("monospacedSystemFontOfSize:weight:"),
+		size,
+		0,
+	)
+	if font == nil {return nil}
+	return CFRetain(font)
+}
 
 UI_Theme_Colors :: struct {
 	chassis, header, panel, panel_alt, field: [4]f64,
@@ -4160,10 +4170,7 @@ text_offset_at_point :: proc(
 	prefix_bytes := 0,
 ) -> int {
 	if len(text) == 0 {return base_byte_offset}
-	font_name := CFStringCreateWithCString(nil, UI_FONT_NAME, 0x08000100)
-	if font_name == nil {return base_byte_offset}
-	font := CTFontCreateWithName(font_name, SMALL_FONT_SIZE * ui.scale, nil)
-	CFRelease(font_name)
+	font := system_monospaced_font(SMALL_FONT_SIZE * ui.scale)
 	if font == nil {return base_byte_offset}
 	defer CFRelease(font)
 	run := make_text_run(font, text)
@@ -6936,14 +6943,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 	if ctx == nil {return pixels}
 	defer CGContextRelease(ctx)
 	CGContextClearRect(ctx, Rect{Point{0, 0}, Size{f64(width), f64(height)}})
-	font_name := CFStringCreateWithCString(nil, UI_FONT_NAME, 0x08000100)
-	assert_foreign(font_name, "Unable to create the UI font name")
-	if font_name == nil {return pixels}
-	small_font := CTFontCreateWithName(font_name, SMALL_FONT_SIZE * ui.scale, nil)
+	small_font := system_monospaced_font(SMALL_FONT_SIZE * ui.scale)
 	assert_foreign(small_font, "Unable to create the small UI font")
-	count_font := CTFontCreateWithName(font_name, 96 * ui.scale, nil)
+	count_font := system_monospaced_font(96 * ui.scale)
 	assert_foreign(count_font, "Unable to create the count-in font")
-	CFRelease(font_name)
 	defer foreign_release(small_font, "CTFont", "build_text_overlay")
 	defer foreign_release(count_font, "CTFont", "build_text_overlay")
 	s := ui.scale

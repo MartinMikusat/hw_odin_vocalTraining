@@ -24,8 +24,7 @@ operation. It prefers executables packaged in
 `Contents/Resources/helpers/`, then searches the development machine's
 `PATH`; it never installs or downloads tools itself.
 
-The application bundles its Iosevka Regular interface font. The user does not
-need to install the font.
+The application requests the system monospaced interface font from AppKit.
 
 The application opens as a square, borderless window without a native shadow.
 Use the first three controls at the upper left to close, minimize, or zoom the
@@ -386,22 +385,14 @@ audio through a time-pitch unit, so speed changes preserve vocal pitch. Audio
 configuration notifications restart and reschedule this graph when the default
 output device changes.
 
-The interface uses the bundled Iosevka Regular font and a measured immediate-mode layout.
+The interface uses AppKit's system monospaced font and a measured immediate-mode layout.
 Typography uses 10.5 points throughout the interface, including the compact
 `hw_videoClips` title. Container text is shaped as a complete CoreText line,
 then positioned from its measured
 advance and ascent/descent metrics. Measurement, alignment, truncation, and
 drawing reuse that same shaped line, preserving kerning, ligatures, fallback
 fonts, combining marks, bidirectional ordering, and complex-script shaping.
-The bundle activates Iosevka only for the application through
-`ATSApplicationFontsPath`.
-
-Bundled font provenance:
-
-- Asset: Iosevka Regular 34.7.0
-- Source: [`PkgTTF-Iosevka-34.7.0.zip`](https://github.com/be5invis/Iosevka/releases/download/v34.7.0/PkgTTF-Iosevka-34.7.0.zip)
-- SHA-256: `2fe6f742431e66f218b713ecca986370612bc27594a96a8ab45a41e9ebbaf5e3`
-- License: [SIL Open Font License, Version 1.1](resources/fonts/IOSEVKA-LICENSE.md)
+The application does not hard-code or bundle the concrete font family.
 
 Bundled interface icon provenance:
 
