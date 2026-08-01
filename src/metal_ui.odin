@@ -184,6 +184,9 @@ UI_State :: struct {
 	last_video_height:  uint,
 	video_frame_pending: bool,
 	video_frame_deadline: uint,
+	video_frame_warmup_pending: bool,
+	video_frame_warmup_active: bool,
+	video_frame_warmup_due_tick: uint,
 	ax_children:        Id,
 	width:              f64,
 	height:             f64,
@@ -11517,8 +11520,14 @@ video_frame_retry_active :: proc(
 }
 
 clear_video_frame_refresh :: proc() {
+	if ui.video_frame_warmup_active && state.player != nil {
+		msg_void(state.player, sel_registerName("pause"))
+	}
 	ui.video_frame_pending = false
 	ui.video_frame_deadline = 0
+	ui.video_frame_warmup_pending = false
+	ui.video_frame_warmup_active = false
+	ui.video_frame_warmup_due_tick = 0
 }
 
 request_video_frame_refresh :: proc() {
@@ -11529,6 +11538,33 @@ request_video_frame_refresh :: proc() {
 	ui.video_frame_pending = true
 	ui.video_frame_deadline = ui.frame_tick + VIDEO_FRAME_RETRY_TICKS
 	ui.needs_redraw = true
+}
+
+request_paused_video_frame_warmup :: proc() {
+	if state.player == nil {return}
+	ui.video_frame_warmup_pending = true
+	ui.video_frame_warmup_due_tick = ui.frame_tick + 6
+}
+
+advance_paused_video_frame_warmup :: proc() {
+	if !ui.video_frame_warmup_pending ||
+	   ui.video_frame_warmup_active ||
+	   ui.frame_tick < ui.video_frame_warmup_due_tick ||
+	   state.player == nil {
+		return
+	}
+	if msg_f32(state.player, sel_registerName("rate")) != 0 {
+		ui.video_frame_warmup_pending = false
+		return
+	}
+	ui.video_frame_warmup_active = true
+	msg_void_f32(state.player, sel_registerName("setRate:"), 1)
+}
+
+cancel_paused_video_frame_warmup :: proc() {
+	ui.video_frame_warmup_pending = false
+	ui.video_frame_warmup_active = false
+	ui.video_frame_warmup_due_tick = 0
 }
 
 complete_video_frame_refresh :: proc() {
@@ -13069,6 +13105,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	ui.frame_tick += 1
+	advance_paused_video_frame_warmup()
 	if ui.video_frame_pending &&
 	   !video_frame_retry_active(
 			ui.video_frame_pending,

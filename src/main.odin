@@ -1063,6 +1063,9 @@ seek_video_seconds :: proc(seconds: f64) {
 		tolerance,
 	)
 	request_video_frame_refresh()
+	if msg_f32(state.player, sel_registerName("rate")) == 0 {
+		request_paused_video_frame_warmup()
+	}
 }
 
 seek_seconds :: proc(seconds: f64) {
@@ -1085,6 +1088,7 @@ scrub_player_by :: proc(delta: f64) {
 
 start_loaded_playback_at :: proc(seconds: f64) {
 	if state.player == nil {return}
+	cancel_paused_video_frame_warmup()
 	cancel_dance_count_in()
 	ui.playback_completion_pending = false
 	request_transcript_follow_to(seconds)
@@ -1258,6 +1262,7 @@ pause_player_playback :: proc() {
 
 resume_player_playback :: proc() -> bool {
 	if state.player == nil {return false}
+	cancel_paused_video_frame_warmup()
 	seconds, ok := current_seconds()
 	if !ok {return false}
 	if playback_position_finished(seconds, ui.player_duration) {

@@ -14,6 +14,7 @@
     {"op": "assert", "condition": {"kind": "surface", "field": "selection.source.saved", "operator": "eq", "value": "ui-test-source"}},
     {"op": "assert", "condition": {"kind": "surface", "field": "selection.clip.saved", "operator": "eq", "value": "ui-test-clip"}},
     {"op": "assert", "condition": {"kind": "surface", "field": "selection.id", "operator": "eq", "value": "ui-test-clip"}},
+    {"op": "wait", "condition": {"kind": "surface", "field": "video.frame_ready", "operator": "eq", "value": true}, "timeout_ms": 2000},
     {"op": "assert", "condition": {"kind": "surface", "field": "playback.active", "operator": "eq", "value": false}}
   ]
 }

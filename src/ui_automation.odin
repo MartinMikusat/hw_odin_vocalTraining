@@ -338,6 +338,8 @@ ui_automation_surface_value :: proc(field: string) -> UI_Automation_Value {
 		return {kind=.String, string=surface.background}
 	case "media.loaded":
 		return {kind=.Boolean, boolean=state.player != nil}
+	case "video.frame_ready":
+		return {kind=.Boolean, boolean=ui.last_video_texture != nil}
 	case "selection.id":
 		if ui.mode == .Create &&
 		   state.active_source >= 0 &&
