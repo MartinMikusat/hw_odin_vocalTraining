@@ -201,6 +201,10 @@ UI_State :: struct {
 	shortcut_collision: string,
 	shortcut_error:     string,
 	shortcut_live_modifiers: Video_Clips_Shortcut_Modifiers,
+	discard_confirm_open: bool,
+	discard_target: Modal_Discard_Target,
+	source_modal_initial_hash: u64,
+	clip_rename_initial_hash: u64,
 	source_modal_open:  bool,
 	source_modal_refetch_index: int,
 	source_details_open: bool,
@@ -349,7 +353,7 @@ ui_theme_colors :: proc(dark_theme := ui.dark_theme) -> UI_Theme_Colors {
 			rule = {0.125, 0.132, 0.123, 1},
 			row = {0.060, 0.064, 0.061, 0.96},
 			row_hover = {0.085, 0.091, 0.086, 1},
-			backdrop = {0.008, 0.009, 0.009, 0.88},
+			backdrop = {0.008, 0.009, 0.009, 0.80},
 			modal = {0.055, 0.059, 0.056, 1},
 			ink = {0.89, 0.88, 0.82, 1},
 			bright = {0.97, 0.95, 0.88, 1},
@@ -367,7 +371,7 @@ ui_theme_colors :: proc(dark_theme := ui.dark_theme) -> UI_Theme_Colors {
 		rule = {0.76, 0.73, 0.66, 1},
 		row = {0.88, 0.86, 0.79, 0.96},
 		row_hover = {0.80, 0.78, 0.72, 1},
-		backdrop = {0.15, 0.145, 0.16, 0.78},
+		backdrop = {0.15, 0.145, 0.16, 0.80},
 		modal = {0.91, 0.89, 0.82, 1},
 		ink = {0.15, 0.145, 0.16, 1},
 		bright = {0.15, 0.145, 0.16, 1},
@@ -522,6 +526,15 @@ UI_Action_Kind :: enum {
 	Recovery_Confirm,
 	Backup_Warning_Cancel,
 	Backup_Warning_Continue,
+	Discard_Keep_Editing,
+	Discard_Changes,
+}
+
+Modal_Discard_Target :: enum {
+	None,
+	Shortcut,
+	Source,
+	Clip_Rename,
 }
 
 AX_Action :: struct {
@@ -1874,6 +1887,18 @@ data_modal_rect :: proc() -> UI_Rect {
 	return UI_Rect{(ui.width - width) / 2, (ui.height - height) / 2, width, height}
 }
 
+discard_confirm_rect :: proc() -> UI_Rect {
+	width := min(460.0, ui.width-48)
+	height := 164.0
+	return {(ui.width-width)/2, (ui.height-height)/2, width, height}
+}
+
+discard_confirm_action_rect :: proc(index: int) -> UI_Rect {
+	modal := discard_confirm_rect()
+	width := (modal.w-56)/2
+	return {modal.x+24+f64(index)*(width+8), modal.y+24, width, 34}
+}
+
 data_modal_action_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 	return UI_Rect{
 		modal.x + 24,
@@ -2150,6 +2175,7 @@ open_clip_rename :: proc() {
 	ui.clip_rename_index = ui.active_clip
 	ui.clip_rename_open = true
 	ui_set_string(&ui.clip_rename, state.clips[ui.clip_rename_index].name)
+	ui.clip_rename_initial_hash = hash.fnv64a(transmute([]byte)ui.clip_rename)
 	focus_text_input(.Clip_Rename)
 }
 
@@ -2161,6 +2187,7 @@ close_clip_rename :: proc() {
 	text_input.end_pointer_selection(&ui.input_state)
 	clear_marked_text()
 	ui_set_string(&ui.clip_rename, "")
+	ui.clip_rename_initial_hash = 0
 	ui.needs_redraw = true
 }
 
@@ -2285,6 +2312,7 @@ open_source_modal :: proc() {
 	ui.source_modal_refetch_index = -1
 	ui.source_modal_open = true
 	ui.save_source_browser_choice = false
+	ui.source_modal_initial_hash = hash.fnv64a(transmute([]byte)ui.url_input)
 	focus_text_input(.URL)
 	ui.needs_redraw = true
 	if len(strings.trim_space(ui.url_input)) > 0 && len(source_probe_results) == 0 {schedule_source_probe(1)}
@@ -2418,6 +2446,7 @@ open_refetch_source_modal :: proc(source_index: int) {
 	ui.focus = .None
 	text_input.end_pointer_selection(&ui.input_state)
 	ui_set_string(&ui.url_input, state.sources[source_index].url)
+	ui.source_modal_initial_hash = hash.fnv64a(transmute([]byte)ui.url_input)
 	source_probe_results_clear()
 	schedule_source_probe(1)
 	ui.needs_redraw = true
@@ -2431,7 +2460,56 @@ close_source_modal :: proc() {
 	ui.focus = .None
 	text_input.end_pointer_selection(&ui.input_state)
 	clear_marked_text()
+	ui.source_modal_initial_hash = 0
 	ui.needs_redraw = true
+}
+
+modal_discard_target_dirty :: proc(target: Modal_Discard_Target) -> bool {
+	switch target {
+	case .Shortcut:
+		return ui.shortcut_candidate_valid
+	case .Source:
+		return hash.fnv64a(transmute([]byte)ui.url_input) !=
+		         ui.source_modal_initial_hash ||
+		       ui.save_source_browser_choice
+	case .Clip_Rename:
+		return hash.fnv64a(transmute([]byte)ui.clip_rename) !=
+		       ui.clip_rename_initial_hash
+	case .None:
+	}
+	return false
+}
+
+close_modal_discard_target :: proc(target: Modal_Discard_Target) {
+	switch target {
+	case .Shortcut: video_clips_shortcut_recorder_close()
+	case .Source: close_source_modal()
+	case .Clip_Rename: close_clip_rename()
+	case .None:
+	}
+}
+
+request_modal_discard :: proc(target: Modal_Discard_Target) {
+	if modal_discard_target_dirty(target) {
+		ui.discard_confirm_open = true
+		ui.discard_target = target
+		cancel_ui_flash()
+		ui.needs_redraw = true
+		return
+	}
+	close_modal_discard_target(target)
+}
+
+close_discard_confirmation :: proc() {
+	ui.discard_confirm_open = false
+	ui.discard_target = .None
+	ui.needs_redraw = true
+}
+
+confirm_modal_discard :: proc() {
+	target := ui.discard_target
+	close_discard_confirmation()
+	close_modal_discard_target(target)
 }
 
 schedule_source_probe :: proc(delay_frames: uint) {
@@ -4753,6 +4831,41 @@ draw_command_palette :: proc(
 	)
 }
 
+draw_discard_confirmation :: proc(
+	ctx, font: rawptr,
+	bright, muted, warning: [4]f64,
+) {
+	if !ui.discard_confirm_open {return}
+	theme := ui_theme_colors()
+	modal := discard_confirm_rect()
+	fill_overlay_rect(ctx, modal, theme.modal)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"DISCARD CHANGES?",
+		{modal.x+24, modal.y+modal.h-54, modal.w-48, 30},
+		.Start,
+		.Center,
+		bright,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"YOUR UNSAVED CHANGES WILL BE LOST",
+		{modal.x+24, modal.y+modal.h-88, modal.w-48, 24},
+		.Start,
+		.Center,
+		muted,
+	)
+	keep := discard_confirm_action_rect(0)
+	discard := discard_confirm_action_rect(1)
+	fill_overlay_rect(ctx, keep, theme.panel_alt)
+	fill_overlay_rect(ctx, discard, UI_COLOR_OCHRE_64)
+	fill_overlay_border(ctx, discard, warning)
+	draw_text_in_rect(ctx, font, "1  KEEP EDITING", keep, .Center, .Center, bright)
+	draw_text_in_rect(ctx, font, "2  DISCARD CHANGES", discard, .Center, .Center, bright)
+}
+
 draw_clip_rename :: proc(ctx, font: rawptr, bright, muted, dim, accent: [4]f64) {
 	if !ui.clip_rename_open ||
 	   ui.clip_rename_index < 0 ||
@@ -6482,11 +6595,6 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		push_rect(vertices, UI_Rect{focus_rect.x, focus_rect.y, 3, focus_rect.h}, accent)
 	}
 	if ui.settings_open && !ui.shortcut_open {
-		push_rect(
-			vertices,
-			{0, 0, ui.width, ui.height},
-			ui_color_32(theme.backdrop),
-		)
 		push_rect(vertices, video_clips_settings_rect(), ui_color_32(theme.modal))
 		search := video_clips_settings_search_rect()
 		push_rect(vertices, search, field)
@@ -6519,11 +6627,6 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 	}
 	if ui.shortcut_open {
-		push_rect(
-			vertices,
-			{0, 0, ui.width, ui.height},
-			ui_color_32(theme.backdrop),
-		)
 		push_rect(
 			vertices,
 			video_clips_shortcut_modal_rect(),
@@ -8161,6 +8264,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		danger,
 	)
 	draw_command_palette(ctx, small_font, bright, muted, dim, accent, cyan, danger)
+	draw_discard_confirmation(ctx, small_font, bright, muted, warning)
 	draw_library_recovery(
 		ctx,
 		small_font,
@@ -8889,6 +8993,28 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			recovery_confirm_rect(modal),
 			.Backup_Warning_Continue,
 			flash_label = "continue without backup",
+		)
+		validate_ui_controls()
+		return
+	}
+	if ui.discard_confirm_open {
+		add_ax_element(
+			array,
+			element_class,
+			"Keep editing",
+			"AXButton",
+			discard_confirm_action_rect(0),
+			.Discard_Keep_Editing,
+			flash_label = "keep editing",
+		)
+		add_ax_element(
+			array,
+			element_class,
+			"Discard unsaved changes",
+			"AXButton",
+			discard_confirm_action_rect(1),
+			.Discard_Changes,
+			flash_label = "discard changes",
 		)
 		validate_ui_controls()
 		return
@@ -9991,7 +10117,7 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 	case .Shortcut_Reset:
 		return video_clips_shortcut_recorder_reset()
 	case .Shortcut_Cancel:
-		video_clips_shortcut_recorder_close()
+		request_modal_discard(.Shortcut)
 	case .Workflow_Toggle:
 		set_ui_workflow(
 			ui.workflow == .Vocal ? .Dancing : .Vocal,
@@ -10001,7 +10127,7 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 	case .Open_Source_Modal:
 		open_source_modal()
 	case .Cancel_Source_Modal:
-		close_source_modal()
+		request_modal_discard(.Source)
 	case .Close_Source_Details:
 		close_source_details()
 	case .Refetch_Source_Details:
@@ -10177,7 +10303,7 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 	case .Clip_Name:
 		focus_text_input(.Clip_Name)
 	case .Cancel_Clip_Rename:
-		close_clip_rename()
+		request_modal_discard(.Clip_Rename)
 	case .Confirm_Clip_Rename:
 		confirm_clip_rename()
 	case .Clip_Rename:
@@ -10272,6 +10398,10 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		major_change_backup_cancel()
 	case .Backup_Warning_Continue:
 		major_change_backup_continue()
+	case .Discard_Keep_Editing:
+		close_discard_confirmation()
+	case .Discard_Changes:
+		confirm_modal_discard()
 	case .Rename:
 		open_clip_rename()
 	case .Metadata:
@@ -11205,6 +11335,12 @@ activate_registered_target_at_point :: proc(
 dispatch_click :: proc(point: Point, click_count: uint = 1) {
 	cancel_ui_flash()
 	text_input.end_pointer_selection(&ui.input_state)
+	if ui.discard_confirm_open {
+		modal := discard_confirm_rect()
+		if !contains(modal, point) {close_discard_confirmation(); return}
+		_ = activate_registered_target_at_point(point, click_count)
+		return
+	}
 	if command_palette.is_open(&command_palette_state) {
 		modal := command_palette_rect()
 		if !contains(modal, point) {close_command_palette(true); return}
@@ -11225,6 +11361,8 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 		return
 	}
 	if ui.shortcut_open {
+		modal := video_clips_shortcut_modal_rect()
+		if !contains(modal, point) {request_modal_discard(.Shortcut); return}
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
@@ -11254,7 +11392,7 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 	}
 	if ui.clip_rename_open {
 		modal := clip_rename_modal_rect()
-		if !contains(modal, point) {close_clip_rename(); return}
+		if !contains(modal, point) {request_modal_discard(.Clip_Rename); return}
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
@@ -11266,7 +11404,7 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 	}
 	if ui.source_modal_open {
 		modal := source_modal_rect()
-		if !contains(modal, point) {close_source_modal(); return}
+		if !contains(modal, point) {request_modal_discard(.Source); return}
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
@@ -11459,6 +11597,7 @@ on_metal_mouse_up :: proc "c" (self: Id, command: Sel, event: Id) {
 modal_consumes_content_scroll :: proc() -> bool {
 	return library_recovery_state.required ||
 	       major_change_pending.open ||
+	       ui.discard_confirm_open ||
 	       ui.settings_open ||
 	       ui.shortcut_open ||
 	       ui.source_modal_open ||
@@ -11829,9 +11968,22 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	   handle_global_source_pasteboard() {
 		return
 	}
+	if ui.discard_confirm_open {
+		if key == 53 || key == 18 || key == 36 || key == 76 {
+			close_discard_confirmation()
+		} else if key == 19 {
+			confirm_modal_discard()
+		}
+		return
+	}
 	if ui.shortcut_open {
 		if key == 53 {
-			video_clips_shortcut_recorder_close()
+			if ui.shortcut_listening {
+				ui.shortcut_listening = false
+				ui.needs_redraw = true
+			} else {
+				request_modal_discard(.Shortcut)
+			}
 			return
 		}
 		relevant :=
@@ -11848,7 +12000,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 				case .Reset:
 					_ = video_clips_shortcut_recorder_reset()
 				case .Cancel:
-					video_clips_shortcut_recorder_close()
+					request_modal_discard(.Shortcut)
 				case .Capture:
 				}
 				if route != .Capture {return}
@@ -11931,8 +12083,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	if ui.settings_open {
 		if ui.focus == .Settings_Search {
 			if key == 53 {
-				_ = unfocus_text_input()
-				ui.settings_query_focused = false
+				video_clips_settings_close()
 				return
 			}
 		} else {
@@ -11970,7 +12121,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		return
 	}
 	if ui.clip_metadata_open && key == 53 {close_clip_metadata(); return}
-	if ui.clip_rename_open && key == 53 {close_clip_rename(); return}
+	if ui.clip_rename_open && key == 53 {request_modal_discard(.Clip_Rename); return}
 	if ui.randomize_help_open {
 		if key == 53 {close_randomize_help()}
 		return
@@ -12027,8 +12178,8 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		if key == 126 {_ = select_relative_notification(1); return}
 		return
 	}
+	if ui.source_modal_open && key == 53 {request_modal_discard(.Source); return}
 	if key == 53 && unfocus_text_input() {return}
-	if ui.source_modal_open && key == 53 {close_source_modal(); return}
 	if ui.source_details_open && key == 53 {close_source_details(); return}
 	if key == 53 && ui.number_prefix != 0 {
 		clear_number_prefix()

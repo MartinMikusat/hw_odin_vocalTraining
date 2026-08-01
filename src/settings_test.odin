@@ -1,5 +1,6 @@
 package main
 
+import "core:hash"
 import "core:testing"
 import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
@@ -261,4 +262,26 @@ video_clips_shortcut_invalid_storage_falls_back_to_default_test :: proc(t: ^test
 	default_value := video_clips_shortcut_default()
 	testing.expect_value(t, default_value.key, "/")
 	testing.expect_value(t, default_value.kind, Video_Clips_Shortcut_Key_Kind.Character)
+}
+
+@(test)
+video_clips_modal_backdrop_uses_eighty_percent_opacity_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, ui_theme_colors(false).backdrop[3], 0.80)
+	testing.expect_value(t, ui_theme_colors(true).backdrop[3], 0.80)
+}
+
+@(test)
+video_clips_dirty_source_requires_discard_confirmation_test :: proc(t: ^testing.T) {
+	previous := ui
+	defer {ui = previous}
+	initial := "https://example.com/initial"
+	ui = UI_State{
+		source_modal_open = true,
+		url_input = "https://example.com/changed",
+		source_modal_initial_hash = hash.fnv64a(transmute([]byte)initial),
+	}
+	request_modal_discard(.Source)
+	testing.expect(t, ui.source_modal_open)
+	testing.expect(t, ui.discard_confirm_open)
+	testing.expect_value(t, ui.discard_target, Modal_Discard_Target.Source)
 }

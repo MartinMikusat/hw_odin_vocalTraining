@@ -38,6 +38,11 @@ modal. Select `Styling` to choose HW Light or HW Dark. Select `Shortcuts` to
 configure the Flash leader. The application stores both selections in its
 local database.
 
+Each project-styled modal uses one 80-percent backdrop over the visible
+interface. Escape, Cancel, and a backdrop click dismiss ordinary modals. An
+edited form requests confirmation before it discards unsaved changes. Required
+recovery and backup decisions remain blocking.
+
 The application stores its SQLite library and downloaded media in
 `~/Library/Application Support/hw_videoClips`. On first launch, it moves an
 existing `~/Library/Application Support/VocalTraining` directory to the new
