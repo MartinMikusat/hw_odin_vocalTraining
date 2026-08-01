@@ -6,8 +6,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ui_test_require_jq
 SCENARIO="$ROOT/tests/ui/fullscreen-playback.json"
 
-"$ROOT/scripts/ui-test.sh" run "$SCENARIO" >/dev/null
-result=$("$ROOT/scripts/ui-test.sh" capture --gpu-trace)
+result=$("$ROOT/scripts/ui-test.sh" run "$SCENARIO")
 artifact=$(printf '%s\n' "$result" | jq -r '.data.artifact')
 
 test -s "$artifact/frame.png"
@@ -29,7 +28,7 @@ jq -e '
   .timeline_progress > 0 and
   .commands[0].kind == "clear" and
   any(.commands[]; .texture == "video") and
-  any(.commands[]; .texture == "overlay") and
+  any(.commands[]; .kind == "draw" and .pipeline == "ordered-ui") and
   any(.commands[]; .pipeline == "fullscreen-timeline")
 ' "$artifact/render-trace.json" >/dev/null
 

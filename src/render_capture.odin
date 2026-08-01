@@ -182,13 +182,14 @@ ui_render_trace_set_clear :: proc(color: [4]f64) {
 ui_render_trace_record_solid_rect :: proc(
 	rect: UI_Rect,
 	color: [4]f32,
+	pipeline := "solid",
 ) {
 	if !ui_render_trace_state.active {return}
 	ui_render_trace_record(
 		"solid-rect",
 		rect,
 		{f64(color[0]), f64(color[1]), f64(color[2]), f64(color[3])},
-		pipeline = "solid",
+		pipeline = pipeline,
 		vertex_count = 6,
 	)
 }

@@ -172,6 +172,7 @@ encode_ordered_stream_to_texture :: proc(
 		pixel_height,
 		false,
 	)
+	msg_void_i(descriptor, sel_registerName("setUsage:"), 5)
 	target := msg_id_id(ui.device, sel_registerName("newTextureWithDescriptor:"), descriptor)
 	if target == nil {return nil}
 	pass := msg_id(

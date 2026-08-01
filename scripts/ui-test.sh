@@ -68,7 +68,7 @@ ensure_build() {
     rebuild=1
   fi
   if [ "$rebuild" -eq 1 ]; then
-    "$ROOT/build.sh" debug
+    "$ROOT/build.sh" debug >&2
     mkdir -p "$STATE_ROOT"
     printf '%s\n' "$input_fingerprint" >"$BUILD_FINGERPRINT_FILE"
   fi
@@ -194,6 +194,7 @@ start_instance() {
     HW_VIDEO_CLIPS_ACTIVATE_ON_LAUNCH=0 \
     HW_VIDEO_CLIPS_VISIBLE_ON_LAUNCH=0 \
     MTL_CAPTURE_ENABLED=1 \
+    MTL_DEBUG_LAYER=1 \
     "$APP_EXECUTABLE"
   pid=
   attempts=0
@@ -300,10 +301,7 @@ run_scenario() {
   status=$?
   set -e
   if [ "$mutation" = "persistent" ] || [ "$status" -ne 0 ]; then
-    preserve_artifacts=0
-    if [ "$status" -ne 0 ]; then
-      preserve_artifacts=1
-    fi
+    preserve_artifacts=1
     reset_state "$preserve_artifacts"
     ensure_instance
   fi
