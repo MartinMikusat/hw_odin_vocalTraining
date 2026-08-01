@@ -12,6 +12,7 @@ import "core:time"
 import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
 import text_input "components:text_input"
+import framework_ui "ui_framework:core"
 
 UI_AUTOMATION_SCHEMA_VERSION :: 1
 UI_AUTOMATION_MAX_STEPS :: 512
@@ -318,10 +319,14 @@ ui_automation_find_control :: proc(
 		shared_registry = previous_registry
 	}
 	build_ui_controls(false, mem_virtual.arena_allocator(arena))
-	control := find_ui_control_by_functional_name(
-		ui_build.controls[:],
+	shared_control := framework_ui.control_by_name_in_view(
+		shared_registry,
 		functional_name,
 	)
+	if shared_control == nil || .CLI not_in shared_control.capabilities {
+		return {}, false
+	}
+	control := find_ui_control(UI_Control_ID(shared_control.id))
 	if control == nil {return {}, false}
 	return control^, true
 }
@@ -1321,15 +1326,17 @@ ui_automation_post_pointer_click :: proc(
 		shared_registry = previous_registry
 	}
 	build_ui_controls(true, mem_virtual.arena_allocator(arena))
-	control := find_ui_control_by_functional_name(
-		ui_build.controls[:],
+	shared_control := framework_ui.control_by_name_in_view(
+		shared_registry,
 		functional_name,
 	)
-	if control == nil {return "The pointer target does not exist"}
-	if .Enabled not_in control.flags ||
-	   .Primary_Press not_in control.flags {
+	if shared_control == nil {return "The pointer target does not exist"}
+	if !shared_control.enabled ||
+	   .Primary_Press not_in shared_control.capabilities {
 		return "The pointer target is not enabled for primary input"
 	}
+	control := find_ui_control(UI_Control_ID(shared_control.id))
+	if control == nil {return "The pointer target is not in the application registry"}
 	window_point := Point{
 		control.rect.x+control.rect.w/2,
 		control.rect.y+control.rect.h/2,
