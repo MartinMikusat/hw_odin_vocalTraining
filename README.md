@@ -394,17 +394,21 @@ through one `CAMetalLayer`.
 The custom Metal view conforms to `NSTextInputClient` and routes typing through
 `interpretKeyEvents`. Command shortcuts and input methods stay on the AppKit
 path. The `text_input` package from `hw_odin_ui_components` owns editing state
-and mutations. The application owns strings, CoreText measurement, Metal
-drawing, AppKit event routing, and application actions. AVPlayer decodes muted
-video, and Core Video maps its frames into Metal textures. AVAudioEngine routes
-audio through a time-pitch unit, so speed changes preserve vocal pitch. Audio
-configuration notifications restart and reschedule this graph when the default
-output device changes.
+and mutations. The application owns strings, shaped CoreText lines, AppKit
+event routing, and application actions. `hw_odin_ui_framework` stores the
+ordered interface draw stream, caches glyphs in an atlas, and encodes its Metal
+commands through one pipeline. The stream contains base geometry, live video,
+text, modal backdrops, modal content, and fullscreen progress in display order.
+AVPlayer decodes muted video, and Core Video maps its frames into Metal
+textures. AVAudioEngine routes audio through a time-pitch unit, so speed changes
+preserve vocal pitch. Audio configuration notifications restart and reschedule
+this graph when the default output device changes.
 
 The interface uses AppKit's system monospaced font and a measured immediate-mode layout.
-Typography uses 10.5 points throughout the interface, including the compact
-`hw_videoClips` title. Container text is shaped as a complete CoreText line,
-then positioned from its measured
+Typography defines reusable body, label, and heading styles. The styles use
+1x normal text with -0.45 tracking, 0.7x labels with neutral tracking, and 2x
+bold headings with -0.7 tracking. The base size is 10.5 points. Container text
+is shaped as a complete CoreText line, then positioned from its measured
 advance and ascent/descent metrics. Measurement, alignment, truncation, and
 drawing reuse that same shaped line, preserving kerning, ligatures, fallback
 fonts, combining marks, bidirectional ordering, and complex-script shaping.
@@ -481,14 +485,15 @@ selected support directory.
 
 ### Memory ownership
 
-The renderer owns two virtual-memory arenas. The frame arena holds the control
-registry and solid geometry. `setVertexBytes` copies the geometry into Metal's
-command stream before the next frame resets the arena. Accessibility bindings
-retain stable control identifiers instead of pointers into the frame arena.
-The redraw arena holds the scaled RGBA overlay until `replaceRegion` copies it
-into the retained text texture. The next dirty redraw resets that arena. Debug
-builds print each arena's high-water mark, reset count, and allocation-failure
-count at shutdown.
+The application renderer owns one virtual-memory frame arena. It holds the
+control registry and temporary solid quads. The application converts each quad
+to an ordered framework instance before the next frame resets the arena.
+Accessibility bindings retain stable control identifiers instead of pointers
+into the frame arena. The shared renderer creates one GPU instance buffer for
+the ordered batches and retains frame textures until submission completes. Its
+glyph atlas uploads only dirty regions and does not allocate a full-window CPU
+text bitmap. Debug builds print the frame arena's high-water mark, reset count,
+and allocation-failure count at shutdown.
 
 Each import or export task owns a private growing arena and never reads the
 mutable UI or application arrays after submission. The task queue passes each
@@ -514,8 +519,8 @@ and initially commit 64 KiB.
 
 Install Odin and ensure `odin` is on `PATH`. Clone the sibling repositories
 listed in [`dependencies.lock`](dependencies.lock) next to this repository.
-The build imports the match sorter, Flash, command palette, UI components, and
-task queue as named Odin collections.
+The build imports the match sorter, Flash, command palette, UI components,
+ordered UI framework, and task queue as named Odin collections.
 
 [`dependencies.lock`](dependencies.lock) records each sibling repository URL
 and tested commit. Every build rejects a checkout with another origin, commit,
@@ -545,6 +550,10 @@ Other build modes use separate output directories:
 ./build.sh asan     # AddressSanitizer
 ./build.sh release  # optimized production build
 ```
+
+Debug and ASan builds compile Metal source at runtime when the optional shader
+compiler is unavailable. Release builds require a bundled `ui.metallib`; use
+`xcodebuild -downloadComponent MetalToolchain` to install its compiler.
 
 The legacy scripted import form remains available and returns JSON:
 
@@ -685,7 +694,9 @@ trace, and best-effort GPU capture under
 `build/ui-test-support/app-support/ui-runs/`. The app keeps the newest 20
 bundles. The render trace records encoder creation, command-buffer completion,
 and Metal failure text. The visual command writes the same bundle
-intentionally.
+intentionally. The compatibility-named `overlay.png` contains the complete
+ordered framework stream because the renderer no longer has a separate overlay
+pass.
 
 `testdata/ui/playback-fixture.mp4` is a generated one-second test asset. It
 contains 320 by 180 H.264 video and AAC audio. FFmpeg 8.0.1 generated it from

@@ -27,6 +27,7 @@ odin test "$ROOT/src" \
   -collection:command_palette="$ROOT/../hw_odin_ui_commandPalette" \
   -collection:components="$ROOT/../hw_odin_ui_components" \
   -collection:task_queue="$ROOT/../hw_odin_concurrency_taskQueue" \
+  -collection:ui_framework="$ROOT/../hw_odin_ui_framework" \
   -extra-linker-flags:"$PITCH_CAPTURE_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics -framework ImageIO"
 
 NORMALIZED_CLIP="$TEST_SUPPORT/normalized-clip.mp4"

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "ordered-video-render",
+  "mutation": "persistent",
+  "setup": {
+    "workflow": "dancing",
+    "mode": "play",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "steps": [
+    {"op": "activate", "control": "select clip ui-test-clip"},
+    {"op": "wait", "condition": {"kind": "surface", "field": "media.loaded", "operator": "eq", "value": true}, "timeout_ms": 1000},
+    {"op": "wait", "condition": {"kind": "surface", "field": "video.frame_ready", "operator": "eq", "value": true}, "timeout_ms": 500},
+    {"op": "capture", "name": "ordered-video"}
+  ]
+}

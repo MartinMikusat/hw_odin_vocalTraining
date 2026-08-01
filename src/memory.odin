@@ -14,9 +14,7 @@ Arena_Stats :: struct {
 
 Memory_State :: struct {
 	frame: mem_virtual.Arena,
-	redraw: mem_virtual.Arena,
 	frame_stats: Arena_Stats,
-	redraw_stats: Arena_Stats,
 	initialized: bool,
 }
 
@@ -33,13 +31,7 @@ memory_init :: proc() -> bool {
 		return false
 	}
 	memory.frame.default_commit_size = 64*mem.Kilobyte
-	if err := mem_virtual.arena_init_static(&memory.redraw, 512*mem.Megabyte, mem.Megabyte); err != nil {
-		mem_virtual.arena_destroy(&memory.frame)
-		return false
-	}
-	memory.redraw.default_commit_size = mem.Megabyte
 	memory.frame_stats.name = "frame"
-	memory.redraw_stats.name = "redraw"
 	memory.initialized = true
 	return true
 }
@@ -57,12 +49,9 @@ arena_note_failure :: proc(stats: ^Arena_Stats) {
 memory_destroy :: proc() {
 	if !memory.initialized { return }
 	memory.frame_stats.high_water = max(memory.frame_stats.high_water, memory.frame.total_used)
-	memory.redraw_stats.high_water = max(memory.redraw_stats.high_water, memory.redraw.total_used)
 	when ODIN_DEBUG {
 		fmt.eprintf("[arena] %s high-water=%d resets=%d failures=%d\n", memory.frame_stats.name, memory.frame_stats.high_water, memory.frame_stats.reset_count, memory.frame_stats.allocation_failures)
-		fmt.eprintf("[arena] %s high-water=%d resets=%d failures=%d\n", memory.redraw_stats.name, memory.redraw_stats.high_water, memory.redraw_stats.reset_count, memory.redraw_stats.allocation_failures)
 	}
-	mem_virtual.arena_destroy(&memory.redraw)
 	mem_virtual.arena_destroy(&memory.frame)
 	memory = {}
 }

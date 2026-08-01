@@ -444,7 +444,16 @@ ui_render_capture_into :: proc(
 	trace := &ui_render_trace_state.trace
 	trace.encoder_created = encoded.encoder_created
 	capture_failure := ""
+	overlay_target: Id
 	if encoded.encoder_created {
+		overlay_target = encode_ordered_stream_to_texture(
+			command_buffer,
+			uint(pixel_width),
+			uint(pixel_height),
+		)
+		if overlay_target == nil {
+			capture_failure = "The ordered UI overlay could not be encoded"
+		}
 		msg_void(command_buffer, sel_registerName("commit"))
 		msg_void(command_buffer, sel_registerName("waitUntilCompleted"))
 		status := msg_uint(command_buffer, sel_registerName("status"))
@@ -481,9 +490,10 @@ ui_render_capture_into :: proc(
 	if capture_started {
 		msg_void(capture_manager, sel_registerName("stopCapture"))
 	}
-	if !encoded.overlay_uploaded && len(capture_failure) == 0 {
-		capture_failure = "The text overlay could not be uploaded"
+	if !encoded.ordered_frame_ready && len(capture_failure) == 0 {
+		capture_failure = "The ordered UI overlay could not be built"
 	}
+	defer if overlay_target != nil {msg_void(overlay_target, sel_registerName("release"))}
 
 	frame_pixels, frame_read := ui_render_capture_read_texture(
 		target,
@@ -503,7 +513,7 @@ ui_render_capture_into :: proc(
 		}
 	}
 	overlay_pixels, overlay_read := ui_render_capture_read_texture(
-		ui.text_texture,
+		overlay_target,
 		pixel_width,
 		pixel_height,
 		context.temp_allocator,
@@ -516,7 +526,7 @@ ui_render_capture_into :: proc(
 			pixel_height,
 	   ) {
 		if len(capture_failure) == 0 {
-			capture_failure = "Unable to write the text overlay PNG"
+			capture_failure = "Unable to write the ordered UI overlay PNG"
 		}
 	}
 	trace.overlay_revision = ui.overlay_revision

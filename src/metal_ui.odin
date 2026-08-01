@@ -15,6 +15,9 @@ import command_palette "command_palette:."
 import text_input "components:text_input"
 import flash "flash:."
 import match_sorter "match_sorter:."
+import framework_coretext "ui_framework:coretext"
+import framework_draw "ui_framework:draw"
+import framework_metal "ui_framework:metal"
 
 foreign import avfaudio "system:AVFAudio.framework"
 foreign avfaudio {
@@ -32,7 +35,6 @@ foreign core_graphics {
 	CGColorSpaceRelease :: proc "c" (space: rawptr) ---
 	CGBitmapContextCreate :: proc "c" (data: rawptr, width, height, bits_per_component, bytes_per_row: uint, space: rawptr, bitmap_info: u32) -> rawptr ---
 	CGContextRelease :: proc "c" (ctx: rawptr) ---
-	CGContextClearRect :: proc "c" (ctx: rawptr, rect: Rect) ---
 	CGContextFillRect :: proc "c" (ctx: rawptr, rect: Rect) ---
 	CGContextSetRGBFillColor :: proc "c" (ctx: rawptr, red, green, blue, alpha: f64) ---
 	CGContextSetRGBStrokeColor :: proc "c" (ctx: rawptr, red, green, blue, alpha: f64) ---
@@ -68,6 +70,7 @@ foreign core_text {
 	kCTFontAttributeName: rawptr
 	kCTForegroundColorFromContextAttributeName: rawptr
 	kCTLigatureAttributeName: rawptr
+	kCTKernAttributeName: rawptr
 }
 
 foreign import core_foundation "system:CoreFoundation.framework"
@@ -101,6 +104,27 @@ UI_Focus :: enum {
 UI_Mode :: enum {
 	Create,
 	Play,
+}
+
+UI_Theme :: enum {
+	HW_Light,
+	HW_Dark,
+}
+
+ui_theme_is_dark :: proc(theme: UI_Theme) -> bool {
+	#partial switch theme {
+	case .HW_Dark:
+		return true
+	}
+	return false
+}
+
+ui_theme_name :: proc(theme: UI_Theme) -> string {
+	switch theme {
+	case .HW_Light: return "HW Light"
+	case .HW_Dark: return "HW Dark"
+	}
+	return "HW Dark"
 }
 
 Source_Paste_Result :: enum {
@@ -153,11 +177,6 @@ UI_State :: struct {
 	layer:              Id,
 	device:             Id,
 	queue:              Id,
-	solid_pipeline:     Id,
-	texture_pipeline:   Id,
-	text_texture:       Id,
-	text_width:         uint,
-	text_height:        uint,
 	texture_cache:      rawptr,
 	video_output:       Id,
 	audio_engine:       Id,
@@ -186,7 +205,7 @@ UI_State :: struct {
 	workflow:           Workflow_Kind,
 	number_prefix:      int,
 	number_prefix_deadline_ms: i64,
-	dark_theme:         bool,
+	theme:              UI_Theme,
 	flash_leader:       Video_Clips_Shortcut,
 	settings_search:    command_palette.State,
 	settings_open:      bool,
@@ -303,6 +322,22 @@ CF_Range :: struct {
 }
 
 SMALL_FONT_SIZE :: 10.5
+
+Text_Weight :: enum {
+	Normal,
+	Bold,
+}
+
+Text_Style :: struct {
+	scale: f64,
+	weight: Text_Weight,
+	tracking: f64,
+}
+
+TEXT_STYLE_BODY :: Text_Style{1.0, .Normal, -0.45}
+TEXT_STYLE_LABEL :: Text_Style{0.7, .Normal, 0}
+TEXT_STYLE_HEADING :: Text_Style{2.0, .Bold, -0.7}
+
 APP_HEADER_HEIGHT :: 38.0
 UI_COLOR_SAND_32 :: [4]f32{0.882353, 0.850980, 0.788235, 1}
 UI_COLOR_STONE_32 :: [4]f32{0.682353, 0.576471, 0.447059, 1}
@@ -323,12 +358,14 @@ UI_COLOR_BASALT_64 :: [4]f64{0.129412, 0.180392, 0.250980, 1}
 UI_COLOR_DANCING_LIGHT_64 :: [4]f64{0.211765, 0.317647, 0.435294, 1}
 UI_COLOR_DANCING_DARK_64 :: [4]f64{0.470588, 0.588235, 0.701961, 1}
 
-system_monospaced_font :: proc(size: f64) -> rawptr {
+system_monospaced_font :: proc(size: f64, weight := Text_Weight.Normal) -> rawptr {
+	native_weight := 0.0
+	if weight == .Bold {native_weight = 0.4}
 	font := msg_id_f64_f64(
 		objc_getClass("NSFont"),
 		sel_registerName("monospacedSystemFontOfSize:weight:"),
 		size,
-		0,
+		native_weight,
 	)
 	if font == nil {return nil}
 	return CFRetain(font)
@@ -341,43 +378,49 @@ UI_Theme_Colors :: struct {
 	ink, bright, muted, dim: [4]f64,
 }
 
-ui_theme_colors :: proc(dark_theme := ui.dark_theme) -> UI_Theme_Colors {
-	if dark_theme {
-		return {
-			chassis = {0.040, 0.043, 0.041, 1},
-			header = {0.032, 0.034, 0.033, 1},
-			panel = {0.055, 0.059, 0.056, 1},
-			panel_alt = {0.067, 0.071, 0.067, 1},
-			field = {0.067, 0.072, 0.068, 1},
-			border = {0.218, 0.225, 0.210, 1},
-			rule = {0.125, 0.132, 0.123, 1},
-			row = {0.060, 0.064, 0.061, 0.96},
-			row_hover = {0.085, 0.091, 0.086, 1},
-			backdrop = {0.008, 0.009, 0.009, 0.80},
-			modal = {0.055, 0.059, 0.056, 1},
-			ink = {0.89, 0.88, 0.82, 1},
-			bright = {0.97, 0.95, 0.88, 1},
-			muted = {0.47, 0.49, 0.46, 1},
-			dim = {0.31, 0.33, 0.31, 1},
-		}
-	}
+ui_theme_neutrals :: proc(
+	canvas, header, surface, raised, field, text, muted: [4]f64,
+	overlay: [4]f64,
+) -> UI_Theme_Colors {
+	row := surface
+	row[3] = 0.96
 	return {
-		chassis = {0.80, 0.78, 0.72, 1},
-		header = {0.91, 0.89, 0.82, 1},
-		panel = {0.88, 0.86, 0.79, 1},
-		panel_alt = {0.85, 0.83, 0.76, 1},
-		field = {0.83, 0.81, 0.74, 1},
-		border = {0.27, 0.26, 0.28, 1},
-		rule = {0.76, 0.73, 0.66, 1},
-		row = {0.88, 0.86, 0.79, 0.96},
-		row_hover = {0.80, 0.78, 0.72, 1},
-		backdrop = {0.15, 0.145, 0.16, 0.80},
-		modal = {0.91, 0.89, 0.82, 1},
-		ink = {0.15, 0.145, 0.16, 1},
-		bright = {0.15, 0.145, 0.16, 1},
-		muted = {0.48, 0.46, 0.42, 1},
-		dim = {0.62, 0.60, 0.55, 1},
+		chassis = canvas,
+		header = header,
+		panel = surface,
+		panel_alt = raised,
+		field = field,
+		border = muted,
+		rule = raised,
+		row = row,
+		row_hover = canvas,
+		backdrop = overlay,
+		modal = header,
+		ink = text,
+		bright = text,
+		muted = muted,
+		dim = muted,
 	}
+}
+
+ui_theme_colors :: proc(theme := ui.theme) -> UI_Theme_Colors {
+	switch theme {
+	case .HW_Light:
+		return ui_theme_neutrals(
+			{0.800000, 0.780392, 0.721569, 1}, {0.909804, 0.890196, 0.819608, 1},
+			{0.878431, 0.858824, 0.788235, 1}, {0.850980, 0.831373, 0.760784, 1},
+			{0.831373, 0.811765, 0.741176, 1}, {0.149020, 0.145098, 0.156863, 1},
+			{0.478431, 0.458824, 0.419608, 1}, {0.019608, 0.023529, 0.019608, 0.80},
+		)
+	case .HW_Dark:
+		return ui_theme_neutrals(
+			{0.039216, 0.043137, 0.039216, 1}, {0.031373, 0.035294, 0.031373, 1},
+			{0.054902, 0.058824, 0.054902, 1}, {0.066667, 0.070588, 0.066667, 1},
+			{0.066667, 0.070588, 0.066667, 1}, {0.968627, 0.949020, 0.878431, 1},
+			{0.470588, 0.490196, 0.458824, 1}, {0.019608, 0.023529, 0.019608, 0.80},
+		)
+	}
+	return ui_theme_colors(.HW_Dark)
 }
 
 workflow_accent_color :: proc(
@@ -599,6 +642,55 @@ flash_state: flash.State
 command_palette_state: command_palette.State
 command_palette_actions: [dynamic]UI_Action
 command_palette_config := command_palette.Config{}
+ordered_renderer: framework_metal.Renderer
+ordered_text: framework_coretext.Context
+ordered_draw: framework_draw.List
+ordered_ui_ready: bool
+ordered_overlay_active: bool
+
+ordered_rect :: proc(rect: UI_Rect) -> framework_draw.Rect {
+	return {f32(rect.x), f32(rect.y), f32(rect.w), f32(rect.h)}
+}
+
+ordered_color :: proc(color: [4]f64) -> framework_draw.Color {
+	return {f32(color[0]), f32(color[1]), f32(color[2]), f32(color[3])}
+}
+
+ordered_ui_initialize :: proc() -> bool {
+	framework_draw.list_init(&ordered_draw)
+	framework_coretext.context_init(&ordered_text)
+	allow_runtime_fallback := false
+	when ODIN_DEBUG {allow_runtime_fallback = true}
+	resource_path := ""
+	bundle := msg_id(objc_getClass("NSBundle"), sel_registerName("mainBundle"))
+	if bundle != nil {
+		resources := msg_id(bundle, sel_registerName("resourcePath"))
+		if resources != nil {
+			utf8 := msg_id(resources, sel_registerName("UTF8String"))
+			if utf8 != nil {resource_path = fmt.tprintf("%s/ui.metallib", string(cstring(utf8)))}
+		}
+	}
+	if !framework_metal.renderer_init(
+		&ordered_renderer,
+		rawptr(ui.device),
+		resource_path,
+		allow_runtime_fallback = allow_runtime_fallback,
+	) {
+		framework_coretext.context_destroy(&ordered_text)
+		framework_draw.list_destroy(&ordered_draw)
+		return false
+	}
+	ordered_ui_ready = true
+	return true
+}
+
+ordered_ui_destroy :: proc() {
+	if !ordered_ui_ready {return}
+	framework_coretext.context_destroy(&ordered_text)
+	framework_draw.list_destroy(&ordered_draw)
+	framework_metal.renderer_destroy(&ordered_renderer)
+	ordered_ui_ready = false
+}
 
 PALETTE_CONTEXT_CREATE       :: command_palette.Context_Mask(1 << 0)
 PALETTE_CONTEXT_PLAY         :: command_palette.Context_Mask(1 << 1)
@@ -771,11 +863,6 @@ msg_size :: proc(receiver: Id, selector: Sel) -> Size {
 msg_void_size :: proc(receiver: Id, selector: Sel, value: Size) {
 	p := transmute(proc "c" (_: Id, _: Sel, _: Size))send_address
 	p(receiver, selector, value)
-}
-
-msg_id_id_error :: proc(receiver: Id, selector: Sel, value, options: Id, error: ^Id) -> Id {
-	p := transmute(proc "c" (_: Id, _: Sel, _: Id, _: Id, _: ^Id) -> Id)send_address
-	return p(receiver, selector, value, options, error)
 }
 
 msg_id_id_error_2 :: proc(receiver: Id, selector: Sel, value: Id, error: ^Id) -> Id {
@@ -3939,25 +4026,11 @@ push_border :: proc(vertices: ^[dynamic]Solid_Vertex, rect: UI_Rect, color: [4]f
 	push_rect(vertices, UI_Rect{rect.x + rect.w - 1, rect.y, 1, rect.h}, color)
 }
 
-texture_rect_vertices :: proc(
-	rect: UI_Rect,
-	color: [4]f32,
-	mirror_x := false,
-) -> [6]Texture_Vertex {
-	x0 := f32(rect.x / ui.width * 2 - 1)
-	x1 := f32((rect.x + rect.w) / ui.width * 2 - 1)
-	y0 := f32(rect.y / ui.height * 2 - 1)
-	y1 := f32((rect.y + rect.h) / ui.height * 2 - 1)
-	u0, u1 := f32(0), f32(1)
-	if mirror_x {u0, u1 = u1, u0}
-	v0 := Texture_Vertex{x0, y0, u0, 1, color[0], color[1], color[2], color[3]}
-	v1 := Texture_Vertex{x1, y0, u1, 1, color[0], color[1], color[2], color[3]}
-	v2 := Texture_Vertex{x1, y1, u1, 0, color[0], color[1], color[2], color[3]}
-	v3 := Texture_Vertex{x0, y1, u0, 0, color[0], color[1], color[2], color[3]}
-	return [6]Texture_Vertex{v0, v1, v2, v0, v2, v3}
-}
-
-make_text_run :: proc(font: rawptr, text: string) -> Text_Run {
+make_text_run :: proc(
+	font: rawptr,
+	text: string,
+	tracking := TEXT_STYLE_BODY.tracking,
+) -> Text_Run {
 	run: Text_Run
 	if len(text) == 0 {return run}
 	assert_foreign(font, "make_text_run requires a valid CTFont")
@@ -3983,6 +4056,14 @@ make_text_run :: proc(font: rawptr, text: string) -> Text_Run {
 		CFAttributedStringSetAttribute(attributed, range, kCTLigatureAttributeName, ligature_value)
 		CFRelease(ligature_value)
 	}
+	if tracking != 0 {
+		tracking_value := tracking * ui.scale
+		tracking_number := CFNumberCreate(nil, 13, &tracking_value)
+		if tracking_number != nil {
+			CFAttributedStringSetAttribute(attributed, range, kCTKernAttributeName, tracking_number)
+			CFRelease(tracking_number)
+		}
+	}
 	run.line = foreign_created(
 		CTLineCreateWithAttributedString(attributed),
 		"CTLine",
@@ -3999,14 +4080,19 @@ delete_text_run :: proc(run: ^Text_Run) {
 	run^ = {}
 }
 
-truncated_text_run :: proc(run: Text_Run, font: rawptr, max_width: f64) -> Text_Run {
+truncated_text_run :: proc(
+	run: Text_Run,
+	font: rawptr,
+	max_width: f64,
+	tracking := TEXT_STYLE_BODY.tracking,
+) -> Text_Run {
 	if run.line == nil {return {}}
 	if run.advance <= max_width {
 		result := run
 		result.line = foreign_retain(run.line, "CTLine", "truncated_text_run")
 		return result
 	}
-	token := make_text_run(font, "…")
+	token := make_text_run(font, "…", tracking)
 	defer delete_text_run(&token)
 	if token.line == nil || token.advance > max_width {return {}}
 	truncated: Text_Run
@@ -4067,6 +4153,16 @@ draw_text_run :: proc(ctx: rawptr, run: Text_Run, origin: Point, color: [4]f64) 
 	assert_foreign(ctx, "draw_text_run requires a valid CGContext")
 	assert_foreign(run.line, "draw_text_run requires a valid CTLine")
 	trace_foreign_lifetime("draw", "CTLine", run.line, "draw_text_run")
+	if ordered_overlay_active {
+		framework_coretext.emit_native_line(
+			&ordered_text,
+			&ordered_draw,
+			run.line,
+			{f32(origin.x/ui.scale), f32(origin.y/ui.scale)},
+			ordered_color(color),
+		)
+		return
+	}
 	CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], color[3])
 	CGContextSetTextPosition(ctx, origin.x, origin.y)
 	CTLineDraw(run.line, ctx)
@@ -4080,18 +4176,26 @@ draw_text_in_rect :: proc(
 	color: [4]f64,
 	inset: f64 = 0,
 	clip := true,
+	tracking := TEXT_STYLE_BODY.tracking,
 ) {
 	if ctx == nil || rect.w <= 0 || rect.h <= 0 || len(text) == 0 {return}
 	ui_render_trace_record_text(text, rect, color)
-	run := make_text_run(font, text)
+	run := make_text_run(font, text, tracking)
 	defer delete_text_run(&run)
 	available_width := max(0, (rect.w - inset * 2) * ui.scale)
 	draw_run := run
 	truncated: Text_Run
 	if run.advance > available_width {
-		truncated = truncated_text_run(run, font, available_width)
+		truncated = truncated_text_run(run, font, available_width, tracking)
 		if truncated.line == nil {return}
 		draw_run = truncated
+	}
+	if ordered_overlay_active {
+		if clip {framework_draw.push_clip(&ordered_draw, ordered_rect(rect))}
+		draw_text_run(ctx, draw_run, text_origin(rect, draw_run, horizontal, vertical, inset), color)
+		if clip {framework_draw.pop_clip(&ordered_draw)}
+		delete_text_run(&truncated)
+		return
 	}
 	if clip {
 		CGContextSaveGState(ctx)
@@ -4108,6 +4212,34 @@ draw_text_in_rect :: proc(
 	delete_text_run(&truncated)
 }
 
+draw_styled_text_in_rect :: proc(
+	ctx: rawptr,
+	style: Text_Style,
+	text: string,
+	rect: UI_Rect,
+	horizontal, vertical: Text_Align,
+	color: [4]f64,
+	inset: f64 = 0,
+) {
+	font := system_monospaced_font(
+		SMALL_FONT_SIZE * style.scale * ui.scale,
+		style.weight,
+	)
+	if font == nil {return}
+	defer foreign_release(font, "CTFont", "draw_styled_text_in_rect")
+	draw_text_in_rect(
+		ctx,
+		font,
+		text,
+		rect,
+		horizontal,
+		vertical,
+		color,
+		inset,
+		tracking = style.tracking,
+	)
+}
+
 draw_header_identity :: proc(
 	ctx, font: rawptr,
 	rect: UI_Rect,
@@ -4121,15 +4253,20 @@ draw_header_identity :: proc(
 	mode_run := make_text_run(font, mode_text)
 	defer delete_text_run(&mode_run)
 
-	CGContextSaveGState(ctx)
-	defer CGContextRestoreGState(ctx)
-	CGContextClipToRect(
-		ctx,
-		Rect{
-			Point{rect.x * ui.scale, rect.y * ui.scale},
-			Size{rect.w * ui.scale, rect.h * ui.scale},
-		},
-	)
+	if ordered_overlay_active {
+		framework_draw.push_clip(&ordered_draw, ordered_rect(rect))
+		defer framework_draw.pop_clip(&ordered_draw)
+	} else {
+		CGContextSaveGState(ctx)
+		defer CGContextRestoreGState(ctx)
+		CGContextClipToRect(
+			ctx,
+			Rect{
+				Point{rect.x * ui.scale, rect.y * ui.scale},
+				Size{rect.w * ui.scale, rect.h * ui.scale},
+			},
+		)
+	}
 	draw_text_run(
 		ctx,
 		name_run,
@@ -4202,8 +4339,12 @@ draw_editable_text_field :: proc(
 	}
 	origin := text_origin(rect, run, .Start, .Center, inset)
 	origin.x -= ui.scroll_x * ui.scale
-	CGContextSaveGState(ctx)
-	CGContextClipToRect(ctx, Rect{Point{rect.x * ui.scale, rect.y * ui.scale}, Size{rect.w * ui.scale, rect.h * ui.scale}})
+	if ordered_overlay_active {
+		framework_draw.push_clip(&ordered_draw, ordered_rect(rect))
+	} else {
+		CGContextSaveGState(ctx)
+		CGContextClipToRect(ctx, Rect{Point{rect.x * ui.scale, rect.y * ui.scale}, Size{rect.w * ui.scale, rect.h * ui.scale}})
+	}
 	selection_start := min(ui.selection_anchor_byte, ui.caret_byte_offset)
 	selection_end := max(ui.selection_anchor_byte, ui.caret_byte_offset)
 	line_selection_start := min(max(selection_start, base_byte_offset), logical_end)
@@ -4248,7 +4389,11 @@ draw_editable_text_field :: proc(
 			caret_color,
 		)
 	}
-	CGContextRestoreGState(ctx)
+	if ordered_overlay_active {
+		framework_draw.pop_clip(&ordered_draw)
+	} else {
+		CGContextRestoreGState(ctx)
+	}
 }
 
 text_offset_at_point :: proc(
@@ -4329,12 +4474,17 @@ draw_timestamp_text_in_rect :: proc(
 	}
 	defer delete_text_run(&truncated)
 
-	CGContextSaveGState(ctx)
-	defer CGContextRestoreGState(ctx)
-	CGContextClipToRect(
-		ctx,
-		Rect{Point{rect.x * ui.scale, rect.y * ui.scale}, Size{rect.w * ui.scale, rect.h * ui.scale}},
-	)
+	if ordered_overlay_active {
+		framework_draw.push_clip(&ordered_draw, ordered_rect(rect))
+		defer framework_draw.pop_clip(&ordered_draw)
+	} else {
+		CGContextSaveGState(ctx)
+		defer CGContextRestoreGState(ctx)
+		CGContextClipToRect(
+			ctx,
+			Rect{Point{rect.x * ui.scale, rect.y * ui.scale}, Size{rect.w * ui.scale, rect.h * ui.scale}},
+		)
+	}
 	origin := text_origin(rect, draw_run, horizontal, vertical, inset)
 	ranges := timestamp_fade_ranges(text)
 	if ranges.count == 0 {
@@ -4353,13 +4503,29 @@ draw_timestamp_text_in_rect :: proc(
 		if normal_end > normal_start {
 			start_x := origin.x + CTLineGetOffsetForStringIndex(draw_run.line, normal_start, nil)
 			end_x := origin.x + CTLineGetOffsetForStringIndex(draw_run.line, normal_end, nil)
-			CGContextSaveGState(ctx)
-			CGContextClipToRect(
-				ctx,
-				Rect{Point{start_x, origin.y - draw_run.descent}, Size{max(0, end_x - start_x), draw_run.ascent + draw_run.descent + draw_run.leading}},
-			)
+			if ordered_overlay_active {
+				framework_draw.push_clip(
+					&ordered_draw,
+					ordered_rect({
+						start_x/ui.scale,
+						(origin.y-draw_run.descent)/ui.scale,
+						max(0, end_x-start_x)/ui.scale,
+						(draw_run.ascent+draw_run.descent+draw_run.leading)/ui.scale,
+					}),
+				)
+			} else {
+				CGContextSaveGState(ctx)
+				CGContextClipToRect(
+					ctx,
+					Rect{Point{start_x, origin.y - draw_run.descent}, Size{max(0, end_x - start_x), draw_run.ascent + draw_run.descent + draw_run.leading}},
+				)
+			}
 			draw_text_run(ctx, draw_run, origin, color)
-			CGContextRestoreGState(ctx)
+			if ordered_overlay_active {
+				framework_draw.pop_clip(&ordered_draw)
+			} else {
+				CGContextRestoreGState(ctx)
+			}
 		}
 		if range_index < ranges.count {
 			normal_start = ranges.values[range_index].location + ranges.values[range_index].length
@@ -4369,6 +4535,10 @@ draw_timestamp_text_in_rect :: proc(
 
 fill_overlay_rect :: proc(ctx: rawptr, rect: UI_Rect, color: [4]f64) {
 	ui_render_trace_record_overlay_rect(rect, color)
+	if ordered_overlay_active {
+		framework_draw.solid(&ordered_draw, ordered_rect(rect), ordered_color(color))
+		return
+	}
 	CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], color[3])
 	CGContextFillRect(
 		ctx,
@@ -4428,6 +4598,49 @@ window_icon_maximize_points :: proc() -> [12]Window_Icon_Point {
 	}
 }
 
+ordered_overlay_line :: proc(from, to: Point, color: [4]f64, thickness: f64) {
+	dx, dy := to.x-from.x, to.y-from.y
+	length := math.sqrt(dx*dx+dy*dy)
+	if length <= 0 {return}
+	angle := math.atan2(dy, dx)
+	framework_draw.push_transform(
+		&ordered_draw,
+		{
+			f32(math.cos(angle)),
+			f32(math.sin(angle)),
+			-f32(math.sin(angle)),
+			f32(math.cos(angle)),
+			f32(from.x),
+			f32(from.y),
+		},
+	)
+	framework_draw.solid(
+		&ordered_draw,
+		{0, -f32(thickness/2), f32(length), f32(thickness)},
+		ordered_color(color),
+		f32(thickness/2),
+	)
+	framework_draw.pop_transform(&ordered_draw)
+}
+
+ordered_cubic_lines :: proc(
+	start, control_1, control_2, end: Point,
+	color: [4]f64,
+	thickness: f64,
+) {
+	previous := start
+	for step in 1..=8 {
+		t := f64(step)/8
+		u := 1-t
+		next := Point{
+			u*u*u*start.x+3*u*u*t*control_1.x+3*u*t*t*control_2.x+t*t*t*end.x,
+			u*u*u*start.y+3*u*u*t*control_1.y+3*u*t*t*control_2.y+t*t*t*end.y,
+		}
+		ordered_overlay_line(previous, next, color, thickness)
+		previous = next
+	}
+}
+
 player_fullscreen_expand_points :: proc() -> [20]Window_Icon_Point {
 	return {
 		{{9, 9}, true},
@@ -4484,6 +4697,28 @@ draw_window_icon_path :: proc(
 	color: [4]f64,
 	points: []Window_Icon_Point,
 ) {
+	if ordered_overlay_active {
+		framework_draw.push_clip(&ordered_draw, ordered_rect(rect))
+		defer framework_draw.pop_clip(&ordered_draw)
+		previous: Point
+		has_previous := false
+		thickness := 1.5*min(rect.w, rect.h)/24
+		for command in points {
+			point := Point{
+				rect.x+command.point.x*rect.w/24,
+				rect.y+(24-command.point.y)*rect.h/24,
+			}
+			if command.move {
+				previous = point
+				has_previous = true
+				continue
+			}
+			if has_previous {ordered_overlay_line(previous, point, color, thickness)}
+			previous = point
+			has_previous = true
+		}
+		return
+	}
 	CGContextSaveGState(ctx)
 	defer CGContextRestoreGState(ctx)
 	CGContextClipToRect(
@@ -4541,7 +4776,77 @@ settings_icon_point :: proc(rect: UI_Rect, x, y: f64) -> Point {
 	}
 }
 
+settings_icon_logical_point :: proc(rect: UI_Rect, x, y: f64) -> Point {
+	return {rect.x+x*rect.w/24, rect.y+(24-y)*rect.h/24}
+}
+
+draw_ordered_settings_icon :: proc(rect: UI_Rect, color: [4]f64) {
+	framework_draw.push_clip(&ordered_draw, ordered_rect(rect))
+	defer framework_draw.pop_clip(&ordered_draw)
+	thickness := 1.5*min(rect.w, rect.h)/24
+	start := settings_icon_logical_point(rect, 12, 15)
+	c1 := settings_icon_logical_point(rect, 13.6569, 15)
+	c2 := settings_icon_logical_point(rect, 15, 13.6569)
+	end := settings_icon_logical_point(rect, 15, 12)
+	ordered_cubic_lines(start, c1, c2, end, color, thickness)
+	start = end
+	c1 = settings_icon_logical_point(rect, 15, 10.3431)
+	c2 = settings_icon_logical_point(rect, 13.6569, 9)
+	end = settings_icon_logical_point(rect, 12, 9)
+	ordered_cubic_lines(start, c1, c2, end, color, thickness)
+	start = end
+	c1 = settings_icon_logical_point(rect, 10.3431, 9)
+	c2 = settings_icon_logical_point(rect, 9, 10.3431)
+	end = settings_icon_logical_point(rect, 9, 12)
+	ordered_cubic_lines(start, c1, c2, end, color, thickness)
+	start = end
+	c1 = settings_icon_logical_point(rect, 9, 13.6569)
+	c2 = settings_icon_logical_point(rect, 10.3431, 15)
+	end = settings_icon_logical_point(rect, 12, 15)
+	ordered_cubic_lines(start, c1, c2, end, color, thickness)
+
+	gear := [30]Point{
+		{19.6224, 10.3954}, {18.5247, 7.7448}, {20, 6}, {18, 4},
+		{16.2647, 5.48295}, {13.5578, 4.36974}, {12.9353, 2}, {10.981, 2},
+		{10.3491, 4.40113}, {7.70441, 5.51596}, {6, 4}, {4, 6},
+		{5.45337, 7.78885}, {4.3725, 10.4463}, {2, 11}, {2, 13},
+		{4.40111, 13.6555}, {5.51575, 16.2997}, {4, 18}, {6, 20},
+		{7.79116, 18.5403}, {10.397, 19.6123}, {11, 22}, {13, 22},
+		{13.6045, 19.6132}, {16.2551, 18.5155}, {18.5159, 16.2494},
+		{19.6139, 13.598}, {21.9999, 12.9772}, {22, 11},
+	}
+	previous := settings_icon_logical_point(rect, gear[0].x, gear[0].y)
+	for index in 1..<26 {
+		next := settings_icon_logical_point(rect, gear[index].x, gear[index].y)
+		ordered_overlay_line(previous, next, color, thickness)
+		previous = next
+	}
+	c1 = settings_icon_logical_point(rect, 16.6969, 18.8313)
+	c2 = settings_icon_logical_point(rect, 18, 20)
+	end = settings_icon_logical_point(rect, 18, 20)
+	ordered_cubic_lines(previous, c1, c2, end, color, thickness)
+	previous = end
+	end = settings_icon_logical_point(rect, 20, 18)
+	ordered_overlay_line(previous, end, color, thickness)
+	previous = end
+	for index in 26..<len(gear) {
+		next := settings_icon_logical_point(rect, gear[index].x, gear[index].y)
+		ordered_overlay_line(previous, next, color, thickness)
+		previous = next
+	}
+	ordered_overlay_line(
+		previous,
+		settings_icon_logical_point(rect, gear[0].x, gear[0].y),
+		color,
+		thickness,
+	)
+}
+
 draw_settings_icon :: proc(ctx: rawptr, rect: UI_Rect, color: [4]f64) {
+	if ordered_overlay_active {
+		draw_ordered_settings_icon(rect, color)
+		return
+	}
 	CGContextSaveGState(ctx)
 	defer CGContextRestoreGState(ctx)
 	CGContextClipToRect(
@@ -4646,7 +4951,7 @@ draw_window_controls :: proc(ctx: rawptr) {
 		UI_COLOR_STONE_64,
 		UI_COLOR_GUM_64,
 	}
-	if !ui.dark_theme {
+	if !ui_theme_is_dark(ui.theme) {
 		colors = {
 			UI_COLOR_OCHRE_64,
 			UI_COLOR_GUM_64,
@@ -4759,14 +5064,18 @@ draw_command_palette :: proc(
 		accent,
 		12,
 	)
-	CGContextSaveGState(ctx)
-	CGContextClipToRect(
-		ctx,
-		Rect{
-			Point{content.x * ui.scale, content.y * ui.scale},
-			Size{content.w * ui.scale, content.h * ui.scale},
-		},
-	)
+	if ordered_overlay_active {
+		framework_draw.push_clip(&ordered_draw, ordered_rect(content))
+	} else {
+		CGContextSaveGState(ctx)
+		CGContextClipToRect(
+			ctx,
+			Rect{
+				Point{content.x * ui.scale, content.y * ui.scale},
+				Size{content.w * ui.scale, content.h * ui.scale},
+			},
+		)
+	}
 	results := command_palette.visible_results(&command_palette_state)
 	selected := command_palette.selected_index(&command_palette_state)
 	for result, index in results {
@@ -4817,7 +5126,11 @@ draw_command_palette :: proc(
 			result.available ? cyan : dim,
 		)
 	}
-	CGContextRestoreGState(ctx)
+	if ordered_overlay_active {
+		framework_draw.pop_clip(&ordered_draw)
+	} else {
+		CGContextRestoreGState(ctx)
+	}
 	if len(results) == 0 {
 		draw_text_in_rect(ctx, font, "NO MATCHING COMMANDS OR DATA", content, .Center, .Center, muted)
 	}
@@ -4861,10 +5174,10 @@ draw_discard_confirmation :: proc(
 	keep := discard_confirm_action_rect(0)
 	discard := discard_confirm_action_rect(1)
 	fill_overlay_rect(ctx, keep, theme.panel_alt)
-	fill_overlay_rect(ctx, discard, UI_COLOR_OCHRE_64)
+	fill_overlay_rect(ctx, discard, theme.panel_alt)
 	fill_overlay_border(ctx, discard, warning)
 	draw_text_in_rect(ctx, font, "1  KEEP EDITING", keep, .Center, .Center, bright)
-	draw_text_in_rect(ctx, font, "2  DISCARD CHANGES", discard, .Center, .Center, bright)
+	draw_text_in_rect(ctx, font, "2  DISCARD CHANGES", discard, .Center, .Center, warning)
 }
 
 draw_clip_rename :: proc(ctx, font: rawptr, bright, muted, dim, accent: [4]f64) {
@@ -4883,10 +5196,10 @@ draw_clip_rename :: proc(ctx, font: rawptr, bright, muted, dim, accent: [4]f64) 
 	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
 	fill_overlay_rect(ctx, header, theme.panel_alt)
-	draw_text_in_rect(ctx, font, "RENAME CLIP", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
-	draw_text_in_rect(ctx, font, "ORIGINAL NAME", UI_Rect{modal.x + 24, modal.y + modal.h - 96, modal.w - 48, 22}, .Start, .Center, muted)
+	draw_styled_text_in_rect(ctx, TEXT_STYLE_HEADING, "RENAME CLIP", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
+	draw_styled_text_in_rect(ctx, TEXT_STYLE_LABEL, "ORIGINAL NAME", UI_Rect{modal.x + 24, modal.y + modal.h - 96, modal.w - 48, 22}, .Start, .Center, muted)
 	draw_text_in_rect(ctx, font, clip.name, UI_Rect{modal.x + 24, modal.y + modal.h - 130, modal.w - 48, 28}, .Start, .Center, bright)
-	draw_text_in_rect(ctx, font, "NEW NAME", UI_Rect{input.x, input.y + input.h + 8, input.w, 22}, .Start, .Center, muted)
+	draw_styled_text_in_rect(ctx, TEXT_STYLE_LABEL, "NEW NAME", UI_Rect{input.x, input.y + input.h + 8, input.w, 22}, .Start, .Center, muted)
 	fill_overlay_rect(ctx, input, theme.field)
 	if ui.focus == .Clip_Rename {fill_overlay_border(ctx, input, accent)}
 	draw_editable_text_field(ctx, font, ui.clip_rename, "Enter a new clip name", input, .Clip_Rename, bright, dim, accent, 10)
@@ -4896,7 +5209,7 @@ draw_clip_rename :: proc(ctx, font: rawptr, bright, muted, dim, accent: [4]f64) 
 	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
 	confirm_control := find_ui_control_by_action(.Confirm_Clip_Rename)
 	confirm_enabled := confirm_control != nil && .Enabled in confirm_control.flags
-	confirm_color := confirm_enabled ? accent : theme.panel_alt
+	confirm_color := theme.panel_alt
 	if confirm_enabled && contains(confirm, ui.mouse) {confirm_color = theme.row_hover}
 	fill_overlay_rect(ctx, confirm, confirm_color)
 	if confirm_enabled {fill_overlay_border(ctx, confirm, accent)}
@@ -4907,8 +5220,7 @@ draw_clip_rename :: proc(ctx, font: rawptr, bright, muted, dim, accent: [4]f64) 
 		confirm,
 		.Center,
 		.Center,
-		confirm_enabled && contains(confirm, ui.mouse) ? accent :
-			(confirm_enabled ? theme.header : dim),
+		confirm_enabled ? accent : dim,
 	)
 }
 
@@ -4946,7 +5258,7 @@ draw_clip_metadata :: proc(
 	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
 	fill_overlay_rect(ctx, header, theme.panel_alt)
-	draw_text_in_rect(ctx, font, "CLIP METADATA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
+	draw_styled_text_in_rect(ctx, TEXT_STYLE_HEADING, "CLIP METADATA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
 	draw_text_in_rect(ctx, font, clip.name, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - 48, 28}, .Start, .Center, cyan)
 	clip_available := os.exists(clip.clip_path)
 	labels := [10]string{
@@ -4976,7 +5288,7 @@ draw_clip_metadata :: proc(
 	for label, row_index in labels {
 		row := clip_metadata_row_rect(modal, row_index)
 		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, theme.row)}
-		draw_text_in_rect(ctx, font, label, UI_Rect{row.x + 10, row.y, 128, row.h}, .Start, .Center, muted)
+		draw_styled_text_in_rect(ctx, TEXT_STYLE_LABEL, label, UI_Rect{row.x + 10, row.y, 128, row.h}, .Start, .Center, muted)
 		value_color := bright
 		if (row_index == 1 && source_index < 0) ||
 		   (row_index == 9 && !clip_available) {
@@ -4995,10 +5307,11 @@ draw_clip_metadata :: proc(
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
 	source_control := find_ui_control_by_action(.View_Clip_Source)
 	source_enabled := source_control != nil && .Enabled in source_control.flags
-	source_color := source_enabled ? UI_COLOR_FOREST_64 : theme.panel_alt
-	if source_enabled && contains(source_button, ui.mouse) {source_color = [4]f64{0.06, 0.24, 0.24, 1}}
+	source_color := theme.panel_alt
+	if source_enabled && contains(source_button, ui.mouse) {source_color = theme.row_hover}
 	fill_overlay_rect(ctx, source_button, source_color)
-	draw_text_in_rect(ctx, font, "VIEW SOURCE", source_button, .Center, .Center, source_enabled ? UI_COLOR_SAND_64 : dim)
+	if source_enabled {fill_overlay_border(ctx, source_button, cyan)}
+	draw_text_in_rect(ctx, font, "VIEW SOURCE", source_button, .Center, .Center, source_enabled ? cyan : dim)
 }
 
 draw_randomize_help :: proc(
@@ -5588,9 +5901,9 @@ draw_data_modal :: proc(
 		draw_text_in_rect(ctx, font, "02  CANCEL", cancel, .Center, .Center, muted)
 		confirm_control := find_ui_control_by_action(.Confirm_Library_Import)
 		confirm_enabled := confirm_control != nil && .Enabled in confirm_control.flags
-		confirm_color := confirm_enabled ? UI_COLOR_OCHRE_64 : theme.panel_alt
+		confirm_color := theme.panel_alt
 		if confirm_enabled && contains(confirm, ui.mouse) {
-			confirm_color = [4]f64{0.23, 0.083, 0.035, 1}
+			confirm_color = theme.row_hover
 		}
 		fill_overlay_rect(ctx, confirm, confirm_color)
 		if confirm_enabled {fill_overlay_border(ctx, confirm, warning)}
@@ -5601,7 +5914,7 @@ draw_data_modal :: proc(
 			confirm,
 			.Center,
 			.Center,
-			confirm_enabled ? UI_COLOR_SAND_64 : dim,
+			confirm_enabled ? warning : dim,
 		)
 		return
 	}
@@ -5782,10 +6095,10 @@ draw_library_recovery :: proc(
 		cancel := ui_control_rect(.Recovery_Cancel)
 		confirm := ui_control_rect(.Recovery_Confirm)
 		fill_overlay_rect(ctx, cancel, theme.panel_alt)
-		fill_overlay_rect(ctx, confirm, UI_COLOR_OCHRE_64)
+		fill_overlay_rect(ctx, confirm, theme.panel_alt)
 		fill_overlay_border(ctx, confirm, warning)
 		draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
-		draw_text_in_rect(ctx, font, "ACTIVATE RECOVERY", confirm, .Center, .Center, UI_COLOR_SAND_64)
+		draw_text_in_rect(ctx, font, "ACTIVATE RECOVERY", confirm, .Center, .Center, warning)
 		return
 	}
 
@@ -5886,10 +6199,10 @@ draw_backup_warning :: proc(
 	cancel := ui_control_rect(.Backup_Warning_Cancel)
 	confirm := ui_control_rect(.Backup_Warning_Continue)
 	fill_overlay_rect(ctx, cancel, theme.panel_alt)
-	fill_overlay_rect(ctx, confirm, UI_COLOR_OCHRE_64)
+	fill_overlay_rect(ctx, confirm, theme.panel_alt)
 	fill_overlay_border(ctx, confirm, warning)
 	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
-	draw_text_in_rect(ctx, font, "CONTINUE WITHOUT BACKUP", confirm, .Center, .Center, UI_COLOR_SAND_64)
+	draw_text_in_rect(ctx, font, "CONTINUE WITHOUT BACKUP", confirm, .Center, .Center, warning)
 }
 
 notification_kind_text :: proc(kind: Notification_Kind) -> string {
@@ -6097,11 +6410,12 @@ draw_notification_history :: proc(
 	action := ui_control_rect(.Activate_Notification_Action)
 	if action.w > 0 {
 		enabled := notification_action_available(selected)
-		action_color := enabled ? UI_COLOR_FOREST_64 : theme.panel_alt
+		action_color := theme.panel_alt
 		if enabled && contains(action, ui.mouse) {
-			action_color = [4]f64{0.045, 0.18, 0.18, 1}
+			action_color = theme.row_hover
 		}
 		fill_overlay_rect(ctx, action, action_color)
+		if enabled {fill_overlay_border(ctx, action, cyan)}
 		draw_text_in_rect(
 			ctx,
 			font,
@@ -6109,7 +6423,7 @@ draw_notification_history :: proc(
 			action,
 			.Center,
 			.Center,
-			enabled ? UI_COLOR_SAND_64 : dim,
+			enabled ? cyan : dim,
 		)
 	}
 }
@@ -6127,7 +6441,7 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
 	fill_overlay_rect(ctx, header, theme.panel_alt)
-	draw_text_in_rect(ctx, font, "SOURCE DETAILS / DOWNLOADED MEDIA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
+	draw_styled_text_in_rect(ctx, TEXT_STYLE_HEADING, "SOURCE DETAILS / DOWNLOADED MEDIA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
 	title_color := cyan
 	if !source.media_available {title_color = [4]f64{0.95, 0.16, 0.10, 1}}
 	draw_text_in_rect(ctx, font, source.title, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - (source.media_available ? 48 : 164), 28}, .Start, .Center, title_color)
@@ -6155,7 +6469,7 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	for label, row_index in labels {
 		row := source_details_row_rect(modal, row_index)
 		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, theme.row)}
-		draw_text_in_rect(ctx, font, label, UI_Rect{row.x + 10, row.y, 142, row.h}, .Start, .Center, muted)
+		draw_styled_text_in_rect(ctx, TEXT_STYLE_LABEL, label, UI_Rect{row.x + 10, row.y, 142, row.h}, .Start, .Center, muted)
 		value := values[row_index]
 		if len(value) == 0 {value = "UNAVAILABLE"}
 		value_rect := UI_Rect{row.x + 160, row.y, row.w - 170, row.h}
@@ -6175,12 +6489,11 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	refetch_color := theme.panel_alt
 	refetch_text_color := muted
 	if refetch_enabled {
-		refetch_color = [4]f64{0.91, 0.31, 0.075, 1}
-		refetch_text_color = [4]f64{0.08, 0.025, 0.01, 1}
-		if contains(refetch_button, ui.mouse) {refetch_color = [4]f64{1.0, 0.42, 0.10, 1}}
+		refetch_text_color = UI_COLOR_COFFEE_64
+		if contains(refetch_button, ui.mouse) {refetch_color = theme.row_hover}
 	}
 	fill_overlay_rect(ctx, refetch_button, refetch_color)
-	if refetch_enabled {fill_overlay_border(ctx, refetch_button, [4]f64{1.0, 0.45, 0.12, 1})}
+	if refetch_enabled {fill_overlay_border(ctx, refetch_button, UI_COLOR_COFFEE_64)}
 	draw_text_in_rect(ctx, font, "REFETCH / SELECT QUALITY", refetch_button, .Center, .Center, refetch_text_color)
 }
 
@@ -6195,7 +6508,9 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	rule := ui_color_32(theme.rule)
 	row_color := ui_color_32(theme.row)
 	row_hover := ui_color_32(theme.row_hover)
-	accent := ui_color_32(workflow_accent_color(ui.workflow, ui.dark_theme))
+	accent := ui_color_32(
+		workflow_accent_color(ui.workflow, ui_theme_is_dark(ui.theme)),
+	)
 	if ui.playback_fullscreen_active {
 		push_rect(vertices, UI_Rect{0, 0, ui.width, ui.height}, {0, 0, 0, 1})
 		return
@@ -6595,64 +6910,6 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		push_border(vertices, focus_rect, accent)
 		push_rect(vertices, UI_Rect{focus_rect.x, focus_rect.y, 3, focus_rect.h}, accent)
 	}
-	if ui.settings_open && !ui.shortcut_open {
-		push_rect(vertices, video_clips_settings_rect(), ui_color_32(theme.modal))
-		search := video_clips_settings_search_rect()
-		push_rect(vertices, search, field)
-		if ui.focus == .Settings_Search {
-			push_border(vertices, search, UI_COLOR_GUM_32)
-		}
-		push_rect(vertices, video_clips_settings_close_rect(), panel_alt)
-		categories := [2]Video_Clips_Settings_Category{.Styling, .Shortcuts}
-		for category, index in categories {
-			rect := video_clips_settings_category_rect(index)
-			color := panel_alt
-			if contains(rect, ui.mouse) {color = row_hover}
-			push_rect(vertices, rect, color)
-			if !video_clips_settings_search_active() &&
-			   category == ui.settings_category {
-				push_border(vertices, rect, UI_COLOR_GUM_32)
-				push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
-			}
-		}
-		for descriptor, index in video_clips_settings_result_descriptors() {
-			rect := video_clips_settings_result_rect(index)
-			color := panel_alt
-			if contains(rect, ui.mouse) {color = row_hover}
-			push_rect(vertices, rect, color)
-			if descriptor.action.kind == .Set_Theme &&
-			   (descriptor.action.value != 0) == ui.dark_theme {
-				push_border(vertices, rect, UI_COLOR_GUM_32)
-				push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
-			}
-		}
-	}
-	if ui.shortcut_open {
-		push_rect(
-			vertices,
-			video_clips_shortcut_modal_rect(),
-			ui_color_32(theme.modal),
-		)
-		record := video_clips_shortcut_record_rect()
-		push_rect(vertices, record, field)
-		if ui.shortcut_listening {
-			push_border(vertices, record, UI_COLOR_GUM_32)
-		}
-		for index in 0..<3 {
-			rect := video_clips_shortcut_action_rect(index)
-			color := panel_alt
-			if contains(rect, ui.mouse) {color = row_hover}
-			push_rect(vertices, rect, color)
-		}
-		if ui.shortcut_candidate_valid &&
-		   len(ui.shortcut_collision) == 0 {
-			push_border(
-				vertices,
-				video_clips_shortcut_action_rect(0),
-				accent,
-			)
-		}
-	}
 }
 
 draw_settings_overlays :: proc(
@@ -6664,6 +6921,36 @@ draw_settings_overlays :: proc(
 		fill_overlay_rect(ctx, {0, 0, ui.width, ui.height}, theme.backdrop)
 		modal := video_clips_settings_rect()
 		fill_overlay_rect(ctx, modal, theme.modal)
+		search := video_clips_settings_search_rect()
+		fill_overlay_rect(ctx, search, theme.field)
+		if ui.focus == .Settings_Search {
+			fill_overlay_border(ctx, search, UI_COLOR_GUM_64)
+		}
+		close := video_clips_settings_close_rect()
+		fill_overlay_rect(ctx, close, theme.panel_alt)
+		categories := [2]Video_Clips_Settings_Category{.Styling, .Shortcuts}
+		for category, index in categories {
+			rect := video_clips_settings_category_rect(index)
+			color := theme.panel_alt
+			if contains(rect, ui.mouse) {color = theme.row_hover}
+			fill_overlay_rect(ctx, rect, color)
+			if !video_clips_settings_search_active() &&
+			   category == ui.settings_category {
+				fill_overlay_border(ctx, rect, UI_COLOR_GUM_64)
+				fill_overlay_rect(ctx, left_accent_edge_rect(rect), UI_COLOR_GUM_64)
+			}
+		}
+		for descriptor, index in video_clips_settings_result_descriptors() {
+			rect := video_clips_settings_result_rect(index)
+			color := theme.panel_alt
+			if contains(rect, ui.mouse) {color = theme.row_hover}
+			fill_overlay_rect(ctx, rect, color)
+			if descriptor.action.kind == .Set_Theme &&
+			   UI_Theme(descriptor.action.value) == ui.theme {
+				fill_overlay_border(ctx, rect, UI_COLOR_GUM_64)
+				fill_overlay_rect(ctx, left_accent_edge_rect(rect), UI_COLOR_GUM_64)
+			}
+		}
 		draw_editable_text_field(
 			ctx,
 			font,
@@ -6676,14 +6963,12 @@ draw_settings_overlays :: proc(
 			cyan,
 		)
 		xmark := window_icon_xmark_points()
-		close := video_clips_settings_close_rect()
 		draw_window_icon_path(
 			ctx,
 			{close.x+5, close.y+8, 18, 18},
 			muted,
 			xmark[:],
 		)
-		categories := [2]Video_Clips_Settings_Category{.Styling, .Shortcuts}
 		for category, index in categories {
 			color := muted
 			if !video_clips_settings_search_active() &&
@@ -6719,7 +7004,7 @@ draw_settings_overlays :: proc(
 			value := ""
 			value_color := muted
 			if descriptor.action.kind == .Set_Theme &&
-			   (descriptor.action.value != 0) == ui.dark_theme {
+			   UI_Theme(descriptor.action.value) == ui.theme {
 				value = "CURRENT"
 				value_color = cyan
 			} else if descriptor.action.kind == .Configure_Flash {
@@ -6753,6 +7038,24 @@ draw_settings_overlays :: proc(
 		fill_overlay_rect(ctx, {0, 0, ui.width, ui.height}, theme.backdrop)
 		modal := video_clips_shortcut_modal_rect()
 		fill_overlay_rect(ctx, modal, theme.modal)
+		record := video_clips_shortcut_record_rect()
+		fill_overlay_rect(ctx, record, theme.field)
+		if ui.shortcut_listening {
+			fill_overlay_border(ctx, record, UI_COLOR_GUM_64)
+		}
+		for index in 0..<3 {
+			rect := video_clips_shortcut_action_rect(index)
+			color := theme.panel_alt
+			if contains(rect, ui.mouse) {color = theme.row_hover}
+			fill_overlay_rect(ctx, rect, color)
+		}
+		if ui.shortcut_candidate_valid && len(ui.shortcut_collision) == 0 {
+			fill_overlay_border(
+				ctx,
+				video_clips_shortcut_action_rect(0),
+				accent,
+			)
+		}
 		draw_text_in_rect(
 			ctx,
 			font,
@@ -6860,7 +7163,7 @@ build_playback_fullscreen_timeline_geometry :: proc(
 		playback_timeline_progress(seconds, ui.player_duration),
 	)
 	accent := ui_color_32(
-		workflow_accent_color(ui.workflow, ui.dark_theme),
+		workflow_accent_color(ui.workflow, ui_theme_is_dark(ui.theme)),
 	)
 	push_rect(vertices, completed, accent)
 	push_rect(vertices, thumb, accent)
@@ -7040,46 +7343,31 @@ draw_playback_fullscreen_transport :: proc(
 	}
 }
 
-build_text_overlay :: proc(width, height: uint) -> []u8 {
-	if height == 0 || width > max(uint) / height || width * height > max(uint) / 4 {
-		arena_note_failure(&memory.redraw_stats)
-		return nil
-	}
-	pixels, allocation_error := mem_virtual.make(&memory.redraw, []u8, int(width * height * 4))
-	if allocation_error != nil {
-		arena_note_failure(&memory.redraw_stats)
-		return nil
-	}
-	space := CGColorSpaceCreateDeviceRGB()
-	assert_foreign(space, "CGColorSpaceCreateDeviceRGB failed")
-	ctx := CGBitmapContextCreate(raw_data(pixels), width, height, 8, width * 4, space, 0x2002)
-	CGColorSpaceRelease(space)
-	assert_foreign(ctx, "CGBitmapContextCreate failed")
-	if ctx == nil {return pixels}
-	defer CGContextRelease(ctx)
-	CGContextClearRect(ctx, Rect{Point{0, 0}, Size{f64(width), f64(height)}})
+build_overlay_commands :: proc(modal_only := false) {
+	ctx := rawptr(uintptr(1))
 	small_font := system_monospaced_font(SMALL_FONT_SIZE * ui.scale)
 	assert_foreign(small_font, "Unable to create the small UI font")
 	count_font := system_monospaced_font(96 * ui.scale)
 	assert_foreign(count_font, "Unable to create the count-in font")
-	defer foreign_release(small_font, "CTFont", "build_text_overlay")
-	defer foreign_release(count_font, "CTFont", "build_text_overlay")
+	defer foreign_release(small_font, "CTFont", "build_overlay_commands")
+	defer foreign_release(count_font, "CTFont", "build_overlay_commands")
 	s := ui.scale
 	theme := ui_theme_colors()
 	ink := theme.ink
 	bright := theme.bright
 	muted := theme.muted
 	dim := theme.dim
-	accent := workflow_accent_color(ui.workflow, ui.dark_theme)
-	warning := ui.dark_theme ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
+	dark_theme := ui_theme_is_dark(ui.theme)
+	accent := workflow_accent_color(ui.workflow, dark_theme)
+	warning := dark_theme ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
 	success := UI_COLOR_MOSS_64
-	cyan := ui.dark_theme ? UI_COLOR_GUM_64 : UI_COLOR_FOREST_64
+	cyan := dark_theme ? UI_COLOR_GUM_64 : UI_COLOR_FOREST_64
 	danger := warning
 
 	_, _, source_search, source_panel, player, transcript, clip_search, clip_panel, clip_name, pitch_panel, _ :=
 		layout_rects()
 
-	if ui.playback_fullscreen_active {
+	if !modal_only && ui.playback_fullscreen_active {
 		draw_playback_fullscreen_transport(
 			ctx,
 			small_font,
@@ -7100,7 +7388,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				accent,
 			)
 		}
-	} else {
+	} else if !modal_only {
 	draw_header_identity(
 		ctx,
 		small_font,
@@ -7253,14 +7541,18 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 
 	if ui.mode == .Create {
 		source_content := source_content_rect(source_search, source_panel)
-		CGContextSaveGState(ctx)
-		CGContextClipToRect(
-			ctx,
-			Rect {
-				Point{source_content.x * s, source_content.y * s},
-				Size{source_content.w * s, source_content.h * s},
-			},
-		)
+		if ordered_overlay_active {
+			framework_draw.push_clip(&ordered_draw, ordered_rect(source_content))
+		} else {
+			CGContextSaveGState(ctx)
+			CGContextClipToRect(
+				ctx,
+				Rect {
+					Point{source_content.x * s, source_content.y * s},
+					Size{source_content.w * s, source_content.h * s},
+				},
+			)
+		}
 		row := UI_Rect {
 			source_content.x,
 			source_content.y + source_content.h - 29 + ui.source_scroll,
@@ -7318,7 +7610,11 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				8,
 			)
 		}
-		CGContextRestoreGState(ctx)
+		if ordered_overlay_active {
+			framework_draw.pop_clip(&ordered_draw)
+		} else {
+			CGContextRestoreGState(ctx)
+		}
 	}
 
 	if ui.mode == .Create && state.active_source < 0 {
@@ -7508,14 +7804,18 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 
 	if ui.mode == .Create {
 		transcript_content := transcript_content_rect(transcript)
-		CGContextSaveGState(ctx)
-		CGContextClipToRect(
-			ctx,
-			Rect {
-				Point{transcript_content.x * s, transcript_content.y * s},
-				Size{transcript_content.w * s, transcript_content.h * s},
-			},
-		)
+		if ordered_overlay_active {
+			framework_draw.push_clip(&ordered_draw, ordered_rect(transcript_content))
+		} else {
+			CGContextSaveGState(ctx)
+			CGContextClipToRect(
+				ctx,
+				Rect {
+					Point{transcript_content.x * s, transcript_content.y * s},
+					Size{transcript_content.w * s, transcript_content.h * s},
+				},
+			)
+		}
 		row := UI_Rect {
 			transcript_content.x,
 			transcript_content.y + transcript_content.h - 25 + ui.transcript_scroll,
@@ -7576,7 +7876,11 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				8,
 			)
 		}
-		CGContextRestoreGState(ctx)
+		if ordered_overlay_active {
+			framework_draw.pop_clip(&ordered_draw)
+		} else {
+			CGContextRestoreGState(ctx)
+		}
 
 		output_commit := find_ui_control(ui_control_id("commit clip output"))
 		output_top := clip_name.y - 8
@@ -7646,14 +7950,18 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 
 	if ui.mode == .Play {
 		clip_content := clip_content_rect(clip_search, clip_panel, clip_name)
-		CGContextSaveGState(ctx)
-		CGContextClipToRect(
-			ctx,
-			Rect {
-				Point{clip_content.x * s, clip_content.y * s},
-				Size{clip_content.w * s, clip_content.h * s},
-			},
-		)
+		if ordered_overlay_active {
+			framework_draw.push_clip(&ordered_draw, ordered_rect(clip_content))
+		} else {
+			CGContextSaveGState(ctx)
+			CGContextClipToRect(
+				ctx,
+				Rect {
+					Point{clip_content.x * s, clip_content.y * s},
+					Size{clip_content.w * s, clip_content.h * s},
+				},
+			)
+		}
 		row := UI_Rect {
 			clip_content.x,
 			clip_content.y + clip_content.h - 29 + ui.clip_scroll,
@@ -7707,7 +8015,11 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 				8,
 			)
 		}
-		CGContextRestoreGState(ctx)
+		if ordered_overlay_active {
+			framework_draw.pop_clip(&ordered_draw)
+		} else {
+			CGContextRestoreGState(ctx)
+		}
 	}
 
 	labels := [20]string {
@@ -7900,18 +8212,16 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			)
 			if has_action {
 				action := footer_task_action_rect(card)
-				action_color := [4]f64{0.035, 0.12, 0.12, 1}
+				action_color := theme.field
+				action_accent := cyan
 				action_text := "VIEW SOURCE"
 				if has_stop {
-					action_color = [4]f64{0.15, 0.035, 0.025, 1}
+					action_accent = warning
 					action_text = "STOP"
 				}
-				if contains(action, ui.mouse) {
-					action_color[0] += 0.035
-					action_color[1] += 0.035
-					action_color[2] += 0.035
-				}
+				if contains(action, ui.mouse) {action_color = theme.row_hover}
 				fill_overlay_rect(ctx, action, action_color)
+				fill_overlay_border(ctx, action, action_accent)
 				draw_text_in_rect(
 					ctx,
 					small_font,
@@ -7919,16 +8229,14 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 					action,
 					.Center,
 					.Center,
-					UI_COLOR_SAND_64,
+					action_accent,
 				)
 			}
 		}
 		if task_layout.hidden_count > 0 {
 			overflow := task_layout.overflow_rect
-			overflow_fill := [4]f64{0.100, 0.065, 0.018, 0.95}
-			if ui.workflow == .Dancing {
-				overflow_fill = [4]f64{0.025, 0.065, 0.105, 0.95}
-			}
+			overflow_fill := theme.field
+			if contains(overflow, ui.mouse) {overflow_fill = theme.row_hover}
 			fill_overlay_rect(ctx, overflow, overflow_fill)
 			fill_overlay_rect(ctx, UI_Rect{overflow.x, overflow.y, 3, overflow.h}, accent)
 			draw_text_in_rect(
@@ -7960,11 +8268,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		)
 		if len(ui.status_source_video_id) > 0 {
 			view_source := ui_control_rect(.View_Status_Source)
-			button_color := [4]f64{0.035, 0.12, 0.12, 1}
-			if contains(view_source, ui.mouse) {
-				button_color = [4]f64{0.045, 0.18, 0.18, 1}
-			}
+			button_color := theme.field
+			if contains(view_source, ui.mouse) {button_color = theme.row_hover}
 			fill_overlay_rect(ctx, view_source, button_color)
+			fill_overlay_border(ctx, view_source, cyan)
 			draw_text_in_rect(
 				ctx,
 				small_font,
@@ -8141,12 +8448,14 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 						save_fill := theme.field
 						save_color := muted
 						if ui.save_source_browser_choice {
-							save_fill = [4]f64{0.035, 0.12, 0.12, 1}
-							save_color = UI_COLOR_SAND_64
+							save_color = cyan
 						} else if contains(save_control, ui.mouse) {
 							save_fill = theme.row_hover
 						}
 						fill_overlay_rect(ctx, save_control, save_fill)
+						if ui.save_source_browser_choice {
+							fill_overlay_border(ctx, save_control, cyan)
+						}
 						save_label := "[ ] SAVE CHOICE FOR LATER"
 						if ui.save_source_browser_choice {
 							save_label = "[X] SAVE CHOICE FOR LATER"
@@ -8167,11 +8476,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 								int(browser),
 							)
 							if control.w == 0 {continue}
-							fill := [4]f64{0.035, 0.12, 0.12, 1}
-							if contains(control, ui.mouse) {
-								fill = [4]f64{0.045, 0.18, 0.18, 1}
-							}
+							fill := theme.field
+							if contains(control, ui.mouse) {fill = theme.row_hover}
 							fill_overlay_rect(ctx, control, fill)
+							fill_overlay_border(ctx, control, cyan)
 							draw_text_in_rect(
 								ctx,
 								small_font,
@@ -8179,7 +8487,7 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 								control,
 								.Center,
 								.Center,
-								UI_COLOR_SAND_64,
+								cyan,
 							)
 						}
 					} else {
@@ -8205,9 +8513,9 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 					quality := ui_control_rect_by_value(.Source_Quality, result_index, height)
 					if quality.w == 0 {break}
 					selected := height == result.selected_height
-					fill_overlay_rect(ctx, quality, selected ? UI_COLOR_FOREST_64 : theme.field)
+					fill_overlay_rect(ctx, quality, theme.field)
 					if selected {fill_overlay_border(ctx, quality, cyan)}
-					draw_text_in_rect(ctx, small_font, fmt.tprintf("%dp", height), quality, .Center, .Center, selected ? UI_COLOR_SAND_64 : muted)
+					draw_text_in_rect(ctx, small_font, fmt.tprintf("%dp", height), quality, .Center, .Center, selected ? cyan : muted)
 				}
 			}
 		}
@@ -8216,17 +8524,10 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 		fill_overlay_rect(ctx, cancel, cancel_color)
 		draw_text_in_rect(ctx, small_font, "CANCEL", cancel, .Center, .Center, muted)
 		refetch := ui.source_modal_refetch_index >= 0
-		confirm_color := refetch ? [4]f64{0.91, 0.31, 0.075, 1} : accent
-		confirm_border := refetch ? [4]f64{1.0, 0.45, 0.12, 1} : accent
-		confirm_text := refetch ? [4]f64{0.08, 0.025, 0.01, 1} : theme.header
-		if contains(confirm, ui.mouse) {
-			if refetch {
-				confirm_color = [4]f64{1.0, 0.42, 0.10, 1}
-			} else {
-				confirm_color = theme.row_hover
-				confirm_text = accent
-			}
-		}
+		confirm_color := theme.panel_alt
+		confirm_border := refetch ? UI_COLOR_COFFEE_64 : accent
+		confirm_text := confirm_border
+		if contains(confirm, ui.mouse) {confirm_color = theme.row_hover}
 		fill_overlay_rect(ctx, confirm, confirm_color)
 		fill_overlay_border(ctx, confirm, confirm_border)
 		draw_text_in_rect(
@@ -8253,55 +8554,148 @@ build_text_overlay :: proc(width, height: uint) -> []u8 {
 			ui.status_error ? danger : (ui.status_success ? success : muted),
 		)
 	}
-	draw_settings_overlays(
-		ctx,
-		small_font,
-		ink,
-		bright,
-		muted,
-		dim,
-		accent,
-		cyan,
-		danger,
-	)
-	draw_command_palette(ctx, small_font, bright, muted, dim, accent, cyan, danger)
-	draw_discard_confirmation(ctx, small_font, bright, muted, warning)
-	draw_library_recovery(
-		ctx,
-		small_font,
-		bright,
-		muted,
-		dim,
-		warning,
-		cyan,
-		danger,
-	)
-	draw_backup_warning(ctx, small_font, bright, muted, warning, danger)
-	if !ui.playback_fullscreen_active {
-		draw_window_controls(ctx)
+	if modal_only {
+		draw_settings_overlays(
+			ctx,
+			small_font,
+			ink,
+			bright,
+			muted,
+			dim,
+			accent,
+			cyan,
+			danger,
+		)
+		draw_command_palette(ctx, small_font, bright, muted, dim, accent, cyan, danger)
+		draw_discard_confirmation(ctx, small_font, bright, muted, warning)
+		draw_library_recovery(
+			ctx,
+			small_font,
+			bright,
+			muted,
+			dim,
+			warning,
+			cyan,
+			danger,
+		)
+		draw_backup_warning(ctx, small_font, bright, muted, warning, danger)
 	}
-	draw_flash_hints(ctx, small_font)
-	return pixels
+	if modal_only {
+		if !ui.playback_fullscreen_active {draw_window_controls(ctx)}
+		draw_flash_hints(ctx, small_font)
+	}
 }
 
-ensure_text_texture :: proc(width, height: uint) -> bool {
-	if ui.text_texture != nil && ui.text_width == width && ui.text_height == height {return false}
-	desc := msg_id_u_u_u_b(
-		objc_getClass("MTLTextureDescriptor"),
-		sel_registerName("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
-		80,
-		width,
-		height,
-		false,
-	)
-	texture := msg_id_id(ui.device, sel_registerName("newTextureWithDescriptor:"), desc)
-	if texture == nil {
-		ui.needs_redraw = true
-		return false
+append_solid_vertices_to_ordered :: proc(vertices: []Solid_Vertex) {
+	when ODIN_DEBUG {
+		assert(len(vertices)%6 == 0, "solid geometry must contain complete quads")
 	}
-	if ui.text_texture != nil {msg_void(ui.text_texture, sel_registerName("release"))}
-	ui.text_texture = texture
-	ui.text_width, ui.text_height = width, height
+	for start := 0; start+5 < len(vertices); start += 6 {
+		first := vertices[start]
+		second := vertices[start+1]
+		fourth := vertices[start+5]
+		point := proc(vertex: Solid_Vertex) -> Point {
+			return {
+				(f64(vertex.x)+1)*ui.width/2,
+				(f64(vertex.y)+1)*ui.height/2,
+			}
+		}
+		p0, p1, p3 := point(first), point(second), point(fourth)
+		x_dx, x_dy := p1.x-p0.x, p1.y-p0.y
+		y_dx, y_dy := p3.x-p0.x, p3.y-p0.y
+		width := math.sqrt(x_dx*x_dx+x_dy*x_dy)
+		height := math.sqrt(y_dx*y_dx+y_dy*y_dy)
+		if width <= 0 || height <= 0 {continue}
+		framework_draw.push_transform(
+			&ordered_draw,
+			{
+				f32(x_dx/width),
+				f32(x_dy/width),
+				f32(y_dx/height),
+				f32(y_dy/height),
+				f32(p0.x),
+				f32(p0.y),
+			},
+		)
+		framework_draw.solid(
+			&ordered_draw,
+			{0, 0, f32(width), f32(height)},
+			{first.r, first.g, first.b, first.a},
+		)
+		framework_draw.pop_transform(&ordered_draw)
+	}
+}
+
+append_video_to_ordered :: proc() {
+	_, _, _, _, player, _, _, _, _, _, _ := layout_rects()
+	player_rect := player_content_rect(player)
+	if ui.playback_fullscreen_active {
+		player_rect = {0, 0, ui.width, ui.height}
+	}
+	video_texture, video_width, video_height, fresh_video_frame :=
+		current_video_texture()
+	if fresh_video_frame {complete_video_frame_refresh()}
+	if video_texture == nil {return}
+	draw_rect := aspect_fit_rect(
+		player_rect,
+		f64(video_width),
+		f64(video_height),
+	)
+	mirrored :=
+		ui.workflow == .Dancing &&
+		!ui.source_playback_active &&
+		ui.active_clip >= 0 &&
+		ui.active_clip < len(state.clips) &&
+		state.clips[ui.active_clip].dance_mirrored
+	seconds, _ := current_seconds()
+	ui_render_trace_record(
+		"texture",
+		draw_rect,
+		pipeline = "ordered-ui",
+		texture = "video",
+		mirrored = mirrored,
+		timestamp_seconds = seconds,
+	)
+	handle := framework_metal.register_texture(
+		&ordered_renderer,
+		rawptr(video_texture),
+	)
+	source := video_texture_source_rect(mirrored)
+	framework_draw.image(
+		&ordered_draw,
+		handle,
+		ordered_rect(draw_rect),
+		source,
+		label = "video",
+	)
+}
+
+video_texture_source_rect :: proc(mirrored := false) -> framework_draw.Rect {
+	if mirrored {return {1, 1, -1, -1}}
+	return {0, 1, 1, -1}
+}
+
+build_ordered_frame :: proc(
+	vertices: []Solid_Vertex,
+	fullscreen_timeline: []Solid_Vertex,
+) -> bool {
+	if !ordered_ui_ready {return false}
+	framework_metal.begin_texture_frame(&ordered_renderer)
+	framework_coretext.begin_frame(
+		&ordered_text,
+		f32(ui.scale),
+		framework_metal.atlas_io(&ordered_renderer),
+	)
+	framework_draw.list_reset(&ordered_draw)
+	append_solid_vertices_to_ordered(vertices)
+	append_video_to_ordered()
+	ordered_overlay_active = true
+	build_overlay_commands(false)
+	build_overlay_commands(true)
+	ordered_overlay_active = false
+	append_solid_vertices_to_ordered(fullscreen_timeline)
+	framework_coretext.flush(&ordered_text)
+	ui.overlay_revision += 1
 	return true
 }
 
@@ -8637,7 +9031,7 @@ add_ax_element :: proc(
 		value := msg_id_uint(
 			objc_getClass("NSNumber"),
 			sel_registerName("numberWithUnsignedInt:"),
-			uint((value != 0) == ui.dark_theme),
+			uint(UI_Theme(value) == ui.theme),
 		)
 		msg_void_id(element, sel_registerName("setAccessibilityValue:"), value)
 	} else if kind == .Settings_Category {
@@ -10108,7 +10502,10 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		ui.settings_query_focused = true
 		focus_text_input(.Settings_Search)
 	case .Set_Theme:
-		return video_clips_settings_apply_theme(action.value != 0)
+		if action.value < 0 || action.value > int(UI_Theme.HW_Dark) {
+			return false
+		}
+		return video_clips_settings_apply_theme(UI_Theme(action.value))
 	case .Configure_Flash:
 		return video_clips_shortcut_recorder_open()
 	case .Shortcut_Record:
@@ -10433,7 +10830,7 @@ palette_active_context :: proc() -> command_palette.Context_Mask {
 		bits |= u64(PALETTE_CONTEXT_CLIP_SAVE_BUSY)
 	}
 	if ui.settings_open {bits |= u64(PALETTE_CONTEXT_SETTINGS)}
-	if ui.dark_theme {
+	if ui_theme_is_dark(ui.theme) {
 		bits |= u64(PALETTE_CONTEXT_DARK_THEME)
 	} else {
 		bits |= u64(PALETTE_CONTEXT_LIGHT_THEME)
@@ -10525,36 +10922,33 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		palette_condition(none = PALETTE_CONTEXT_GLOBAL_MODAL),
 		"Unavailable while another modal owns application input",
 	)
-	append_command_palette_entry(
-		&entries,
-		UI_Action{kind = .Set_Theme, value = 0},
-		"Switch theme to light mode",
-		"HW Light interface theme",
-		"Theme",
-		[]string{"appearance", "style", "light", "HW Light"},
-		palette_condition(
-			none = command_palette.Context_Mask(
-				u64(PALETTE_CONTEXT_LIGHT_THEME) |
-				u64(PALETTE_CONTEXT_GLOBAL_MODAL),
+	for theme in UI_Theme {
+		name := ui_theme_name(theme)
+		current_theme_context := PALETTE_CONTEXT_LIGHT_THEME
+		if ui_theme_is_dark(theme) {
+			current_theme_context = PALETTE_CONTEXT_DARK_THEME
+		}
+		append_command_palette_entry(
+			&entries,
+			UI_Action{kind = .Set_Theme, value = int(theme)},
+			fmt.tprintf("Use %s theme", name),
+			fmt.tprintf("Apply the %s interface theme", name),
+			"Theme",
+			[]string{
+				"appearance",
+				"style",
+				ui_theme_is_dark(theme) ? "dark" : "light",
+				name,
+			},
+			palette_condition(
+				none = command_palette.Context_Mask(
+					u64(current_theme_context) |
+						u64(PALETTE_CONTEXT_GLOBAL_MODAL),
+				),
 			),
-		),
-		"Unavailable for the current theme or modal state",
-	)
-	append_command_palette_entry(
-		&entries,
-		UI_Action{kind = .Set_Theme, value = 1},
-		"Switch theme to dark mode",
-		"HW Dark interface theme",
-		"Theme",
-		[]string{"appearance", "style", "dark", "HW Dark"},
-		palette_condition(
-			none = command_palette.Context_Mask(
-				u64(PALETTE_CONTEXT_DARK_THEME) |
-				u64(PALETTE_CONTEXT_GLOBAL_MODAL),
-			),
-		),
-		"Unavailable for the current theme or modal state",
-	)
+			"Unavailable for the current theme or modal state",
+		)
+	}
 	mode_context := PALETTE_CONTEXT_CREATE
 	mode_title := "Switch to Clips"
 	mode_subtitle := "Open the saved clip library"
@@ -11018,7 +11412,7 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 		return nsstring(ui.settings_query)
 	case .Set_Theme:
 		checked := uint(0)
-		if (control.action.value != 0) == ui.dark_theme {checked = 1}
+		if UI_Theme(control.action.value) == ui.theme {checked = 1}
 		return msg_id_uint(
 			objc_getClass("NSNumber"),
 			sel_registerName("numberWithUnsignedInt:"),
@@ -11114,11 +11508,9 @@ ui_memory_destroy :: proc() {
 	_ = flush_active_clip_draft()
 	pitch_monitor_stop(&ui.pitch)
 	metal_player_clear()
+	ordered_ui_destroy()
 	app_state_collections_destroy(&pending_library_import)
 	if ui.ax_children != nil {msg_void(ui.ax_children, sel_registerName("release"))}
-	if ui.text_texture != nil {msg_void(ui.text_texture, sel_registerName("release"))}
-	if ui.solid_pipeline != nil {msg_void(ui.solid_pipeline, sel_registerName("release"))}
-	if ui.texture_pipeline != nil {msg_void(ui.texture_pipeline, sel_registerName("release"))}
 	if ui.queue != nil {msg_void(ui.queue, sel_registerName("release"))}
 	if ui.texture_cache !=
 	   nil {foreign_release(ui.texture_cache, "CVMetalTextureCache", "ui_memory_destroy")}
@@ -12817,8 +13209,8 @@ video_clips_gui_initialize :: proc() -> bool {
 			"Unable to create CVMetalTextureCache",
 		)
 	}
-	if !compile_pipelines() {
-		fmt.eprintln("Unable to compile Metal UI pipelines")
+	if !ordered_ui_initialize() {
+		fmt.eprintln("Unable to initialize the ordered UI renderer")
 		return false
 	}
 

@@ -34,32 +34,25 @@ video_clips_settings_descriptors :: proc(
 	allocator := context.temp_allocator,
 ) -> [dynamic]Video_Clips_Setting_Descriptor {
 	result := make([dynamic]Video_Clips_Setting_Descriptor, allocator)
-	light_keywords := make([]string, 5, allocator)
-	copy(
-		light_keywords,
-		[]string{"theme", "appearance", "style", "light", "hw-light"},
-	)
-	append(&result, Video_Clips_Setting_Descriptor{
-		id = VIDEO_CLIPS_SETTING_LIGHT_ID,
-		category = .Styling,
-		title = "HW Light",
-		subtitle = "Light interface theme",
-		keywords = light_keywords,
-		action = {kind = .Set_Theme, value = 0},
-	})
-	dark_keywords := make([]string, 5, allocator)
-	copy(
-		dark_keywords,
-		[]string{"theme", "appearance", "style", "dark", "hw-dark"},
-	)
-	append(&result, Video_Clips_Setting_Descriptor{
-		id = VIDEO_CLIPS_SETTING_DARK_ID,
-		category = .Styling,
-		title = "HW Dark",
-		subtitle = "Dark interface theme",
-		keywords = dark_keywords,
-		action = {kind = .Set_Theme, value = 1},
-	})
+	theme_ids := [2]command_palette.Entry_ID{
+		VIDEO_CLIPS_SETTING_LIGHT_ID,
+		VIDEO_CLIPS_SETTING_DARK_ID,
+	}
+	for id, index in theme_ids {
+		theme := UI_Theme(index)
+		keywords := make([]string, 5, allocator)
+		family := "hal wayland"
+		appearance := ui_theme_is_dark(theme) ? "dark" : "light"
+		copy(keywords, []string{"theme", "appearance", "style", family, appearance})
+		append(&result, Video_Clips_Setting_Descriptor{
+			id = id,
+			category = .Styling,
+			title = ui_theme_name(theme),
+			subtitle = fmt.tprintf("%s interface theme", ui_theme_name(theme)),
+			keywords = keywords,
+			action = {kind = .Set_Theme, value = index},
+		})
+	}
 	flash_keywords := make([]string, 5, allocator)
 	copy(
 		flash_keywords,
@@ -248,15 +241,15 @@ video_clips_settings_close :: proc() {
 	ui.needs_redraw = true
 }
 
-video_clips_settings_apply_theme :: proc(dark: bool) -> bool {
+video_clips_settings_apply_theme :: proc(theme: UI_Theme) -> bool {
 	if !video_clips_settings_commands_available() {return false}
-	if dark == ui.dark_theme {return true}
-	if !database_interface_theme_save(library_database, dark) {
+	if theme == ui.theme {return true}
+	if !database_interface_theme_save(library_database, theme) {
 		ui_set_string(&ui.settings_error, "THE THEME COULD NOT BE SAVED")
 		ui.needs_redraw = true
 		return false
 	}
-	ui.dark_theme = dark
+	ui.theme = theme
 	ui_set_string(&ui.settings_error, "")
 	ui.needs_redraw = true
 	return true

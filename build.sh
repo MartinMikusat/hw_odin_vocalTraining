@@ -7,6 +7,7 @@ UI_FLASH_ROOT="$ROOT/../hw_odin_ui_flash"
 COMMAND_PALETTE_ROOT="$ROOT/../hw_odin_ui_commandPalette"
 COMPONENTS_ROOT="$ROOT/../hw_odin_ui_components"
 TASK_QUEUE_ROOT="$ROOT/../hw_odin_concurrency_taskQueue"
+UI_FRAMEWORK_ROOT="$ROOT/../hw_odin_ui_framework"
 ICON_ROOT="$ROOT/resources/icons/iconoir"
 if [ ! -f "$MATCH_SORTER_ROOT/match_sorter.odin" ]; then
   echo "[hw_videoClips] missing Odin match-sorter checkout: $MATCH_SORTER_ROOT" >&2
@@ -26,6 +27,10 @@ if [ ! -f "$COMPONENTS_ROOT/text_input/text_input.odin" ]; then
 fi
 if [ ! -f "$TASK_QUEUE_ROOT/task_queue.odin" ]; then
   echo "[hw_videoClips] missing Odin task queue checkout: $TASK_QUEUE_ROOT" >&2
+  exit 1
+fi
+if [ ! -f "$UI_FRAMEWORK_ROOT/core/core.odin" ]; then
+  echo "[hw_videoClips] missing Odin UI framework checkout: $UI_FRAMEWORK_ROOT" >&2
   exit 1
 fi
 "$ROOT/scripts/dependencies.sh" check
@@ -57,6 +62,16 @@ esac
 
 rm -rf "$APP/Contents/Resources/Fonts"
 mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/Resources"
+if xcrun metal -help >/dev/null 2>&1; then
+  "$UI_FRAMEWORK_ROOT/scripts/build-metallib.sh" "$APP/Contents/Resources/ui.metallib"
+elif [ "$MODE" = "release" ]; then
+  echo "[hw_videoClips] release builds require the optional Metal shader toolchain" >&2
+  echo "[hw_videoClips] install it with: xcodebuild -downloadComponent MetalToolchain" >&2
+  exit 1
+else
+  rm -f "$APP/Contents/Resources/ui.metallib"
+fi
 EXECUTABLE="$APP/Contents/MacOS/hw_videoClips"
 TEMP="$ROOT/build/temp/$MODE"
 mkdir -p "$TEMP"
@@ -74,6 +89,7 @@ odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
   -collection:command_palette="$COMMAND_PALETTE_ROOT" \
   -collection:components="$COMPONENTS_ROOT" \
   -collection:task_queue="$TASK_QUEUE_ROOT" \
+  -collection:ui_framework="$UI_FRAMEWORK_ROOT" \
   -extra-linker-flags:"$PITCH_CAPTURE_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics -framework ImageIO"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/Icons/Iconoir"

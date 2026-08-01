@@ -197,7 +197,7 @@ video_clips_settings_commands_do_not_open_behind_blocking_modals_test :: proc(
 	library_recovery_state = Library_Recovery_State{required = true}
 	major_change_pending = {}
 	testing.expect(t, !video_clips_settings_open())
-	testing.expect(t, !video_clips_settings_apply_theme(true))
+	testing.expect(t, !video_clips_settings_apply_theme(.HW_Dark))
 	testing.expect(t, !video_clips_shortcut_recorder_open())
 	testing.expect(t, !ui.settings_open)
 	testing.expect(t, !ui.shortcut_open)
@@ -266,8 +266,9 @@ video_clips_shortcut_invalid_storage_falls_back_to_default_test :: proc(t: ^test
 
 @(test)
 video_clips_modal_backdrop_uses_eighty_percent_opacity_test :: proc(t: ^testing.T) {
-	testing.expect_value(t, ui_theme_colors(false).backdrop[3], 0.80)
-	testing.expect_value(t, ui_theme_colors(true).backdrop[3], 0.80)
+	for theme in UI_Theme {
+		testing.expect_value(t, ui_theme_colors(theme).backdrop[3], 0.80)
+	}
 }
 
 @(test)

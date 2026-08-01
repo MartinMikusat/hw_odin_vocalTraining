@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "settings-render-order",
+  "mutation": "transient",
+  "setup": {
+    "workflow": "vocal",
+    "mode": "play",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "steps": [
+    {"op": "activate", "control": "settings"},
+    {"op": "assert", "condition": {"kind": "surface", "field": "overlay", "operator": "eq", "value": "settings"}},
+    {"op": "capture"},
+    {"op": "activate", "control": "close settings"}
+  ]
+}

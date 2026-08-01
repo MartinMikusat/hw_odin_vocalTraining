@@ -1269,22 +1269,40 @@ database_clip_drafts_prune :: proc(database: ^SQLite_DB) -> bool {
 	)
 }
 
-database_interface_theme_load :: proc(database: ^SQLite_DB) -> bool {
-	if database == nil {return true}
+database_interface_theme_decode :: proc(value: string) -> (UI_Theme, bool) {
+	switch value {
+	case "light", "hw-light": return .HW_Light, true
+	case "dark", "hw-dark": return .HW_Dark, true
+	}
+	return .HW_Dark, false
+}
+
+database_interface_theme_encode :: proc(theme: UI_Theme) -> string {
+	switch theme {
+	case .HW_Light: return "hw-light"
+	case .HW_Dark: return "hw-dark"
+	}
+	return "hw-dark"
+}
+
+database_interface_theme_load :: proc(database: ^SQLite_DB) -> UI_Theme {
+	if database == nil {return .HW_Dark}
 	statement, ok := sqlite_prepare(
 		database,
 		"SELECT value FROM app_preferences WHERE key = 'interface_theme'",
 	)
-	if !ok {return true}
+	if !ok {return .HW_Dark}
 	defer sqlite3_finalize(statement)
-	if sqlite3_step(statement) != SQLITE_ROW {return true}
+	if sqlite3_step(statement) != SQLITE_ROW {return .HW_Dark}
 	value := sqlite3_column_text(statement, 0)
-	return value == nil || string(value) == "dark"
+	if value == nil {return .HW_Dark}
+	theme, valid := database_interface_theme_decode(string(value))
+	return valid ? theme : .HW_Dark
 }
 
 database_interface_theme_save :: proc(
 	database: ^SQLite_DB,
-	dark_theme: bool,
+	theme: UI_Theme,
 ) -> bool {
 	if database == nil {return false}
 	statement, ok := sqlite_prepare(
@@ -1295,9 +1313,11 @@ database_interface_theme_save :: proc(
 	)
 	if !ok {return false}
 	defer sqlite3_finalize(statement)
-	value := dark_theme ? "dark" : "light"
-	return sqlite_bind_text_value(statement, 1, value) &&
-	       sqlite3_step(statement) == SQLITE_DONE
+	return sqlite_bind_text_value(
+			statement,
+			1,
+			database_interface_theme_encode(theme),
+		) && sqlite3_step(statement) == SQLITE_DONE
 }
 
 Active_View_Preference :: struct {

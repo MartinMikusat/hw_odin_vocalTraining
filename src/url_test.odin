@@ -3224,10 +3224,18 @@ metal_ui_header_controls_take_precedence_over_window_gestures_test :: proc(
 
 @(test)
 metal_ui_themes_use_canonical_canvas_colors_test :: proc(t: ^testing.T) {
-	light := ui_theme_colors(false)
-	dark := ui_theme_colors(true)
-	testing.expect_value(t, light.chassis, [4]f64{0.80, 0.78, 0.72, 1})
-	testing.expect_value(t, dark.chassis, [4]f64{0.040, 0.043, 0.041, 1})
+	light := ui_theme_colors(.HW_Light)
+	dark := ui_theme_colors(.HW_Dark)
+	testing.expect_value(
+		t,
+		light.chassis,
+		[4]f64{0.800000, 0.780392, 0.721569, 1},
+	)
+	testing.expect_value(
+		t,
+		dark.chassis,
+		[4]f64{0.039216, 0.043137, 0.039216, 1},
+	)
 }
 
 @(test)
@@ -3359,6 +3367,41 @@ command_palette_catalog_disables_create_commands_in_play_mode_test :: proc(t: ^t
 }
 
 @(test)
+command_palette_disables_only_the_active_hw_theme_test :: proc(t: ^testing.T) {
+	previous_theme := ui.theme
+	previous_actions := command_palette_actions
+	defer {
+		delete(command_palette_actions)
+		command_palette_actions = previous_actions
+		ui.theme = previous_theme
+	}
+	for active_theme in UI_Theme {
+		command_palette_actions = nil
+		ui.theme = active_theme
+		entries := build_command_palette_entries(context.temp_allocator)
+		active := palette_active_context()
+		found := 0
+		for entry in entries {
+			for theme in UI_Theme {
+				if entry.title != fmt.tprintf("Use %s theme", ui_theme_name(theme)) {
+					continue
+				}
+				found += 1
+				expected := theme != active_theme
+				testing.expect_value(
+					t,
+					command_palette.context_matches(active, entry.contexts),
+					expected,
+				)
+			}
+		}
+		testing.expect_value(t, found, len(UI_Theme))
+		delete(command_palette_actions)
+		command_palette_actions = nil
+	}
+}
+
+@(test)
 command_palette_uses_current_action_availability_test :: proc(t: ^testing.T) {
 	previous_mode := ui.mode
 	previous_pitch := ui.pitch
@@ -3478,11 +3521,11 @@ core_text_shapes_and_measures_complete_lines_test :: proc(t: ^testing.T) {
 	testing.expect(t, font != nil)
 	defer CFRelease(font)
 
-	pair := make_text_run(font, "AV")
-	a := make_text_run(font, "A")
-	v := make_text_run(font, "V")
-	ligature := make_text_run(font, "fi")
-	arabic := make_text_run(font, "سلام")
+	pair := make_text_run(font, "AV", 0)
+	a := make_text_run(font, "A", 0)
+	v := make_text_run(font, "V", 0)
+	ligature := make_text_run(font, "fi", 0)
+	arabic := make_text_run(font, "سلام", 0)
 	defer delete_text_run(&pair)
 	defer delete_text_run(&a)
 	defer delete_text_run(&v)
@@ -4650,17 +4693,14 @@ dancing_clip_navigation_stays_inside_the_active_workflow_test :: proc(t: ^testin
 
 @(test)
 dancing_mirror_swaps_only_horizontal_texture_coordinates_test :: proc(t: ^testing.T) {
-	previous_width, previous_height := ui.width, ui.height
-	defer ui.width, ui.height = previous_width, previous_height
-	ui.width, ui.height = 100, 100
-	normal := texture_rect_vertices({0, 0, 100, 100}, {1, 1, 1, 1})
-	mirrored := texture_rect_vertices({0, 0, 100, 100}, {1, 1, 1, 1}, true)
-	for index in 0 ..< len(normal) {
-		testing.expect_value(t, mirrored[index].u, 1 - normal[index].u)
-		testing.expect_value(t, mirrored[index].v, normal[index].v)
-		testing.expect_value(t, mirrored[index].x, normal[index].x)
-		testing.expect_value(t, mirrored[index].y, normal[index].y)
-	}
+	normal := video_texture_source_rect()
+	mirrored := video_texture_source_rect(true)
+	testing.expect_value(t, normal.x, f32(0))
+	testing.expect_value(t, normal.w, f32(1))
+	testing.expect_value(t, mirrored.x, f32(1))
+	testing.expect_value(t, mirrored.w, f32(-1))
+	testing.expect_value(t, mirrored.y, normal.y)
+	testing.expect_value(t, mirrored.h, normal.h)
 }
 
 @(test)
@@ -5746,11 +5786,19 @@ interface_theme_round_trips_through_application_preferences_test :: proc(
 	if !opened {return}
 	defer sqlite3_close(database)
 	testing.expect(t, database_create_schema(database))
-	testing.expect(t, database_interface_theme_load(database))
-	testing.expect(t, database_interface_theme_save(database, false))
-	testing.expect(t, !database_interface_theme_load(database))
-	testing.expect(t, database_interface_theme_save(database, true))
-	testing.expect(t, database_interface_theme_load(database))
+	testing.expect_value(t, database_interface_theme_load(database), UI_Theme.HW_Dark)
+	for theme in UI_Theme {
+		testing.expect(t, database_interface_theme_save(database, theme))
+		testing.expect_value(t, database_interface_theme_load(database), theme)
+	}
+	decoded, valid := database_interface_theme_decode("dark")
+	testing.expect(t, valid)
+	testing.expect_value(t, decoded, UI_Theme.HW_Dark)
+	decoded, valid = database_interface_theme_decode("light")
+	testing.expect(t, valid)
+	testing.expect_value(t, decoded, UI_Theme.HW_Light)
+	_, valid = database_interface_theme_decode("catppuccin-mocha")
+	testing.expect(t, !valid)
 }
 
 @(test)

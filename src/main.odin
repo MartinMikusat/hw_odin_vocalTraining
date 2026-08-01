@@ -4172,7 +4172,7 @@ video_clips_process_main :: proc(args := os.args) {
 		return
 	}
 	load_result := load_library()
-	ui.dark_theme = database_interface_theme_load(library_database)
+	ui.theme = database_interface_theme_load(library_database)
 	ui.vocal_playback_rate = database_vocal_playback_rate_load(
 		library_database,
 	)
