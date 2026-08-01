@@ -643,12 +643,14 @@ Run the complete test suite against an isolated copy:
 
 ### Automated interface tests
 
-The interface harness keeps one isolated application instance inactive and
-hidden. It exposes its temporary support directory through
-`build/ui-test-support/app-support`. This avoids detached-process access stalls
-under the repository's Documents path. Each checkout receives a separate
-launch job and support directory. The harness leaves its instance running
-between commands.
+The interface harness keeps one isolated application instance inactive,
+hidden, and absent from the Dock. It exposes its temporary support directory
+through `build/ui-test-support/app-support`. This avoids detached-process
+access stalls under the repository's Documents path. Each checkout receives a
+separate launch job and support directory. The harness leaves its instance
+running between commands. A failed instance launch removes its launch job
+before the harness exits. The harness also stops the process when Launch
+Services classifies it as a foreground application.
 
 The harness currently requires `jq`. Install it with `brew install jq` when the
 command is unavailable.

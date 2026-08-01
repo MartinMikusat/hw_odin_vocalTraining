@@ -109,6 +109,14 @@ launch_job_is_owned() {
   printf '%s\n' "$job" | grep -F -- "$APP_EXECUTABLE" >/dev/null
 }
 
+instance_is_accessory() {
+  pid=$1
+  app=$(lsappinfo find pid="$pid" 2>/dev/null || true)
+  [ -n "$app" ] || return 1
+  lsappinfo info -all "$app" 2>/dev/null |
+    grep -F '"ApplicationType"="UIElement"' >/dev/null
+}
+
 cleanup_legacy_instance() {
   if ! launchctl print "gui/$(id -u)/$LEGACY_LAUNCH_LABEL" >/dev/null 2>&1; then
     return
@@ -183,7 +191,7 @@ start_instance() {
   startup_started_ms=$(clock_ms)
   mkdir -p "$STATE_ROOT"
   fixture_path="$SUPPORT/fixtures/playback-fixture.mp4"
-  launchctl submit \
+  if ! launchctl submit \
     -l "$LAUNCH_LABEL" \
     -o "$LOG" \
     -e "$ERROR_LOG" \
@@ -195,7 +203,10 @@ start_instance() {
     HW_VIDEO_CLIPS_VISIBLE_ON_LAUNCH=0 \
     MTL_CAPTURE_ENABLED=1 \
     MTL_DEBUG_LAYER=1 \
-    "$APP_EXECUTABLE"
+    "$APP_EXECUTABLE"; then
+    stop_instance || true
+    return 1
+  fi
   pid=
   attempts=0
   while [ -z "$pid" ] && [ "$attempts" -lt 100 ]; do
@@ -206,6 +217,7 @@ start_instance() {
   done
   [ -n "$pid" ] || {
     printf '[hw_videoClips] isolated UI launch job has no process\n' >&2
+    stop_instance || true
     return 1
   }
   printf '%s\n' "$pid" >"$PID_FILE"
@@ -227,8 +239,15 @@ start_instance() {
     printf '[hw_videoClips] isolated UI control socket did not appear\n' >&2
     tail -40 "$LOG" >&2 || true
     tail -40 "$ERROR_LOG" >&2 || true
+    stop_instance || true
     return 1
   }
+  if ! instance_is_accessory "$pid"; then
+    printf '[hw_videoClips] isolated UI process created a Dock item: %s\n' \
+      "$pid" >&2
+    stop_instance || true
+    return 1
+  fi
   INSTANCE_STARTUP_MS=$(( $(clock_ms) - startup_started_ms ))
   printf '%s\n' "$INSTANCE_STARTUP_MS" >"$STARTUP_FILE"
   sleep 0.1

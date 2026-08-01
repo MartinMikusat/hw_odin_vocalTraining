@@ -105,6 +105,20 @@ launch_visibility_respects_explicit_policy_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+automation_uses_accessory_activation_policy_test :: proc(t: ^testing.T) {
+	testing.expect_value(
+		t,
+		application_activation_policy(false),
+		APPLICATION_ACTIVATION_POLICY_REGULAR,
+	)
+	testing.expect_value(
+		t,
+		application_activation_policy(true),
+		APPLICATION_ACTIVATION_POLICY_ACCESSORY,
+	)
+}
+
+@(test)
 headless_diagnostics_do_not_dispatch_to_appkit_test :: proc(t: ^testing.T) {
 	previous_send := send_address
 	previous_window := state.window

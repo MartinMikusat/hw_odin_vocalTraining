@@ -12813,9 +12813,21 @@ launch_should_show :: proc(value: cstring) -> bool {
 	return value == nil || string(value) != "0"
 }
 
+APPLICATION_ACTIVATION_POLICY_REGULAR :: 0
+APPLICATION_ACTIVATION_POLICY_ACCESSORY :: 1
+
+application_activation_policy :: proc(automation: bool) -> int {
+	if automation {return APPLICATION_ACTIVATION_POLICY_ACCESSORY}
+	return APPLICATION_ACTIVATION_POLICY_REGULAR
+}
+
 video_clips_gui_initialize :: proc() -> bool {
 	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
-	msg_void_i(app, sel_registerName("setActivationPolicy:"), 0)
+	msg_void_i(
+		app,
+		sel_registerName("setActivationPolicy:"),
+		application_activation_policy(ui_automation_enabled()),
+	)
 	register_delegate(app)
 
 	state.url_input = CONTROL_URL
