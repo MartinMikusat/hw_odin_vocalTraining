@@ -104,6 +104,18 @@ UI_Diagnostic_Artifact_File :: struct {
 
 ui_diagnostic_artifact_serial: int
 
+ui_window_is_visible :: proc() -> bool {
+	return send_address != nil &&
+	       state.window != nil &&
+	       msg_bool(state.window, sel_registerName("isVisible"))
+}
+
+ui_application_is_active :: proc() -> bool {
+	if send_address == nil {return false}
+	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
+	return app != nil && msg_bool(app, sel_registerName("isActive"))
+}
+
 ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_Surface {
 	mode := "create"
 	if ui.mode == .Play {mode = "play"}
@@ -147,12 +159,8 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 		workflow = strings.clone(cli_workflow_name(ui.workflow), allocator),
 		overlay = strings.clone(overlay, allocator),
 		background = strings.clone(background, allocator),
-		window_visible = state.window != nil &&
-		                 msg_bool(state.window, sel_registerName("isVisible")),
-		application_active = msg_bool(
-			msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication")),
-			sel_registerName("isActive"),
-		),
+		window_visible = ui_window_is_visible(),
+		application_active = ui_application_is_active(),
 		media_loaded = state.player != nil,
 		media_id = strings.clone(media_id, allocator),
 		playback_active = state.player != nil &&

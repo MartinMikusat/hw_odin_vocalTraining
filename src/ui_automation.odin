@@ -339,19 +339,12 @@ ui_automation_surface_value :: proc(field: string) -> UI_Automation_Value {
 	case "window.visible":
 		return {
 			kind = .Boolean,
-			boolean = state.window != nil &&
-			          msg_bool(state.window, sel_registerName("isVisible")),
+			boolean = ui_window_is_visible(),
 		}
 	case "application.active":
 		return {
 			kind = .Boolean,
-			boolean = msg_bool(
-				msg_id(
-					objc_getClass("NSApplication"),
-					sel_registerName("sharedApplication"),
-				),
-				sel_registerName("isActive"),
-			),
+			boolean = ui_application_is_active(),
 		}
 	case "media.loaded":
 		return {kind=.Boolean, boolean=state.player != nil}

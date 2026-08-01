@@ -104,6 +104,20 @@ launch_visibility_respects_explicit_policy_test :: proc(t: ^testing.T) {
 	testing.expect(t, !launch_should_show(cstring("0")))
 }
 
+@(test)
+headless_diagnostics_do_not_dispatch_to_appkit_test :: proc(t: ^testing.T) {
+	previous_send := send_address
+	previous_window := state.window
+	defer {
+		send_address = previous_send
+		state.window = previous_window
+	}
+	send_address = nil
+	state.window = transmute(Id)(uintptr(1))
+	testing.expect(t, !ui_window_is_visible())
+	testing.expect(t, !ui_application_is_active())
+}
+
 window_icon_points_use_iconoir_viewbox_test :: proc(
 	t: ^testing.T,
 	points: []Window_Icon_Point,
