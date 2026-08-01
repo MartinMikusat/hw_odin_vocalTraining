@@ -552,11 +552,12 @@ The legacy scripted import form remains available and returns JSON:
 build/hw_videoClips.app/Contents/MacOS/hw_videoClips --import 'https://youtu.be/VIDEO_ID?t=SECONDS'
 ```
 
-### Release TODO
+### Release details
 
-The current release build is suitable for local development, but it is not yet
-a self-contained build for non-technical users. Complete these items before
-external distribution:
+The current release task is tracked in [TODO.md](TODO.md). The current release
+build is suitable for local development, but it is not yet a self-contained
+build for non-technical users. Complete these items before external
+distribution:
 
 - Package pinned standalone `yt-dlp` and relocatable Apple Silicon `ffmpeg`
   executables under `Contents/Resources/helpers/`. Ship helper updates through
@@ -693,7 +694,9 @@ synthetic filters, so it contains no third-party media.
 - SHA-256: `a107283834111060004105d689f61913a4faee9d55fd017fb09ebd588d82913b`
 - Size: 16,151 bytes
 
-#### UI test harness TODO
+#### UI test harness details
+
+The current UI test task is tracked in [TODO.md](TODO.md).
 
 Replace the shell harness JSON operations with an Odin helper. Remove the
 `jq` runtime dependency after the helper validates scenarios, adds result
