@@ -188,6 +188,8 @@ application relaunches.
 Each Commit appends an independent export. A successful export
 clears its submitted draft only when that source's draft has not changed.
 Failed exports and newer drafts retain their marks and names.
+FFmpeg resets each exported clip's audio and video timestamps to zero. This
+lets the paused player render the first video frame without advancing playback.
 The media queue runs up to two source operations and two exports at once.
 Eligible actions stay available while other media work runs.
 Refetch, preview, repair, and recovery enter the same queue as ordered barriers.
@@ -310,6 +312,7 @@ build/hw_videoClips clip create \
 build/hw_videoClips clip list --source VIDEO_ID
 build/hw_videoClips playback fullscreen --state on
 build/hw_videoClips playback fullscreen --state off
+./scripts/dev-cli.sh clip normalize-timestamps
 ```
 
 Source, transcript, and clip commands accept `--workflow vocal|dancing`.
@@ -323,6 +326,11 @@ explicitly continue without a new restore point.
 
 `clip create` starts at the first segment start. It ends at the last segment
 start plus its duration. The command saves the MP4 as a clip.
+
+Debug builds also provide `clip normalize-timestamps`. The command requires the
+running development application. It rebuilds Vocal and Dancing clips through
+validated staging files, then atomically replaces each current clip. Rerun the
+command after a partial failure or cancellation.
 
 The GUI owns the library while it runs. CLI media commands append work to its
 media queue and wait for the result without blocking the interface. Other CLI

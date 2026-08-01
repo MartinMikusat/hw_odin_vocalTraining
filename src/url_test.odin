@@ -2418,6 +2418,70 @@ cli_rejects_incomplete_clip_request_with_json_error_test :: proc(t: ^testing.T) 
 	testing.expect(t, strings.contains(result.output, `"code":"usage"`))
 }
 
+@(test)
+cli_clip_timestamp_normalization_is_debug_only_and_requires_gui_test :: proc(
+	t: ^testing.T,
+) {
+	request, result, ok := cli_parse_request(
+		[]string{"clip", "normalize-timestamps"},
+	)
+	defer delete(result.output)
+	when ODIN_DEBUG {
+		testing.expect(t, ok)
+		testing.expect_value(
+			t,
+			request.command,
+			CLI_Command.Clip_Normalize_Timestamps,
+		)
+		testing.expect(t, cli_command_requires_gui(request.command))
+		testing.expect(t, !cli_command_mutates_library(request.command))
+	} else {
+		testing.expect(t, !ok)
+	}
+
+	_, invalid_result, invalid_ok := cli_parse_request(
+		[]string{"clip", "normalize-timestamps", "--workflow", "vocal"},
+	)
+	defer delete(invalid_result.output)
+	testing.expect(t, !invalid_ok)
+	testing.expect_value(t, invalid_result.exit_code, CLI_Exit.Usage)
+}
+
+@(test)
+cli_clip_timestamp_normalization_result_reports_compact_counts_test :: proc(
+	t: ^testing.T,
+) {
+	success := Clip_Normalize_Job{total = 3, rebuilt = 3, log_path = "/tmp/normalize.log"}
+	result := clip_normalize_result(&success)
+	defer delete(result.output)
+	testing.expect_value(t, result.exit_code, CLI_Exit.Success)
+	testing.expect(t, strings.contains(result.output, `"ok":true`))
+	testing.expect(t, strings.contains(result.output, `"total":3`))
+	testing.expect(t, strings.contains(result.output, `"rebuilt":3`))
+	testing.expect(t, !strings.contains(result.output, `"error"`))
+
+	failure := CLI_Clip_Normalize_Failure{
+		clip_id = "clip-1",
+		reason = "FFmpeg failed",
+		diagnostic_log = "/tmp/normalize.log",
+	}
+	failures := make([dynamic]CLI_Clip_Normalize_Failure)
+	defer delete(failures)
+	append(&failures, failure)
+	partial := Clip_Normalize_Job{
+		total = 3,
+		rebuilt = 2,
+		log_path = "/tmp/normalize.log",
+		failures = failures,
+	}
+	partial_result := clip_normalize_result(&partial)
+	defer delete(partial_result.output)
+	testing.expect_value(t, partial_result.exit_code, CLI_Exit.Media)
+	testing.expect(t, strings.contains(partial_result.output, `"ok":false`))
+	testing.expect(t, strings.contains(partial_result.output, `"failed":1`))
+	testing.expect(t, strings.contains(partial_result.output, `"clip_id":"clip-1"`))
+}
+
 cli_ipc_test_socket_pair :: proc(t: ^testing.T) -> ([2]posix.FD, bool) {
 	sockets: [2]posix.FD
 	result := posix.socketpair(.UNIX, .STREAM, .IP, &sockets)
@@ -2929,6 +2993,8 @@ clip_command_uses_range_duration_test :: proc(t: ^testing.T) {
 	testing.expect(t, strings.has_prefix(command, "'/Applications/hw_videoClips.app/Contents/Resources/helpers/ffmpeg'"))
 	testing.expect(t, strings.contains(command, "-ss 12.500"))
 	testing.expect(t, strings.contains(command, "-t 7.750"))
+	testing.expect(t, strings.contains(command, "-vf 'setpts=PTS-STARTPTS'"))
+	testing.expect(t, strings.contains(command, "-af 'asetpts=PTS-STARTPTS'"))
 	testing.expect(t, strings.contains(command, "'/tmp/source video.mp4'"))
 	testing.expect(t, strings.contains(command, ">> '/tmp/ffmpeg-source-1.log'"))
 	testing.expect(t, strings.has_suffix(

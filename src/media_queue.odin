@@ -343,6 +343,34 @@ media_queue_export_finalize :: proc(data: rawptr) {
 	}
 }
 
+media_queue_clip_normalize_task :: proc(
+	task_context: ^task_queue.Task_Context,
+) -> task_queue.Task_Outcome {
+	job := (^Clip_Normalize_Job)(task_context.data)
+	clip_normalize_job_execute(job)
+	if media_queue_is_shutting_down() {return {}}
+	msg_void_sel_id_b(
+		job.completion_target,
+		sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"),
+		sel_registerName("clipNormalizeFinished:"),
+		nil,
+		false,
+	)
+	_ = media_task_completion_wait(&job.completion)
+	return {}
+}
+
+media_queue_clip_normalize_cancel :: proc(data: rawptr) {
+	clip_normalize_job_cancel((^Clip_Normalize_Job)(data))
+}
+
+media_queue_clip_normalize_finalize :: proc(data: rawptr) {
+	job := (^Clip_Normalize_Job)(data)
+	if media_task_completion_processed(&job.completion) {
+		clip_normalize_job_destroy(job)
+	}
+}
+
 media_queue_probe_task :: proc(
 	task_context: ^task_queue.Task_Context,
 ) -> task_queue.Task_Outcome {
@@ -463,6 +491,25 @@ media_queue_schedule_export :: proc(
 	}
 	job.task_id = id
 	export_jobs_add(job)
+	return true
+}
+
+media_queue_schedule_clip_normalize :: proc(job: ^Clip_Normalize_Job) -> bool {
+	if job == nil || !media_queue_initialized {return false}
+	id, add_error := task_queue.add(
+		&media_queue,
+		{
+			procedure = media_queue_clip_normalize_task,
+			data = job,
+			cancel_procedure = media_queue_clip_normalize_cancel,
+			finalize_procedure = media_queue_clip_normalize_finalize,
+			policy_data = media_queue_policy_encode(.Export, barrier = true),
+			release_on_finish = true,
+			label = "Normalize clips",
+		},
+	)
+	if add_error != .None {return false}
+	job.task_id = id
 	return true
 }
 

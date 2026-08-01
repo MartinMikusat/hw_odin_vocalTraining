@@ -594,6 +594,17 @@ ui_automation_seed_fixture :: proc() -> bool {
 	if path_value == nil || len(string(path_value)) == 0 {return true}
 	media_path := string(path_value)
 	if !os.exists(media_path) {return false}
+	fixture_directory := filepath.dir(media_path)
+	source_media_path := fmt.tprintf("%s/ui-test-source.mp4", fixture_directory)
+	clip_media_path := fmt.tprintf("%s/ui-test-clip.mp4", fixture_directory)
+	if !os.exists(source_media_path) &&
+	   os2.copy_file(source_media_path, media_path) != nil {
+		return false
+	}
+	if !os.exists(clip_media_path) &&
+	   os2.copy_file(clip_media_path, media_path) != nil {
+		return false
+	}
 	source_id := "ui-test-source"
 	clip_id := "ui-test-clip"
 	source_exists := source_index_for_id(state.sources[:], source_id) >= 0
@@ -606,7 +617,7 @@ ui_automation_seed_fixture :: proc() -> bool {
 			video_id = "ui-test-video",
 			title = "UI Test Source",
 			url = "https://www.youtube.com/watch?v=ui-test-video",
-			media_path = media_path,
+			media_path = source_media_path,
 			duration = 1,
 			metadata = {
 				width = 320,
@@ -631,7 +642,7 @@ ui_automation_seed_fixture :: proc() -> bool {
 			name = "UI Test Clip",
 			start_seconds = 0,
 			end_seconds = 1,
-			clip_path = media_path,
+			clip_path = clip_media_path,
 			dance_count_in_bpm = 120,
 			dance_playback_rate = 1,
 		})

@@ -269,6 +269,26 @@ Export_Job :: struct {
 	completion: Media_Task_Completion,
 }
 
+Clip_Normalize_Job :: struct {
+	task_id: task_queue.Task_ID,
+	completion_target: Id,
+	library: App_State,
+	operation_id: u64,
+	log_path: string,
+	notification_id: i64,
+	total: int,
+	rebuilt: int,
+	failures: [dynamic]CLI_Clip_Normalize_Failure,
+	process_mutex: sync.Mutex,
+	process: os2.Process,
+	has_process: bool,
+	cancelled: bool,
+	cli_work: ^CLI_IPC_Work,
+	completion: Media_Task_Completion,
+}
+
+clip_normalize_job: ^Clip_Normalize_Job
+
 Library_Recovery_Entry :: struct {
 	video_id: string,
 	height:   int,
@@ -801,7 +821,7 @@ clip_export_command :: proc(
 	if len(ffmpeg_command) == 0 { ffmpeg_command = helper_command("ffmpeg") }
 	output_log := log_path
 	if len(output_log) == 0 {output_log = diagnostic_log_path("ffmpeg")}
-	return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -c:v libx264 -c:a aac -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(output_log))
+	return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -vf 'setpts=PTS-STARTPTS' -af 'asetpts=PTS-STARTPTS' -c:v libx264 -c:a aac -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(output_log))
 }
 
 workflow_source_directory :: proc(workflow: Workflow_Kind) -> string {
@@ -1549,6 +1569,201 @@ export_job_execute :: proc(job: ^Export_Job) -> bool {
 	cancelled = job.cancelled
 	sync.mutex_unlock(&job.process_mutex)
 	return !cancelled && wait_error == nil && process_state.success
+}
+
+clip_normalize_failure_add :: proc(
+	job: ^Clip_Normalize_Job,
+	clip_id,
+	reason: string,
+) {
+	if job == nil {return}
+	append(&job.failures, CLI_Clip_Normalize_Failure{
+		clip_id = strings.clone(clip_id),
+		reason = strings.clone(reason),
+		diagnostic_log = strings.clone(job.log_path),
+	})
+}
+
+clip_normalize_job_cancel :: proc(job: ^Clip_Normalize_Job) {
+	if job == nil {return}
+	sync.mutex_lock(&job.process_mutex)
+	job.cancelled = true
+	if job.has_process {_ = kill(i32(job.process.pid), 15)}
+	sync.mutex_unlock(&job.process_mutex)
+}
+
+clip_normalize_job_is_cancelled :: proc(job: ^Clip_Normalize_Job) -> bool {
+	if job == nil {return true}
+	sync.mutex_lock(&job.process_mutex)
+	cancelled := job.cancelled
+	sync.mutex_unlock(&job.process_mutex)
+	return cancelled
+}
+
+clip_normalize_process_run :: proc(
+	job: ^Clip_Normalize_Job,
+	command: string,
+) -> bool {
+	arguments := []string{"/bin/sh", "-c", command}
+	process, start_error := os2.process_start({command = arguments})
+	if start_error != nil {return false}
+	sync.mutex_lock(&job.process_mutex)
+	job.process = process
+	job.has_process = true
+	cancelled := job.cancelled
+	if cancelled {_ = kill(i32(process.pid), 15)}
+	sync.mutex_unlock(&job.process_mutex)
+	process_state, wait_error := os2.process_wait(process)
+	_ = os2.process_close(process)
+	sync.mutex_lock(&job.process_mutex)
+	job.has_process = false
+	cancelled = job.cancelled
+	sync.mutex_unlock(&job.process_mutex)
+	return !cancelled && wait_error == nil && process_state.success
+}
+
+clip_normalize_job_execute :: proc(job: ^Clip_Normalize_Job) {
+	if job == nil {return}
+	job.total = len(job.library.clips)
+	for clip in job.library.clips {
+		if clip_normalize_job_is_cancelled(job) {break}
+		source_index := source_index_for_id(
+			job.library.sources[:],
+			clip.source_id,
+		)
+		if source_index < 0 {
+			clip_normalize_failure_add(job, clip.id, "The source record is missing")
+			continue
+		}
+		source := &job.library.sources[source_index]
+		if filepath.clean(source.media_path) == filepath.clean(clip.clip_path) {
+			clip_normalize_failure_add(job, clip.id, "The clip path matches its source path")
+			continue
+		}
+		if !os.exists(source.media_path) {
+			clip_normalize_failure_add(job, clip.id, "The source media file is missing")
+			continue
+		}
+		if !valid_clip_range(clip.start_seconds, clip.end_seconds, source.duration) {
+			clip_normalize_failure_add(job, clip.id, "The saved clip range is invalid")
+			continue
+		}
+		staging_path := fmt.tprintf(
+			"%s.normalize-%020d.tmp.mp4",
+			clip.clip_path,
+			job.operation_id,
+		)
+		_ = os.remove(staging_path)
+		command := clip_export_command(
+			source.media_path,
+			staging_path,
+			clip.start_seconds,
+			clip.end_seconds,
+			log_path = job.log_path,
+		)
+		if !clip_normalize_process_run(job, command) {
+			_ = os.remove(staging_path)
+			if !clip_normalize_job_is_cancelled(job) {
+				clip_normalize_failure_add(job, clip.id, "FFmpeg failed")
+			}
+			continue
+		}
+		if !media_file_validate(staging_path) {
+			_ = os.remove(staging_path)
+			clip_normalize_failure_add(job, clip.id, "The staged clip failed media validation")
+			continue
+		}
+		if !os.rename(staging_path, clip.clip_path) {
+			_ = os.remove(staging_path)
+			clip_normalize_failure_add(job, clip.id, "The staged clip could not replace the current file")
+			continue
+		}
+		job.rebuilt += 1
+	}
+}
+
+clip_normalize_job_destroy :: proc(job: ^Clip_Normalize_Job) {
+	if job == nil {return}
+	app_state_collections_destroy(&job.library)
+	for failure in job.failures {
+		delete(failure.clip_id)
+		delete(failure.reason)
+		delete(failure.diagnostic_log)
+	}
+	delete(job.failures)
+	delete(job.log_path)
+	free(job)
+}
+
+clip_normalize_result :: proc(job: ^Clip_Normalize_Job) -> CLI_Result {
+	failed := len(job.failures)
+	ok := !job.cancelled && failed == 0
+	exit_code := CLI_Exit.Success
+	error: CLI_Error_Data
+	if job.cancelled {
+		exit_code = .Busy
+		error = {code = "cancelled", message = "Clip normalization was cancelled", diagnostic_log = job.log_path}
+	} else if failed > 0 {
+		exit_code = .Media
+		error = {code = "clip_normalization_failed", message = "One or more clips could not be normalized", diagnostic_log = job.log_path}
+	}
+	data := CLI_Clip_Normalize_Data{
+		total = job.total,
+		rebuilt = job.rebuilt,
+		failed = failed,
+		cancelled = job.cancelled,
+		failures = job.failures[:],
+	}
+	if ok {
+		response := CLI_Clip_Normalize_Success_Response{
+			ok = true,
+			command = cli_command_name(.Clip_Normalize_Timestamps),
+			data = data,
+		}
+		return {output = cli_encode(response), exit_code = exit_code}
+	}
+	response := CLI_Clip_Normalize_Failure_Response{
+		ok = ok,
+		command = cli_command_name(.Clip_Normalize_Timestamps),
+		data = data,
+		error = error,
+	}
+	return {output = cli_encode(response), exit_code = exit_code}
+}
+
+clip_normalize_finish :: proc(job: ^Clip_Normalize_Job) {
+	if job == nil {return}
+	result := clip_normalize_result(job)
+	if job.cancelled {
+		_ = notification_finish(job.notification_id, .Interrupted, "Clip normalization stopped")
+	} else if len(job.failures) > 0 {
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			fmt.tprintf(
+				"Normalized %d of %d clips",
+				job.rebuilt,
+				job.total,
+			),
+			fmt.tprintf("Inspect the diagnostic log at %s", job.log_path),
+		)
+	} else {
+		_ = notification_finish(
+			job.notification_id,
+			.Success,
+			fmt.tprintf("Normalized %d clips", job.rebuilt),
+		)
+	}
+	cli_ipc_work_finish(job.cli_work, result)
+}
+
+on_clip_normalize_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	job := clip_normalize_job
+	clip_normalize_job = nil
+	clip_normalize_finish(job)
+	if job != nil {media_task_completion_finish(&job.completion)}
 }
 
 import_job_destroy :: proc(job: ^Import_Job) {
@@ -3808,9 +4023,26 @@ jobs_shutdown :: proc() {
 	}
 	library_recovery_destroy()
 	if media_queue_initialized {
+		if clip_normalize_job != nil && clip_normalize_job.cli_work != nil {
+			cli_ipc_work_finish(
+				clip_normalize_job.cli_work,
+				cli_error(
+					.Clip_Normalize_Timestamps,
+					.Busy,
+					"app_stopping",
+					"The application stopped before clip normalization completed",
+				),
+			)
+			clip_normalize_job.cli_work = nil
+		}
 		media_queue_begin_shutdown()
 		task_queue.queue_destroy(&media_queue, .Cancel_All)
 		media_queue_initialized = false
+	}
+	if clip_normalize_job != nil {
+		job := clip_normalize_job
+		clip_normalize_job = nil
+		clip_normalize_job_destroy(job)
 	}
 	if source_probe_job != nil {
 		source_probe_job_destroy(source_probe_job)

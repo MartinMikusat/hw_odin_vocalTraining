@@ -26,6 +26,7 @@ CLI_Command :: enum {
 	Transcript_Get,
 	Clip_Create,
 	Clip_List,
+	Clip_Normalize_Timestamps,
 	Playback_Fullscreen,
 	UI_Run,
 	UI_Capture,
@@ -164,6 +165,33 @@ CLI_Clip_List_Response :: struct {
 	data: CLI_Clip_List_Data,
 }
 
+CLI_Clip_Normalize_Failure :: struct {
+	clip_id: string,
+	reason: string,
+	diagnostic_log: string,
+}
+
+CLI_Clip_Normalize_Data :: struct {
+	total: int,
+	rebuilt: int,
+	failed: int,
+	cancelled: bool,
+	failures: []CLI_Clip_Normalize_Failure,
+}
+
+CLI_Clip_Normalize_Success_Response :: struct {
+	ok: bool,
+	command: string,
+	data: CLI_Clip_Normalize_Data,
+}
+
+CLI_Clip_Normalize_Failure_Response :: struct {
+	ok: bool,
+	command: string,
+	data: CLI_Clip_Normalize_Data,
+	error: CLI_Error_Data,
+}
+
 CLI_Playback_Fullscreen_Data :: struct {
 	fullscreen: bool,
 	changed: bool,
@@ -233,6 +261,7 @@ cli_command_name :: proc(command: CLI_Command) -> string {
 	case .Transcript_Get: return "transcript.get"
 	case .Clip_Create: return "clip.create"
 	case .Clip_List: return "clip.list"
+	case .Clip_Normalize_Timestamps: return "clip.normalize-timestamps"
 	case .Playback_Fullscreen: return "playback.fullscreen"
 	case .UI_Run: return "ui.run"
 	case .UI_Capture: return "ui.capture"
@@ -254,6 +283,7 @@ cli_command_requires_gui :: proc(command: CLI_Command) -> bool {
 	       command == .UI_Bridge_Key ||
 	       command == .UI_Check ||
 	       command == .UI_Simulate_Tasks ||
+	       command == .Clip_Normalize_Timestamps ||
 	       command == .Playback_Fullscreen
 }
 
@@ -395,6 +425,16 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 	case group == "clip" && action == "list":
 		request.command = .Clip_List
 		allowed = []string{"--source", "--workflow"}
+	case group == "clip" && action == "normalize-timestamps":
+		when ODIN_DEBUG {
+			request.command = .Clip_Normalize_Timestamps
+			if len(remaining) != 0 {
+				return {}, cli_error(request.command, .Usage, "usage", "clip normalize-timestamps does not accept options"), false
+			}
+			return request, {}, true
+		} else {
+			return {}, cli_error(.None, .Usage, "usage", "Unknown command"), false
+		}
 	case group == "playback" && action == "fullscreen":
 		request.command = .Playback_Fullscreen
 		allowed = []string{"--state"}
@@ -503,7 +543,8 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 				"ui simulate-tasks requires --scenario parallel|completed|overflow|clear",
 			), false
 		}
-	case .None, .Source_List, .Clip_List, .UI_Capture, .UI_Snapshot:
+	case .None, .Source_List, .Clip_List, .Clip_Normalize_Timestamps,
+	     .UI_Capture, .UI_Snapshot:
 	}
 	return request, {}, true
 }
@@ -1103,6 +1144,102 @@ cli_clip_create_enqueue :: proc(
 	return true
 }
 
+cli_clip_normalize_enqueue :: proc(
+	request: CLI_Request,
+	work: ^CLI_IPC_Work,
+) -> bool {
+	if clip_normalize_job != nil {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Busy,
+				"normalization_active",
+				"Clip timestamp normalization is already active",
+			),
+		)
+		return true
+	}
+	if library_replacement_job != nil {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Busy,
+				"library_replacement_queued",
+				"The queued library replacement invalidates clip normalization",
+			),
+		)
+		return true
+	}
+	if available, reason := helper_available("ffmpeg"); !available {
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Media,
+				"helper_unavailable",
+				reason,
+				diagnostic_log_path("ffmpeg"),
+			),
+		)
+		return true
+	}
+	job := new(Clip_Normalize_Job)
+	copy, copied := app_state_collections_clone(&state)
+	if !copied {
+		free(job)
+		cli_ipc_work_finish(
+			work,
+			cli_error(
+				request.command,
+				.Storage,
+				"allocation_failed",
+				"Unable to snapshot the clip library",
+			),
+		)
+		return true
+	}
+	job.library = copy
+	job.completion_target = state.delegate_target
+	job.operation_id = next_media_operation_id()
+	job.log_path = strings.clone(
+		fmt.tprintf(
+			"%s/ffmpeg-normalize-clips-%020d.log",
+			app_support_dir(),
+			job.operation_id,
+		),
+	)
+	job.cli_work = work
+	fields := [1]Notification_Field{
+		{label = "CLI operation", value = "clip normalize-timestamps"},
+	}
+	job.notification_id = notification_begin(
+		"Clip timestamp normalization queued",
+		"The command rebuilds every saved clip through verified staging files.",
+		fields[:],
+	)
+	_ = os.write_entire_file(job.log_path, nil)
+	clip_normalize_job = job
+	if !media_queue_schedule_clip_normalize(job) {
+		clip_normalize_job = nil
+		result := cli_error(
+			request.command,
+			.Storage,
+			"queue_failed",
+			"Unable to queue clip timestamp normalization",
+		)
+		_ = notification_finish(
+			job.notification_id,
+			.Error,
+			"Unable to queue clip timestamp normalization",
+		)
+		clip_normalize_job_destroy(job)
+		cli_ipc_work_finish(work, result)
+	}
+	return true
+}
+
 cli_clip_create_finish :: proc(job: ^Export_Job) {
 	work := job.cli_work
 	if job.cancelled {
@@ -1381,6 +1518,8 @@ cli_execute :: proc(request: CLI_Request) -> CLI_Result {
 	case .Transcript_Get: return cli_transcript_get(request)
 	case .Clip_Create: return cli_clip_create(request)
 	case .Clip_List: return cli_clip_list(request)
+	case .Clip_Normalize_Timestamps:
+		return cli_error(request.command, .Busy, "job_not_started", "The running application must queue clip normalization")
 	case .Playback_Fullscreen: return cli_playback_fullscreen(request)
 	case .UI_Capture: return cli_ui_capture(request)
 	case .UI_Bridge_Pointer: return cli_ui_bridge_pointer(request)

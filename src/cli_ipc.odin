@@ -279,6 +279,10 @@ on_cli_ipc_request :: proc "c" (self: Id, command: Sel, sender: Id) {
 	   cli_clip_create_enqueue(cli_ipc_work.request, cli_ipc_work) {
 		return
 	}
+	if cli_ipc_work.request.command == .Clip_Normalize_Timestamps &&
+	   cli_clip_normalize_enqueue(cli_ipc_work.request, cli_ipc_work) {
+		return
+	}
 	if cli_ipc_work.request.command == .UI_Run &&
 	   ui_automation_start(cli_ipc_work.request, cli_ipc_work) {
 		return

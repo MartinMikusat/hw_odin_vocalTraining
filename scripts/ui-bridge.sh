@@ -65,7 +65,7 @@ key() {
   run_cli "$@" >/dev/null
 }
 
-"$ROOT/scripts/ui-test.sh" run "$ROOT/tests/ui/bridge-prepare.json" >/dev/null
+run_cli ui run --file "$ROOT/tests/ui/bridge-prepare.json" >/dev/null
 
 printf 'pointer... '
 run_cli ui bridge-pointer --control "player full screen toggle" >/dev/null
