@@ -71,6 +71,9 @@ workflow. Each workflow owns its own Sources and Clips. The second control
 selects **Sources** or **Clips**. Sources shows ingest, the timed transcript,
 range markers, clip naming, and export controls. The application saves this
 workflow and workspace pair and restores it on the next launch.
+Each workflow also saves its selected source and selected clip. A workspace
+switch or application launch restores the saved row and loads its media without
+starting playback.
 
 Vocal uses Ochre in HW Light and Coffee in HW Dark for its primary interface
 accent. Dancing uses `#36516F` in HW Light and `#7896B3` in HW Dark.

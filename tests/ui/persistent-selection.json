@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "name": "persistent-list-selection",
+  "mutation": "persistent",
+  "setup": {
+    "workflow": "dancing",
+    "mode": "play",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "steps": [
+    {"op": "activate", "control": "select clip ui-test-clip"},
+    {"op": "assert", "condition": {"kind": "surface", "field": "selection.id", "operator": "eq", "value": "ui-test-clip"}},
+    {"op": "activate", "control": "switch workspace"},
+    {"op": "activate", "control": "select source ui-test-source"},
+    {"op": "assert", "condition": {"kind": "surface", "field": "selection.id", "operator": "eq", "value": "ui-test-source"}},
+    {"op": "activate", "control": "switch workspace"},
+    {"op": "assert", "condition": {"kind": "surface", "field": "selection.id", "operator": "eq", "value": "ui-test-clip"}},
+    {"op": "assert", "condition": {"kind": "surface", "field": "playback.active", "operator": "eq", "value": false}}
+  ]
+}

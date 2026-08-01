@@ -254,6 +254,10 @@ UI_State :: struct {
 	transcript_has_follow_target: bool,
 	clip_scroll:    f64,
 	active_clip:    int,
+	source_selection_ids: [WORKFLOW_COUNT]string,
+	clip_selection_ids: [WORKFLOW_COUNT]string,
+	source_selection_saved: [WORKFLOW_COUNT]bool,
+	clip_selection_saved: [WORKFLOW_COUNT]bool,
 	clip_shuffle:   bool,
 	clip_autoplay:  bool,
 	player_item:        Id,
@@ -2545,6 +2549,122 @@ persist_active_view_preference :: proc() {
 	}
 }
 
+remember_list_selection :: proc(mode: UI_Mode, record_id: string) {
+	workflow_index := int(ui.workflow)
+	if workflow_index < 0 || workflow_index >= WORKFLOW_COUNT {return}
+	if mode == .Create {
+		ui_set_string(&ui.source_selection_ids[workflow_index], record_id)
+		ui.source_selection_saved[workflow_index] = true
+	} else {
+		ui_set_string(&ui.clip_selection_ids[workflow_index], record_id)
+		ui.clip_selection_saved[workflow_index] = true
+	}
+	if library_database != nil &&
+	   !database_list_selection_save(
+		library_database,
+		ui.workflow,
+		mode,
+		record_id,
+	) {
+		set_error_status("The list selection could not be saved")
+	}
+}
+
+restore_source_selection :: proc() {
+	workflow_index := int(ui.workflow)
+	state.active_source = -1
+	if workflow_index < 0 || workflow_index >= WORKFLOW_COUNT {return}
+	id := ui.source_selection_ids[workflow_index]
+	if ui.source_selection_saved[workflow_index] {
+		if len(id) == 0 {load_clip_draft_for_source(-1); return}
+		index := source_index_for_id(state.sources[:], id)
+		if index < 0 || state.sources[index].workflow != ui.workflow {
+			remember_list_selection(.Create, "")
+			load_clip_draft_for_source(-1)
+			return
+		}
+		_ = load_source_player(index)
+		return
+	}
+	if index := last_source_index_for_workflow(ui.workflow); index >= 0 {
+		_ = load_source_player(index)
+	} else {
+		load_clip_draft_for_source(-1)
+	}
+}
+
+restore_clip_selection :: proc() {
+	workflow_index := int(ui.workflow)
+	ui.active_clip = -1
+	if workflow_index < 0 || workflow_index >= WORKFLOW_COUNT {return}
+	id := ui.clip_selection_ids[workflow_index]
+	if !ui.clip_selection_saved[workflow_index] || len(id) == 0 {return}
+	index := clip_index_for_id(state.clips[:], id)
+	if index < 0 || state.clips[index].workflow != ui.workflow {
+		remember_list_selection(.Play, "")
+		return
+	}
+	clip := &state.clips[index]
+	ui.playback_rate = (
+		clip.workflow == .Vocal ?
+		ui.vocal_playback_rate :
+		clamp_playback_rate(clip.dance_playback_rate)
+	)
+	ui.active_clip = index
+	if !os.exists(clip.clip_path) || !metal_player_load(clip.clip_path) {return}
+	ui.player_duration = clip.end_seconds - clip.start_seconds
+	set_source_playback_active(false)
+	stop_player_playback()
+}
+
+ensure_active_list_selection_visible :: proc() {
+	_, _, source_search, source_panel, _, _, clip_search, clip_panel, clip_name, _, _ :=
+		layout_rects()
+	if ui.mode == .Create && state.active_source >= 0 {
+		visible_index := 0
+		for source, index in state.sources {
+			if source.workflow != ui.workflow ||
+			   !source_matches_search(source, ui.source_search) {
+				continue
+			}
+			if index == state.active_source {
+				content := source_content_rect(source_search, source_panel)
+				ui.source_scroll = bounded_scroll(
+					f64(visible_index)*30-content.h/2+14.5,
+					0,
+					filtered_source_count(),
+					29,
+					30,
+					content.h,
+				)
+				return
+			}
+			visible_index += 1
+		}
+	} else if ui.mode == .Play && ui.active_clip >= 0 {
+		visible_index := 0
+		for clip, index in state.clips {
+			if clip.workflow != ui.workflow ||
+			   !clip_matches_filter(clip, ui.clip_search) {
+				continue
+			}
+			if index == ui.active_clip {
+				content := clip_content_rect(clip_search, clip_panel, clip_name)
+				ui.clip_scroll = bounded_scroll(
+					f64(visible_index)*30-content.h/2+14.5,
+					0,
+					filtered_clip_count(),
+					29,
+					30,
+					content.h,
+				)
+				return
+			}
+			visible_index += 1
+		}
+	}
+}
+
 set_ui_mode :: proc(mode: UI_Mode, persist := true) {
 	if ui.mode == mode {return}
 	if !flush_active_clip_draft() {return}
@@ -2564,16 +2684,14 @@ set_ui_mode :: proc(mode: UI_Mode, persist := true) {
 		metal_player_clear()
 	} else {
 		pitch_monitor_stop(&ui.pitch)
-		ui.active_clip = -1
-		if state.active_source >= 0 && state.active_source < len(state.sources) {
-			_ = load_source_player(state.active_source)
-		}
 	}
 	ui.mode = mode
+	if mode == .Create {restore_source_selection()} else {restore_clip_selection()}
 	ui.focus = .None
 	text_input.end_pointer_selection(&ui.input_state)
 	clear_marked_text()
 	normalize_scroll_offsets()
+	ensure_active_list_selection_visible()
 	ui.needs_redraw = true
 	if persist {persist_active_view_preference()}
 }
@@ -2601,9 +2719,6 @@ set_ui_workflow :: proc(workflow: Workflow_Kind, persist := true) {
 	pitch_monitor_stop(&ui.pitch)
 	metal_player_clear()
 	ui.workflow = workflow
-	ui.active_clip = -1
-	state.active_source = -1
-	load_clip_draft_for_source(-1)
 	ui.source_scroll = 0
 	ui.transcript_scroll = 0
 	ui.clip_scroll = 0
@@ -2611,16 +2726,12 @@ set_ui_workflow :: proc(workflow: Workflow_Kind, persist := true) {
 	ui_set_string(&ui.transcript_search, "")
 	ui_set_string(&ui.clip_search, "")
 	ui.playback_rate = workflow == .Vocal ? ui.vocal_playback_rate : 1
-	if ui.mode == .Create {
-		if source_index := last_source_index_for_workflow(workflow);
-		   source_index >= 0 {
-			_ = load_source_player(source_index)
-		}
-	}
+	if ui.mode == .Create {restore_source_selection()} else {restore_clip_selection()}
 	ui.focus = .None
 	text_input.end_pointer_selection(&ui.input_state)
 	clear_marked_text()
 	normalize_scroll_offsets()
+	ensure_active_list_selection_visible()
 	ui.needs_redraw = true
 	if persist {persist_active_view_preference()}
 }
@@ -11285,6 +11396,10 @@ ui_memory_destroy :: proc() {
 	video_clips_shortcut_destroy(&ui.shortcut_candidate)
 	delete(ui.status)
 	delete(ui.status_source_video_id)
+	for index in 0..<WORKFLOW_COUNT {
+		delete(ui.source_selection_ids[index])
+		delete(ui.clip_selection_ids[index])
+	}
 	text_input.destroy(&ui.input_state)
 	delete(ui.transcript_matches)
 	delete(ax_actions)
@@ -13394,11 +13509,7 @@ video_clips_gui_initialize :: proc() -> bool {
 		return false
 	}
 
-	if ui.mode == .Create {
-		if index := last_source_index_for_workflow(ui.workflow); index >= 0 {
-			load_source_player(index)
-		}
-	}
+	if ui.mode == .Create {restore_source_selection()} else {restore_clip_selection()}
 	// The Objective-C runtime requires the exact floating-point signature, so
 	// construct the repeating timer through a typed send.
 	timer_send := transmute(proc "c" (

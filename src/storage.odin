@@ -1381,6 +1381,66 @@ database_active_view_save :: proc(
 	       sqlite3_step(statement) == SQLITE_DONE
 }
 
+list_selection_preference_key :: proc(
+	workflow: Workflow_Kind,
+	mode: UI_Mode,
+) -> (string, bool) {
+	switch workflow {
+	case .Vocal:
+		if mode == .Create {return "vocal_source_selection", true}
+		if mode == .Play {return "vocal_clip_selection", true}
+	case .Dancing:
+		if mode == .Create {return "dancing_source_selection", true}
+		if mode == .Play {return "dancing_clip_selection", true}
+	}
+	return "", false
+}
+
+database_list_selection_load :: proc(
+	database: ^SQLite_DB,
+	workflow: Workflow_Kind,
+	mode: UI_Mode,
+) -> (string, bool) {
+	if database == nil {return "", false}
+	key, valid := list_selection_preference_key(workflow, mode)
+	if !valid {return "", false}
+	statement, ok := sqlite_prepare(
+		database,
+		"SELECT value FROM app_preferences WHERE key = ?",
+	)
+	if !ok {return "", false}
+	defer sqlite3_finalize(statement)
+	if !sqlite_bind_text_value(statement, 1, key) ||
+	   sqlite3_step(statement) != SQLITE_ROW {
+		return "", false
+	}
+	value := sqlite3_column_text(statement, 0)
+	if value == nil {return "", true}
+	return strings.clone(string(value)), true
+}
+
+database_list_selection_save :: proc(
+	database: ^SQLite_DB,
+	workflow: Workflow_Kind,
+	mode: UI_Mode,
+	record_id: string,
+) -> bool {
+	if database == nil {return false}
+	key, valid := list_selection_preference_key(workflow, mode)
+	if !valid {return false}
+	statement, ok := sqlite_prepare(
+		database,
+		`INSERT INTO app_preferences (key, value)
+		 VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	)
+	if !ok {return false}
+	defer sqlite3_finalize(statement)
+	return sqlite_bind_text_value(statement, 1, key) &&
+	       sqlite_bind_text_value(statement, 2, record_id) &&
+	       sqlite3_step(statement) == SQLITE_DONE
+}
+
 database_vocal_playback_rate_load :: proc(database: ^SQLite_DB) -> f32 {
 	if database == nil {return 1}
 	statement, ok := sqlite_prepare(

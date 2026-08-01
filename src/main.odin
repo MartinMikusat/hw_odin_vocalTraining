@@ -1418,6 +1418,7 @@ load_source_player :: proc(index: int) -> bool {
 	ui.source_hint_menu_open = false
 	source := &state.sources[index]
 	state.active_source = index
+	remember_list_selection(.Create, source.id)
 	load_clip_draft_for_source(index)
 	source.media_available = os.exists(source.media_path)
 	if !source.media_available || !media_file_validate(source.media_path) {
@@ -3152,6 +3153,7 @@ finish_export_job :: proc(job: ^Export_Job) {
 		ui.player_duration = clip.end_seconds - clip.start_seconds
 		set_source_playback_active(false)
 		ui.active_clip = index
+		remember_list_selection(.Play, clip.id)
 		start_active_clip_from_beginning(false)
 		_ = notification_finish(
 			job.notification_id,
@@ -3275,6 +3277,7 @@ play_clip :: proc(index: int) -> bool {
 	ui.player_duration = clip.end_seconds - clip.start_seconds
 	set_source_playback_active(false)
 	ui.active_clip = index
+	remember_list_selection(.Play, clip.id)
 	start_active_clip_from_beginning(false)
 	set_text(state.status, fmt.tprintf("Playing %s", clip.name))
 	return true
@@ -3939,6 +3942,15 @@ video_clips_process_main :: proc(args := os.args) {
 	active_view := database_active_view_load(library_database)
 	ui.workflow = active_view.workflow
 	ui.mode = active_view.mode
+	for workflow in Workflow_Kind {
+		workflow_index := int(workflow)
+		ui.source_selection_ids[workflow_index],
+		ui.source_selection_saved[workflow_index] =
+			database_list_selection_load(library_database, workflow, .Create)
+		ui.clip_selection_ids[workflow_index],
+		ui.clip_selection_saved[workflow_index] =
+			database_list_selection_load(library_database, workflow, .Play)
+	}
 	ui.playback_rate =
 		ui.workflow == .Vocal ? ui.vocal_playback_rate : 1
 	if !ui_automation_seed_fixture() {

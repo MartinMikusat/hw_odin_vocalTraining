@@ -5867,6 +5867,48 @@ active_view_persistence_uses_current_workflow_and_workspace_test :: proc(
 }
 
 @(test)
+list_selections_round_trip_independently_through_preferences_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+
+	workflows := [2]Workflow_Kind{.Vocal, .Dancing}
+	modes := [2]UI_Mode{.Create, .Play}
+	for workflow in workflows {
+		for mode in modes {
+			value, found := database_list_selection_load(database, workflow, mode)
+			testing.expect(t, !found)
+			delete(value)
+			id := fmt.tprintf("%s-%s-id", cli_workflow_name(workflow), mode == .Create ? "source" : "clip")
+			testing.expect(t, database_list_selection_save(database, workflow, mode, id))
+			value, found = database_list_selection_load(database, workflow, mode)
+			testing.expect(t, found)
+			testing.expect_value(t, value, id)
+			delete(value)
+		}
+	}
+
+	testing.expect(t, database_list_selection_save(database, .Vocal, .Create, ""))
+	value, found := database_list_selection_load(database, .Vocal, .Create)
+	testing.expect(t, found)
+	testing.expect_value(t, value, "")
+	delete(value)
+	testing.expect(t, !database_list_selection_save(database, Workflow_Kind(99), .Create, "id"))
+}
+
+@(test)
 flash_leader_round_trips_through_application_preferences_test :: proc(
 	t: ^testing.T,
 ) {

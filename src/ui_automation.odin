@@ -338,6 +338,28 @@ ui_automation_surface_value :: proc(field: string) -> UI_Automation_Value {
 		return {kind=.String, string=surface.background}
 	case "media.loaded":
 		return {kind=.Boolean, boolean=state.player != nil}
+	case "selection.id":
+		if ui.mode == .Create &&
+		   state.active_source >= 0 &&
+		   state.active_source < len(state.sources) {
+			return {kind=.String, string=state.sources[state.active_source].id}
+		}
+		if ui.mode == .Play &&
+		   ui.active_clip >= 0 &&
+		   ui.active_clip < len(state.clips) {
+			return {kind=.String, string=state.clips[ui.active_clip].id}
+		}
+		return {kind=.String, string=""}
+	case "selection.source.saved":
+		return {
+			kind = .String,
+			string = ui.source_selection_ids[int(ui.workflow)],
+		}
+	case "selection.clip.saved":
+		return {
+			kind = .String,
+			string = ui.clip_selection_ids[int(ui.workflow)],
+		}
 	case "playback.active":
 		active := state.player != nil &&
 		          msg_f32(state.player, sel_registerName("rate")) > 0
@@ -686,6 +708,7 @@ ui_automation_reset_transient :: proc(
 	}
 	set_ui_workflow(workflow, false)
 	set_ui_mode(mode, false)
+	if ui.mode == .Create {restore_source_selection()} else {restore_clip_selection()}
 	if state.window == nil || ui.view == nil {
 		return "The isolated UI test window is unavailable"
 	}
