@@ -6,6 +6,16 @@ import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
 import match_sorter "match_sorter:."
 import text_input "components:text_input"
+import framework_ui "ui_framework:core"
+
+@(test)
+video_clips_controls_reject_subpixel_action_rectangles_test :: proc(
+	t: ^testing.T,
+) {
+	testing.expect(t, !ui_rect_is_actionable(UI_Rect{0, 0, 0.999, 30}))
+	testing.expect(t, !ui_rect_is_actionable(UI_Rect{0, 0, 30, 0.999}))
+	testing.expect(t, ui_rect_is_actionable(UI_Rect{0, 0, 1, 1}))
+}
 
 @(test)
 video_clips_settings_layout_contains_two_columns_at_minimum_size_test :: proc(
@@ -117,6 +127,24 @@ video_clips_settings_controls_accept_pointer_actions_test :: proc(t: ^testing.T)
 	defer mem_virtual.arena_destroy(&frame_arena)
 	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+	testing.expect_value(t, len(shared_registry.controls), len(ui_build.controls))
+	shared_controls_data := raw_data(shared_registry.controls)
+	shared_actions_data := raw_data(shared_registry.actions)
+	_, automation_found := ui_automation_find_control("settings")
+	testing.expect(t, automation_found)
+	testing.expect_value(t, raw_data(shared_registry.controls), shared_controls_data)
+	testing.expect_value(t, raw_data(shared_registry.actions), shared_actions_data)
+	for control in ui_build.controls {
+		shared := framework_ui.control_in_view(
+			shared_registry,
+			framework_ui.Key(control.id),
+		)
+		testing.expect(t, shared != nil)
+		if shared != nil {
+			testing.expect_value(t, shared.functional_name, control.functional_name)
+			testing.expect_value(t, shared.enabled, .Enabled in control.flags)
+		}
+	}
 	testing.expect(t, find_ui_control_by_action(.Open_Settings) != nil)
 	settings_search := find_ui_control_by_action(.Settings_Search)
 	testing.expect(t, settings_search != nil)

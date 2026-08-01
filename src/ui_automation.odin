@@ -312,8 +312,10 @@ ui_automation_find_control :: proc(
 	if !arena_ok {return {}, false}
 	defer growing_arena_destroy(arena)
 	previous_build := ui_build
+	previous_registry := shared_registry
 	defer {
 		ui_build = previous_build
+		shared_registry = previous_registry
 	}
 	build_ui_controls(false, mem_virtual.arena_allocator(arena))
 	control := find_ui_control_by_functional_name(
@@ -1313,8 +1315,10 @@ ui_automation_post_pointer_click :: proc(
 	if !arena_ok {return "The pointer registry could not allocate memory"}
 	defer growing_arena_destroy(arena)
 	previous_build := ui_build
+	previous_registry := shared_registry
 	defer {
 		ui_build = previous_build
+		shared_registry = previous_registry
 	}
 	build_ui_controls(true, mem_virtual.arena_allocator(arena))
 	control := find_ui_control_by_functional_name(
@@ -1487,8 +1491,10 @@ cli_ui_bridge_key :: proc(request: CLI_Request) -> CLI_Result {
 	}
 	defer growing_arena_destroy(arena)
 	previous_build := ui_build
+	previous_registry := shared_registry
 	defer {
 		ui_build = previous_build
+		shared_registry = previous_registry
 	}
 	build_ui_controls(false, mem_virtual.arena_allocator(arena))
 	if request.key_code < 0 {

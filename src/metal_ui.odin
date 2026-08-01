@@ -16,6 +16,7 @@ import text_input "components:text_input"
 import flash "flash:."
 import match_sorter "match_sorter:."
 import framework_coretext "ui_framework:coretext"
+import framework_ui "ui_framework:core"
 import framework_draw "ui_framework:draw"
 import framework_metal "ui_framework:metal"
 
@@ -580,11 +581,6 @@ Modal_Discard_Target :: enum {
 	Clip_Rename,
 }
 
-AX_Action :: struct {
-	element:    Id,
-	control_id: UI_Control_ID,
-}
-
 UI_Action :: struct {
 	kind:    UI_Action_Kind,
 	index:   int,
@@ -636,7 +632,6 @@ ui := UI_State{
 }
 ui_event_tag: int
 allow_hidden_window_reveal: bool
-ax_actions: [dynamic]AX_Action
 ui_build: UI_Build_Output
 flash_state: flash.State
 command_palette_state: command_palette.State
@@ -647,7 +642,6 @@ ordered_text: framework_coretext.Context
 ordered_draw: framework_draw.List
 ordered_ui_ready: bool
 ordered_overlay_active: bool
-
 ordered_rect :: proc(rect: UI_Rect) -> framework_draw.Rect {
 	return {f32(rect.x), f32(rect.y), f32(rect.w), f32(rect.h)}
 }
@@ -3966,9 +3960,14 @@ normalize_scroll_offsets :: proc() {
 	}
 }
 
-push_rect :: proc(vertices: ^[dynamic]Solid_Vertex, rect: UI_Rect, color: [4]f32) {
+push_rect :: proc(
+	vertices: ^[dynamic]Solid_Vertex,
+	rect: UI_Rect,
+	color: [4]f32,
+	pipeline := "solid",
+) {
 	if rect.w <= 0 || rect.h <= 0 || ui.width <= 0 || ui.height <= 0 {return}
-	ui_render_trace_record_solid_rect(rect, color)
+	ui_render_trace_record_solid_rect(rect, color, pipeline)
 	x0 := f32(rect.x / ui.width * 2 - 1)
 	x1 := f32((rect.x + rect.w) / ui.width * 2 - 1)
 	y0 := f32(rect.y / ui.height * 2 - 1)
@@ -7165,8 +7164,8 @@ build_playback_fullscreen_timeline_geometry :: proc(
 	accent := ui_color_32(
 		workflow_accent_color(ui.workflow, ui_theme_is_dark(ui.theme)),
 	)
-	push_rect(vertices, completed, accent)
-	push_rect(vertices, thumb, accent)
+	push_rect(vertices, completed, accent, "fullscreen-timeline")
+	push_rect(vertices, thumb, accent, "fullscreen-timeline")
 }
 
 draw_playback_fullscreen_transport :: proc(
@@ -8699,115 +8698,6 @@ build_ordered_frame :: proc(
 	return true
 }
 
-ax_screen_rect :: proc(rect: UI_Rect) -> Rect {
-	view_rect := Rect{Point{rect.x, rect.y}, Size{rect.w, rect.h}}
-	window_rect := msg_rect_rect_id(
-		ui.view,
-		sel_registerName("convertRect:toView:"),
-		view_rect,
-		nil,
-	)
-	return msg_rect_rect(state.window, sel_registerName("convertRectToScreen:"), window_rect)
-}
-
-ui_control_id :: proc(functional_name: string) -> UI_Control_ID {
-	value := hash.fnv64a(transmute([]byte)functional_name)
-	if value == 0 {value = 1}
-	return UI_Control_ID(value)
-}
-
-find_ui_control :: proc(id: UI_Control_ID) -> ^UI_Control {
-	if id == 0 {return nil}
-	for &control in ui_build.controls {
-		if control.id == id {return &control}
-	}
-	return nil
-}
-
-find_ui_control_by_action :: proc(kind: UI_Action_Kind) -> ^UI_Control {
-	for &control in ui_build.controls {
-		if control.action.kind == kind {return &control}
-	}
-	return nil
-}
-
-find_ui_control_by_action_and_index :: proc(kind: UI_Action_Kind, index: int) -> ^UI_Control {
-	for &control in ui_build.controls {
-		if control.action.kind == kind && control.action.index == index {return &control}
-	}
-	return nil
-}
-
-find_ui_control_by_functional_name :: proc(
-	controls: []UI_Control,
-	functional_name: string,
-) -> ^UI_Control {
-	for &control in controls {
-		if control.functional_name == functional_name {return &control}
-	}
-	return nil
-}
-
-ui_control_rect :: proc(kind: UI_Action_Kind, index: int = -1) -> UI_Rect {
-	control: ^UI_Control
-	if index < 0 {
-		control = find_ui_control_by_action(kind)
-	} else {
-		control = find_ui_control_by_action_and_index(kind, index)
-	}
-	if control == nil {return {}}
-	return control.rect
-}
-
-ui_control_rect_by_value :: proc(
-	kind: UI_Action_Kind,
-	index, value: int,
-) -> UI_Rect {
-	for &control in ui_build.controls {
-		if control.action.kind == kind &&
-		   control.action.index == index &&
-		   control.action.value == value {
-			return control.rect
-		}
-	}
-	return {}
-}
-
-find_ui_control_at_point :: proc(
-	controls: []UI_Control,
-	point: Point,
-	required_flag: UI_Control_Flag,
-) -> ^UI_Control {
-	for index := len(controls) - 1; index >= 0; index -= 1 {
-		control := &controls[index]
-		if required_flag not_in control.flags || .Enabled not_in control.flags {continue}
-		if contains(control.rect, point) {return control}
-	}
-	return nil
-}
-
-header_window_gesture_allowed :: proc(
-	header: UI_Rect,
-	controls: []UI_Control,
-	point: Point,
-) -> bool {
-	return contains(header, point) &&
-	       find_ui_control_at_point(controls, point, .Primary_Press) == nil
-}
-
-ui_controls_valid :: proc(controls: []UI_Control) -> bool {
-	for &control, index in controls {
-		if control.id == 0 || len(control.functional_name) == 0 {return false}
-		if control.rect.w <= 0 || control.rect.h <= 0 {return false}
-		for other_index in index + 1 ..< len(controls) {
-			other := &controls[other_index]
-			if control.id == other.id {return false}
-			if control.functional_name == other.functional_name {return false}
-		}
-	}
-	return true
-}
-
 global_modal_blocks_commands :: proc() -> bool {
 	return library_recovery_state.required || major_change_pending.open
 }
@@ -8946,6 +8836,10 @@ validate_ui_controls :: proc() {
 	}
 }
 
+ui_rect_is_actionable :: proc(rect: UI_Rect) -> bool {
+	return rect.w >= 1 && rect.h >= 1
+}
+
 add_ax_element :: proc(
 	array, element_class: Id,
 	label, role: string,
@@ -8958,6 +8852,7 @@ add_ax_element :: proc(
 	flash_label: string = "",
 	functional_name: string = "",
 ) {
+	if !ui_rect_is_actionable(rect) {return}
 	keyboard_label := flash_label
 	if len(keyboard_label) == 0 {keyboard_label = label}
 	stable_name := functional_name
@@ -8990,78 +8885,7 @@ add_ax_element :: proc(
 		action = UI_Action{kind = kind, index = index, value = value, seconds = seconds},
 	}
 	append(&ui_build.controls, control)
-	if array == nil {return}
-	element := msg_id(element_class, sel_registerName("new"))
-	msg_void_id(element, sel_registerName("setAccessibilityParent:"), ui.view)
-	msg_void_id(element, sel_registerName("setAccessibilityRole:"), nsstring(role))
-	msg_void_id(element, sel_registerName("setAccessibilityLabel:"), nsstring(label))
-	if kind == .Toggle_Save_Source_Browser ||
-	   kind == .Pitch_Highlight ||
-	   kind == .Pitch_Range ||
-	   kind == .Pitch_Labels ||
-	   kind == .Pitch_Transpose ||
-	   kind == .Shuffle_Toggle ||
-	   kind == .Autoplay_Toggle {
-		checked := uint(0)
-		#partial switch kind {
-		case .Toggle_Save_Source_Browser:
-			if ui.save_source_browser_choice {checked = 1}
-		case .Pitch_Highlight:
-			if ui.pitch.settings.highlight {checked = 1}
-		case .Pitch_Range:
-			if value == int(ui.pitch.settings.range) {checked = 1}
-		case .Pitch_Labels:
-			if value == int(ui.pitch.settings.labels) {checked = 1}
-		case .Pitch_Transpose:
-			if value == int(ui.pitch.settings.transpose) {checked = 1}
-		case .Shuffle_Toggle:
-			if ui.clip_shuffle {checked = 1}
-		case .Autoplay_Toggle:
-			if ui.clip_autoplay {checked = 1}
-		case:
-		}
-		value := msg_id_uint(
-			objc_getClass("NSNumber"),
-			sel_registerName("numberWithUnsignedInt:"),
-			checked,
-		)
-		msg_void_id(element, sel_registerName("setAccessibilityValue:"), value)
-	}
-	if kind == .Set_Theme {
-		value := msg_id_uint(
-			objc_getClass("NSNumber"),
-			sel_registerName("numberWithUnsignedInt:"),
-			uint(UI_Theme(value) == ui.theme),
-		)
-		msg_void_id(element, sel_registerName("setAccessibilityValue:"), value)
-	} else if kind == .Settings_Category {
-		value := msg_id_uint(
-			objc_getClass("NSNumber"),
-			sel_registerName("numberWithUnsignedInt:"),
-			uint(index == int(ui.settings_category)),
-		)
-		msg_void_id(element, sel_registerName("setAccessibilityValue:"), value)
-	} else if kind == .Settings_Search {
-		msg_void_id(
-			element,
-			sel_registerName("setAccessibilityValue:"),
-			nsstring(ui.settings_query),
-		)
-	} else if kind == .Configure_Flash {
-		msg_void_id(
-			element,
-			sel_registerName("setAccessibilityValue:"),
-			nsstring(video_clips_shortcut_display(ui.flash_leader)),
-		)
-	}
-	msg_void_bool(element, sel_registerName("setAccessibilityEnabled:"), enabled)
-	msg_void_rect(element, sel_registerName("setAccessibilityFrame:"), ax_screen_rect(rect))
-	msg_void_id(array, sel_registerName("addObject:"), element)
-	append(
-		&ax_actions,
-		AX_Action{element = element, control_id = control.id},
-	)
-	msg_void(element, sel_registerName("release"))
+	append_ax_element_for_control(array, element_class, &control)
 }
 
 add_pointer_control :: proc(
@@ -9070,6 +8894,7 @@ add_pointer_control :: proc(
 	kind: UI_Action_Kind,
 	flags: UI_Control_Flags,
 ) {
+	if !ui_rect_is_actionable(rect) {return}
 	control_flags := flags
 	if ui_action_enabled_for_current_job(kind) {control_flags += {.Enabled}}
 	append(&ui_build.controls, UI_Control{
@@ -9290,22 +9115,45 @@ add_window_controls :: proc(array, element_class: Id) {
 	}
 }
 
+finalize_ui_controls :: proc(
+	allocator: runtime.Allocator,
+	ax_array, element_class: Id,
+) {
+	validate_ui_controls()
+	publish_shared_control_registry(allocator)
+	if ax_array == nil {return}
+	for index in 0 ..< len(ui_build.controls) {
+		control := &ui_build.controls[index]
+		shared_control := framework_ui.control_in_view(
+			shared_registry,
+			framework_ui.Key(control.id),
+		)
+		if shared_control == nil ||
+		   .Accessibility not_in shared_control.capabilities {
+			continue
+		}
+		append_ax_element_for_control(ax_array, element_class, control)
+	}
+}
+
 build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allocator) {
 	previous_temp := context.temp_allocator
-	defer context.temp_allocator = previous_temp
 	context.temp_allocator = allocator
 	ui_build.controls = make([dynamic]UI_Control, 0, 64, allocator)
 	ui_build.diagnostic_surface = ui_diagnostic_surface(allocator)
 	ui_build.frame = int(ui.frame_tick)
 	array: Id
+	ax_array: Id
 	if rebuild_accessibility {
 		clear(&ax_actions)
 		if ui.ax_children != nil {msg_void(ui.ax_children, sel_registerName("release"))}
 		temporary := msg_id(objc_getClass("NSMutableArray"), sel_registerName("array"))
 		ui.ax_children = msg_id(temporary, sel_registerName("retain"))
-		array = temporary
+		ax_array = temporary
 	}
 	element_class := objc_getClass("VocalAccessibilityElement")
+	defer finalize_ui_controls(allocator, ax_array, element_class)
+	defer context.temp_allocator = previous_temp
 	import_field, import_button, source_search, source_panel, player, transcript, clip_search, clip_panel, clip_name, pitch_panel, controls :=
 		layout_rects()
 	if !ui.playback_fullscreen_active {
@@ -9707,7 +9555,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		}
 	} else if !ui.playback_fullscreen_active {
 		status_rect := footer_status_rect()
-		if status_rect.w > 0 {
+		if status_rect.w >= 1 {
 			add_ax_element(
 				array,
 				element_class,
@@ -10388,7 +10236,6 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			functional_name = "commit clip output",
 		)
 	}
-	validate_ui_controls()
 }
 
 cancel_ui_flash :: proc() {
@@ -10417,14 +10264,24 @@ begin_ui_flash :: proc() -> bool {
 			render_frame()
 		}
 	}
-	targets := make([dynamic]flash.Target, 0, len(ui_build.controls), context.temp_allocator)
-	for &control in ui_build.controls {
-		if .Flash not_in control.flags || .Enabled not_in control.flags {continue}
+	targets := make(
+		[dynamic]flash.Target,
+		0,
+		len(shared_registry.controls),
+		context.temp_allocator,
+	)
+	for &control in shared_registry.controls {
+		if .Flash not_in control.capabilities || !control.enabled {continue}
 		append(&targets, flash.Target{
 			id = flash.Target_ID(control.id),
-			label = flash_target_label(&control),
-			rect = flash.Rect{control.rect.x, control.rect.y, control.rect.w, control.rect.h},
-			anchor = control.anchor,
+			label = control.flash_label,
+			rect = flash.Rect{
+				f64(control.rect.x),
+				f64(control.rect.y),
+				f64(control.rect.w),
+				f64(control.rect.h),
+			},
+			anchor = flash_anchor_from_framework(control.flash_anchor),
 		})
 	}
 	error := flash.begin(&flash_state, targets[:])
@@ -10439,16 +10296,15 @@ begin_ui_flash :: proc() -> bool {
 }
 
 activate_flash_target :: proc(id: flash.Target_ID) -> bool {
-	control := find_ui_control(UI_Control_ID(id))
-	if control == nil || .Enabled not_in control.flags {return false}
+	activation, activated := framework_ui.activate_control_in_view(
+		shared_registry,
+		framework_ui.Key(id),
+		.Flash,
+	)
+	if !activated {return false}
+	control := find_ui_control(UI_Control_ID(activation.control))
+	if control == nil {return false}
 	return activate_ui_action(control.action)
-}
-
-find_ax_control :: proc(element: Id) -> ^UI_Control {
-	for &binding in ax_actions {
-		if binding.element == element {return find_ui_control(binding.control_id)}
-	}
-	return nil
 }
 
 activate_ui_action :: proc(action: UI_Action) -> bool {
@@ -11371,139 +11227,6 @@ activate_selected_command_palette_result :: proc() -> bool {
 	return activate_command_palette_result(command_palette.selected_index(&command_palette_state))
 }
 
-on_ax_press :: proc "c" (self: Id, command: Sel) -> bool {
-	context = runtime.default_context()
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	control := find_ax_control(self)
-	if control == nil || .Enabled not_in control.flags {return false}
-	return activate_ui_action(control.action)
-}
-
-on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
-	context = runtime.default_context()
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	control := find_ax_control(self)
-	if control == nil {return nil}
-	#partial switch control.action.kind {
-	case .Toggle_Save_Source_Browser:
-		checked := uint(0)
-		if ui.save_source_browser_choice {checked = 1}
-		return msg_id_uint(
-			objc_getClass("NSNumber"),
-			sel_registerName("numberWithUnsignedInt:"),
-			checked,
-		)
-	case .Shuffle_Toggle, .Autoplay_Toggle:
-		checked := uint(0)
-		if (control.action.kind == .Shuffle_Toggle &&
-		    ui.clip_shuffle) ||
-		   (control.action.kind == .Autoplay_Toggle &&
-		    ui.clip_autoplay) {
-			checked = 1
-		}
-		return msg_id_uint(
-			objc_getClass("NSNumber"),
-			sel_registerName("numberWithUnsignedInt:"),
-			checked,
-		)
-	case .Command_Palette_Search:
-		return nsstring(ui.command_palette_query)
-	case .Settings_Search:
-		return nsstring(ui.settings_query)
-	case .Set_Theme:
-		checked := uint(0)
-		if UI_Theme(control.action.value) == ui.theme {checked = 1}
-		return msg_id_uint(
-			objc_getClass("NSNumber"),
-			sel_registerName("numberWithUnsignedInt:"),
-			checked,
-		)
-	case .Settings_Category:
-		checked := uint(0)
-		if control.action.index == int(ui.settings_category) {checked = 1}
-		return msg_id_uint(
-			objc_getClass("NSNumber"),
-			sel_registerName("numberWithUnsignedInt:"),
-			checked,
-		)
-	case .Configure_Flash:
-		return nsstring(video_clips_shortcut_display(ui.flash_leader))
-	case .URL:
-		return nsstring(ui.url_input)
-	case .Source_Search:
-		return nsstring(ui.source_search)
-	case .Transcript_Search:
-		return nsstring(ui.transcript_search)
-	case .Clip_Search:
-		return nsstring(ui.clip_search)
-	case .Clip_Name:
-		return nsstring(ui.clip_name)
-	case .Clip_Rename:
-		return nsstring(ui.clip_rename)
-	}
-	return nil
-}
-
-set_ui_control_value :: proc(action: UI_Action, text: string) -> bool {
-	#partial switch action.kind {
-	case .Command_Palette_Search:
-		ui_set_string(&ui.command_palette_query, text)
-		search_error := command_palette.set_query(
-			&command_palette_state,
-			ui.command_palette_query,
-		)
-		if search_error != .None {
-			ui_set_string(
-				&ui.command_palette_query,
-				command_palette.query(&command_palette_state),
-			)
-			_ = notification_post_error(
-				"Command palette search contains invalid UTF-8.",
-			)
-		}
-		ui.command_palette_scroll = 0
-		ensure_command_palette_selection_visible()
-	case .Settings_Search:
-		ui_set_string(&ui.settings_query, text)
-		focused_text_changed(&ui.settings_query)
-		focus_text_input(.Settings_Search)
-	case .URL:
-		ui_set_string(&ui.url_input, text)
-	case .Source_Search:
-		ui_set_string(&ui.source_search, text)
-	case .Transcript_Search:
-		ui_set_string(&ui.transcript_search, text)
-		invalidate_transcript_matches()
-	case .Clip_Search:
-		ui_set_string(&ui.clip_search, text)
-	case .Clip_Name:
-		ui_set_string(&ui.clip_name, text)
-		focused_text_changed(&ui.clip_name)
-	case .Clip_Rename:
-		ui_set_string(&ui.clip_rename, text)
-	case:
-		return false
-	}
-	ui.needs_redraw = true
-	return true
-}
-
-on_ax_set_value :: proc "c" (self: Id, command: Sel, value: Id) {
-	context = runtime.default_context()
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	control := find_ax_control(self)
-	if control == nil || .Editable not_in control.flags {return}
-	utf8 := msg_id(value, sel_registerName("UTF8String"))
-	if utf8 == nil {return}
-	_ = set_ui_control_value(control.action, string(cstring(utf8)))
-}
-
-on_metal_ax_children :: proc "c" (self: Id, command: Sel) -> Id {
-	return ui.ax_children
-}
-
-on_metal_is_ax_element :: proc "c" (self: Id, command: Sel) -> bool {return false}
-
 ui_memory_destroy :: proc() {
 	_ = flush_active_clip_draft()
 	pitch_monitor_stop(&ui.pitch)
@@ -11679,7 +11402,7 @@ activate_registered_target_at_point :: proc(
 	point: Point,
 	click_count: uint = 1,
 ) -> bool {
-	control := find_ui_control_at_point(ui_build.controls[:], point, .Primary_Press)
+	control := find_shared_ui_control_at_point(point, .Primary_Press)
 	if control == nil {return false}
 	#partial switch control.action.kind {
 	case .Command_Palette_Search:
@@ -11801,11 +11524,7 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
-	clicked_control := find_ui_control_at_point(
-		ui_build.controls[:],
-		point,
-		.Primary_Press,
-	)
+	clicked_control := find_shared_ui_control_at_point(point, .Primary_Press)
 	if clicked_control != nil && .Editable in clicked_control.flags {
 		_ = activate_registered_target_at_point(point, click_count)
 		return
@@ -11880,11 +11599,7 @@ on_metal_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	)
 	playback_fullscreen_show_controls()
 	if begin_window_resize(ui.mouse) {return}
-	window_control := find_ui_control_at_point(
-		ui_build.controls[:],
-		ui.mouse,
-		.Primary_Press,
-	)
+	window_control := find_shared_ui_control_at_point(ui.mouse, .Primary_Press)
 	if window_control != nil &&
 	   ui_action_is_window(window_control.action.kind) {
 		cancel_ui_flash()
@@ -11930,7 +11645,7 @@ on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
 	ui.mouse = point
-	control := find_ui_control_at_point(ui_build.controls[:], point, .Secondary_Press)
+	control := find_shared_ui_control_at_point(point, .Secondary_Press)
 	if control != nil {_ = activate_ui_action(control.action)}
 	ui.needs_redraw = true
 }
@@ -11944,7 +11659,7 @@ on_metal_mouse_moved :: proc "c" (self: Id, command: Sel, event: Id) {
 		ui.mouse = next
 		playback_fullscreen_show_controls()
 		if command_palette.is_open(&command_palette_state) {
-			control := find_ui_control_at_point(ui_build.controls[:], next, .Primary_Press)
+			control := find_shared_ui_control_at_point(next, .Primary_Press)
 			if control != nil && control.action.kind == .Command_Palette_Result {
 				_ = command_palette.select_result(&command_palette_state, control.action.index)
 			}
@@ -12652,12 +12367,14 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 			NSEventModifierFlagCommand
 		if numbered_actions_available && modifiers & number_modifiers == 0 {
 			if digit, found := number_digit_for_key_code(key); found {
-				action, handled := consume_numbered_action_digit_at(
-					ui.mode,
+				control_id, activated, handled := consume_shared_numbered_digit(
 					digit,
 					numbered_action_time_ms(),
 				)
-				if action >= 0 {activate_control(action)}
+				if activated {
+					control := find_ui_control(control_id)
+					if control != nil {_ = activate_ui_action(control.action)}
+				}
 				if handled {return}
 			}
 		}
@@ -13056,28 +12773,6 @@ register_metal_view_class :: proc() -> Id {
 	)
 	objc_registerClassPair(class)
 	return class
-}
-
-register_accessibility_class :: proc() {
-	class := objc_allocateClassPair(
-		objc_getClass("NSAccessibilityElement"),
-		"VocalAccessibilityElement",
-		0,
-	)
-	class_addMethod(
-		class,
-		sel_registerName("accessibilityPerformPress"),
-		rawptr(on_ax_press),
-		"B@:",
-	)
-	class_addMethod(class, sel_registerName("accessibilityValue"), rawptr(on_ax_value), "@@:")
-	class_addMethod(
-		class,
-		sel_registerName("setAccessibilityValue:"),
-		rawptr(on_ax_set_value),
-		"v@:@",
-	)
-	objc_registerClassPair(class)
 }
 
 window_can_become_key :: proc "c" (self: Id, command: Sel) -> bool {

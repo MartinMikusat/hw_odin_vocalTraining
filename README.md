@@ -387,9 +387,11 @@ real task is active.
 A thin AppKit shell creates a borderless window and forwards input. The window
 opens on the complete visible screen and has a minimum size of 1100 by 720
 points. Odin calculates every visible control, including the custom close,
-minimize, and zoom controls. The control registry supplies pointer,
-Accessibility, and Flash input for these controls. Metal renders the interface
-through one `CAMetalLayer`.
+minimize, and zoom controls. `src/ui_registry.odin` converts the frame-owned
+application controls into one validated framework registry. Pointer,
+Accessibility, Flash, and numbered input read that registry. The same records
+export command-menu and CLI capability metadata. `src/accessibility.odin` owns
+the AppKit bridge. Metal renders the interface through one `CAMetalLayer`.
 
 The custom Metal view conforms to `NSTextInputClient` and routes typing through
 `interpretKeyEvents`. Command shortcuts and input methods stay on the AppKit
@@ -427,11 +429,14 @@ Bundled interface icon provenance:
 - License: [MIT License](resources/icons/iconoir/LICENSE)
 
 The application builds each visible interactive control once per frame. Each
-control record contains a stable functional name, rectangle, action, state,
-and capability flags. Pointer input, macOS accessibility, and Flash navigation
-consume the same records. Dynamic controls include a durable source, segment,
-or clip identifier in their functional name. Static panels and labels stay
-outside the control registry.
+control record contains a stable functional name, rectangle, typed action,
+state, and capability flags. The framework borrows these records from the frame
+arena and validates identifiers, rectangles, action references, labels, and
+numbered codes. Each included direct interaction adapter resolves a control
+identifier through the same registry. The application then executes its typed
+action. Dynamic controls include a durable source, segment, or clip identifier
+in their functional name. Static panels and labels stay outside the control
+registry.
 
 The structural UI checker rebuilds and serializes the current control registry
 on the main thread. A background-state check compares it with an idle baseline.

@@ -257,9 +257,11 @@ ui_diagnostic_capture_current :: proc(
 	arena, arena_ok := growing_arena_create()
 	if !arena_ok {return {}, false}
 	previous_build := ui_build
+	previous_registry := shared_registry
 	build_ui_controls(false, mem_virtual.arena_allocator(arena))
 	if len(ui_build.controls) == 0 || !ui_controls_valid(ui_build.controls[:]) {
 		ui_build = previous_build
+		shared_registry = previous_registry
 		growing_arena_destroy(arena)
 		return {}, false
 	}
@@ -270,6 +272,7 @@ ui_diagnostic_capture_current :: proc(
 		allocator,
 	)
 	ui_build = previous_build
+	shared_registry = previous_registry
 	growing_arena_destroy(arena)
 	return snapshot, true
 }
