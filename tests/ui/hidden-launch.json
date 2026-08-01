@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "hidden-launch",
+  "mutation": "transient",
+  "setup": {
+    "workflow": "dancing",
+    "mode": "play",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "steps": [
+    {"op": "assert", "condition": {"kind": "surface", "field": "window.visible", "operator": "eq", "value": false}},
+    {"op": "assert", "condition": {"kind": "surface", "field": "application.active", "operator": "eq", "value": false}}
+  ]
+}

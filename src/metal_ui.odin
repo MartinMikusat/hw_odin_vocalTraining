@@ -592,6 +592,7 @@ ui := UI_State{
 	transcript_active_match = -1,
 }
 ui_event_tag: int
+allow_hidden_window_reveal: bool
 ax_actions: [dynamic]AX_Action
 ui_build: UI_Build_Output
 flash_state: flash.State
@@ -12538,6 +12539,12 @@ register_delegate :: proc(app: Id) {
 	)
 	class_addMethod(
 		delegate_class,
+		sel_registerName("applicationShouldHandleReopen:hasVisibleWindows:"),
+		rawptr(on_application_should_handle_reopen),
+		"B@:@B",
+	)
+	class_addMethod(
+		delegate_class,
 		sel_registerName("applicationDidChangeScreenParameters:"),
 		rawptr(on_application_did_change_screen_parameters),
 		"v@:@",
@@ -12715,6 +12722,10 @@ launch_should_activate :: proc(
 	return !launch_in_background
 }
 
+launch_should_show :: proc(value: cstring) -> bool {
+	return value == nil || string(value) != "0"
+}
+
 video_clips_gui_initialize :: proc() -> bool {
 	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
 	msg_void_i(app, sel_registerName("setActivationPolicy:"), 0)
@@ -12845,14 +12856,21 @@ video_clips_gui_initialize :: proc() -> bool {
 		true,
 	)
 	msg_void_id(state.window, sel_registerName("makeFirstResponder:"), ui.view)
-	if launch_should_activate(
+	should_activate := launch_should_activate(
 		getenv("HW_VIDEO_CLIPS_ACTIVATE_ON_LAUNCH"),
-	) {
+	)
+	if should_activate {
 		msg_void_id(state.window, sel_registerName("makeKeyAndOrderFront:"), nil)
 		msg_void_i(app, sel_registerName("activateIgnoringOtherApps:"), 1)
-	} else {
+	} else if launch_should_show(
+		getenv("HW_VIDEO_CLIPS_VISIBLE_ON_LAUNCH"),
+	) {
 		msg_void_id(state.window, sel_registerName("orderBack:"), nil)
 	}
+	if !should_activate {
+		msg_void(app, sel_registerName("deactivate"))
+	}
+	allow_hidden_window_reveal = true
 	if !cli_ipc_server_start() {set_text(state.status, "CLI control socket is unavailable")}
 	validate_startup_helpers()
 	if !ui_automation_enabled() {request_next_missing_source_metadata()}

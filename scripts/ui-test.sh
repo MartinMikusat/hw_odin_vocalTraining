@@ -192,6 +192,7 @@ start_instance() {
     HW_VIDEO_CLIPS_AUTOMATION=1 \
     HW_VIDEO_CLIPS_AUTOMATION_MEDIA="$fixture_path" \
     HW_VIDEO_CLIPS_ACTIVATE_ON_LAUNCH=0 \
+    HW_VIDEO_CLIPS_VISIBLE_ON_LAUNCH=0 \
     MTL_CAPTURE_ENABLED=1 \
     "$APP_EXECUTABLE"
   pid=
@@ -406,7 +407,8 @@ case "${1:-}" in
   bridge)
     ui_test_require_jq
     ensure_instance
-    "$ROOT/scripts/ui-bridge.sh" "$STATE_ROOT" "$APP_EXECUTABLE" "$CLI_EXECUTABLE"
+    HW_VIDEO_CLIPS_UI_TEST_HIDDEN=1 \
+      "$ROOT/scripts/ui-bridge.sh" "$STATE_ROOT" "$APP_EXECUTABLE" "$CLI_EXECUTABLE"
     ;;
   benchmark)
     ui_test_require_jq
@@ -419,8 +421,10 @@ case "${1:-}" in
   suite)
     ui_test_require_jq
     "$ROOT/test.sh"
+    run_scenario "$ROOT/tests/ui/hidden-launch.json"
     run_scenario "$ROOT/tests/ui/fast.json"
-    "$ROOT/scripts/ui-bridge.sh" \
+    HW_VIDEO_CLIPS_UI_TEST_HIDDEN=1 \
+      "$ROOT/scripts/ui-bridge.sh" \
       "$STATE_ROOT" \
       "$APP_EXECUTABLE" \
       "$CLI_EXECUTABLE"

@@ -97,6 +97,13 @@ launch_activation_respects_background_policy_test :: proc(t: ^testing.T) {
 	testing.expect(t, !launch_should_activate(cstring("0"), true))
 }
 
+@(test)
+launch_visibility_respects_explicit_policy_test :: proc(t: ^testing.T) {
+	testing.expect(t, launch_should_show(nil))
+	testing.expect(t, launch_should_show(cstring("1")))
+	testing.expect(t, !launch_should_show(cstring("0")))
+}
+
 window_icon_points_use_iconoir_viewbox_test :: proc(
 	t: ^testing.T,
 	points: []Window_Icon_Point,

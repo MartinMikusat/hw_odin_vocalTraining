@@ -3,6 +3,7 @@ set -u
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT"
+. "$ROOT/scripts/dev-launch-policy.sh"
 
 MODE=${1:-debug}
 case "$MODE" in
@@ -21,6 +22,9 @@ esac
 EXECUTABLE="$APP/Contents/MacOS/hw_videoClips"
 LOCK="$ROOT/build/dev-watcher.lock"
 APP_PID=""
+APP_HAS_LAUNCHED=0
+LAUNCH_ACTIVATE=0
+LAUNCH_VISIBLE=1
 STOPPING_APP=0
 MEMORY_PROFILE=${HW_VIDEO_CLIPS_MEMORY_PROFILE:-none}
 MEMORY_WARN_KB=${HW_VIDEO_CLIPS_MEMORY_WARN_KB:-1048576}
@@ -121,9 +125,21 @@ check_memory() {
   "$ROOT/scripts/capture-memory.sh" "$MODE" "$APP_PID" "$APP" "$rss_kb" &
 }
 
+app_is_frontmost() {
+  if [ -z "$APP_PID" ] || ! kill -0 "$APP_PID" 2>/dev/null; then
+    return 1
+  fi
+  front_app=$(lsappinfo front 2>/dev/null) || return 1
+  front_pid=$(lsappinfo info -only pid "$front_app" 2>/dev/null |
+    sed -n 's/.*"pid"=\([0-9][0-9]*\).*/\1/p')
+  [ "$front_pid" = "$APP_PID" ]
+}
+
 launch_app() {
-  HW_VIDEO_CLIPS_ACTIVATE_ON_LAUNCH=0
+  HW_VIDEO_CLIPS_ACTIVATE_ON_LAUNCH=$LAUNCH_ACTIVATE
+  HW_VIDEO_CLIPS_VISIBLE_ON_LAUNCH=$LAUNCH_VISIBLE
   export HW_VIDEO_CLIPS_ACTIVATE_ON_LAUNCH
+  export HW_VIDEO_CLIPS_VISIBLE_ON_LAUNCH
   case "$MEMORY_PROFILE" in
     none)
       env MTL_DEBUG_LAYER=1 "$EXECUTABLE" &
@@ -159,8 +175,18 @@ rebuild_and_launch() {
     printf '[hw_videoClips] build failed; keeping the current app running\n'
     return
   fi
+  was_frontmost=0
+  if [ "$APP_HAS_LAUNCHED" -eq 1 ] && app_is_frontmost; then
+    was_frontmost=1
+  fi
+  launch_policy=$(hw_video_clips_dev_launch_policy \
+    "$APP_HAS_LAUNCHED" \
+    "$was_frontmost")
+  LAUNCH_ACTIVATE=${launch_policy% *}
+  LAUNCH_VISIBLE=${launch_policy#* }
   stop_app
   if launch_app; then
+    APP_HAS_LAUNCHED=1
     printf '[hw_videoClips] relaunched pid %s (%s, memory profile: %s)\n' \
       "$APP_PID" "$MODE" "$MEMORY_PROFILE"
   fi

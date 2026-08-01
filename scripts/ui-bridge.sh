@@ -83,11 +83,17 @@ run_cli playback fullscreen --state off >/dev/null
 wait_fullscreen 0
 printf 'ok\naccessibility... '
 
-"$HELPER" ax-press "$pid" "Enter full screen playback"
-wait_fullscreen 1
-printf 'ok\n'
-run_cli playback fullscreen --state off >/dev/null
-wait_fullscreen 0
+accessibility_result=ok
+if [ "${HW_VIDEO_CLIPS_UI_TEST_HIDDEN:-0}" -eq 1 ]; then
+  accessibility_result=skipped-hidden
+  printf 'skipped (hidden window)\n'
+else
+  "$HELPER" ax-press "$pid" "Enter full screen playback"
+  wait_fullscreen 1
+  printf 'ok\n'
+  run_cli playback fullscreen --state off >/dev/null
+  wait_fullscreen 0
+fi
 
 printf 'flash... '
 key 44 /
@@ -108,4 +114,5 @@ printf 'ok\n'
 run_cli playback fullscreen --state off >/dev/null
 wait_fullscreen 0
 
-printf 'pointer=ok keyboard=ok numbered=ok accessibility=ok flash=ok command_menu=ok cli=ok\n'
+printf 'pointer=ok keyboard=ok numbered=ok accessibility=%s flash=ok command_menu=ok cli=ok\n' \
+  "$accessibility_result"

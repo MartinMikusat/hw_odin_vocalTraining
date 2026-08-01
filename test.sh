@@ -5,6 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 TEST_SUPPORT=$(mktemp -d "${TMPDIR:-/tmp}/hw_videoClips-tests.XXXXXX")
 trap 'rm -rf "$TEST_SUPPORT"' EXIT
 
+"$ROOT/scripts/dev-launch-policy-test.sh"
 "$ROOT/scripts/library-fixture.sh" validate "$ROOT/testdata/library.sqlite3"
 sqlite3 "$ROOT/testdata/library.sqlite3" ".backup '$TEST_SUPPORT/library.sqlite3'"
 PITCH_CAPTURE_OBJECT="$TEST_SUPPORT/pitch_capture.o"

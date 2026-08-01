@@ -11,7 +11,7 @@ import "core:time"
 import mem_virtual "core:mem/virtual"
 import command_palette "command_palette:."
 
-UI_DIAGNOSTIC_SCHEMA_VERSION :: 6
+UI_DIAGNOSTIC_SCHEMA_VERSION :: 7
 UI_DIAGNOSTIC_ARTIFACT_RETENTION :: 20
 
 UI_Diagnostic_Surface :: struct {
@@ -19,6 +19,8 @@ UI_Diagnostic_Surface :: struct {
 	workflow:             string,
 	overlay:              string,
 	background:           string,
+	window_visible:       bool,
+	application_active:   bool,
 	media_loaded:         bool,
 	media_id:             string,
 	playback_active:      bool,
@@ -145,6 +147,12 @@ ui_diagnostic_surface :: proc(allocator := context.allocator) -> UI_Diagnostic_S
 		workflow = strings.clone(cli_workflow_name(ui.workflow), allocator),
 		overlay = strings.clone(overlay, allocator),
 		background = strings.clone(background, allocator),
+		window_visible = state.window != nil &&
+		                 msg_bool(state.window, sel_registerName("isVisible")),
+		application_active = msg_bool(
+			msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication")),
+			sel_registerName("isActive"),
+		),
 		media_loaded = state.player != nil,
 		media_id = strings.clone(media_id, allocator),
 		playback_active = state.player != nil &&
@@ -206,6 +214,8 @@ ui_diagnostic_snapshot :: proc(
 			workflow = strings.clone(surface.workflow, allocator),
 			overlay = strings.clone(surface.overlay, allocator),
 			background = strings.clone(surface.background, allocator),
+			window_visible = surface.window_visible,
+			application_active = surface.application_active,
 			media_loaded = surface.media_loaded,
 			media_id = strings.clone(surface.media_id, allocator),
 			playback_active = surface.playback_active,

@@ -291,9 +291,37 @@ on_application_did_become_active :: proc "c" (
 	notification: Id,
 ) {
 	context = runtime.default_context()
+	if allow_hidden_window_reveal &&
+	   !ui_automation_enabled() &&
+	   state.window != nil &&
+	   !msg_bool(state.window, sel_registerName("isVisible")) {
+		msg_void_id(
+			state.window,
+			sel_registerName("makeKeyAndOrderFront:"),
+			nil,
+		)
+	}
 	if pitch_monitor_refresh_permission(&ui.pitch) {
 		ui.needs_redraw = true
 	}
+}
+
+on_application_should_handle_reopen :: proc "c" (
+	self: Id,
+	command: Sel,
+	app: Id,
+	has_visible_windows: bool,
+) -> bool {
+	context = runtime.default_context()
+	if ui_automation_enabled() {return false}
+	if !has_visible_windows && state.window != nil {
+		msg_void_id(
+			state.window,
+			sel_registerName("makeKeyAndOrderFront:"),
+			nil,
+		)
+	}
+	return true
 }
 
 on_application_did_change_screen_parameters :: proc "c" (

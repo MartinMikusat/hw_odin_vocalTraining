@@ -587,9 +587,11 @@ For debug, trace, and ASan modes, a source or resource change rebuilds the
 complete application. The watcher replaces the running process only after a
 successful build. A failed build leaves the current process active.
 
-Every `./dev.sh` launch orders the window behind active applications. Launch
-the app directly when it must activate and move to the front. Metal validation
-is enabled. Press `Ctrl-C` to stop the watcher and app.
+The first `./dev.sh` launch orders the window behind active applications. A
+successful rebuild restores a frontmost app as frontmost. It leaves a
+background replacement hidden until you activate it through the Dock or
+application switcher. Direct launches activate normally. Metal validation is
+enabled. Press `Ctrl-C` to stop the watcher and app.
 
 The frame timer continues to poll jobs while the app is idle. It does not
 submit Metal work until playback or a UI change requires it.
@@ -626,8 +628,8 @@ Run the complete test suite against an isolated copy:
 
 ### Automated interface tests
 
-The interface harness keeps one isolated application instance behind active
-applications. It exposes its temporary support directory through
+The interface harness keeps one isolated application instance inactive and
+hidden. It exposes its temporary support directory through
 `build/ui-test-support/app-support`. This avoids detached-process access stalls
 under the repository's Documents path. Each checkout receives a separate
 launch job and support directory. The harness leaves its instance running
@@ -665,10 +667,11 @@ mutation, restarts the application against the same database, and runs a
 transient verification. It resets the isolated database when the pair ends.
 
 The bridge suite routes the full-screen action through pointer input, keyboard,
-the numbered action bar, Accessibility, Flash, the command menu, and the public
-CLI. AppKit events enter the real view handlers without activating the window.
-The Accessibility check requires permission for the shell that starts the
-suite.
+the numbered action bar, Flash, the command menu, and the public CLI. AppKit
+events enter the real view handlers without activating or showing the window.
+The suite skips the system Accessibility path because macOS removes an
+unordered window from the Accessibility tree. Run a separate visible-window
+Accessibility check only when foreground interruption is acceptable.
 
 The benchmark runs the ten-step warm scenario 20 times. It fails when the 95th
 percentile reaches 100 milliseconds. Its steps open and close Settings twice,

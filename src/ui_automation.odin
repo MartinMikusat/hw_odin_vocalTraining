@@ -336,6 +336,23 @@ ui_automation_surface_value :: proc(field: string) -> UI_Automation_Value {
 	case "background":
 		surface := ui_diagnostic_surface(context.temp_allocator)
 		return {kind=.String, string=surface.background}
+	case "window.visible":
+		return {
+			kind = .Boolean,
+			boolean = state.window != nil &&
+			          msg_bool(state.window, sel_registerName("isVisible")),
+		}
+	case "application.active":
+		return {
+			kind = .Boolean,
+			boolean = msg_bool(
+				msg_id(
+					objc_getClass("NSApplication"),
+					sel_registerName("sharedApplication"),
+				),
+				sel_registerName("isActive"),
+			),
+		}
 	case "media.loaded":
 		return {kind=.Boolean, boolean=state.player != nil}
 	case "video.frame_ready":
