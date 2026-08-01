@@ -80,8 +80,8 @@ foreign core_foundation {
 	CFStringCreateWithBytes :: proc "c" (allocator: CF.TypeRef, bytes: [^]u8, count: CF.Index, encoding: CF.StringEncoding, external: b8) -> CF.String ---
 	CFStringGetLength :: proc "c" (string: rawptr) -> int ---
 	CFAttributedStringCreateMutable :: proc "c" (allocator: rawptr, max_length: int) -> rawptr ---
-	CFAttributedStringReplaceString :: proc "c" (string: rawptr, range: CF_Range, replacement: rawptr) ---
-	CFAttributedStringSetAttribute :: proc "c" (string: rawptr, range: CF_Range, name, value: rawptr) ---
+	CFAttributedStringReplaceString :: proc "c" (string: rawptr, range: CF.Range, replacement: rawptr) ---
+	CFAttributedStringSetAttribute :: proc "c" (string: rawptr, range: CF.Range, name, value: rawptr) ---
 	CFArrayGetCount :: proc "c" (array: rawptr) -> int ---
 	CFArrayGetValueAtIndex :: proc "c" (array: rawptr, index: int) -> rawptr ---
 	CFNumberCreate :: proc "c" (allocator: rawptr, number_type: int, value: rawptr) -> rawptr ---
@@ -4040,8 +4040,8 @@ make_text_run :: proc(
 	attributed := CFAttributedStringCreateMutable(nil, 0)
 	if attributed == nil {return run}
 	defer CFRelease(attributed)
-	CFAttributedStringReplaceString(attributed, CF_Range{0, 0}, string_ref)
-	range := CF_Range{0, CFStringGetLength(string_ref)}
+	CFAttributedStringReplaceString(attributed, CF.Range{0, 0}, string_ref)
+	range := CF.Range{0, CF.Index(CFStringGetLength(string_ref))}
 	CFAttributedStringSetAttribute(attributed, range, kCTFontAttributeName, font)
 	CFAttributedStringSetAttribute(
 		attributed,
