@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "vocal-transport-wrap",
+  "mutation": "persistent",
+  "setup": {
+    "workflow": "vocal",
+    "mode": "play",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "steps": [
+    {"op": "activate", "control": "select clip ui-test-vocal-clip"},
+    {"op": "wait", "condition": {"kind": "surface", "field": "media.loaded", "operator": "eq", "value": true}, "timeout_ms": 1000},
+    {"op": "wait", "condition": {"kind": "surface", "field": "video.frame_ready", "operator": "eq", "value": true}, "timeout_ms": 500},
+    {"op": "assert", "condition": {"kind": "control", "field": "play pause clip", "operator": "present"}},
+    {"op": "assert", "condition": {"kind": "control", "field": "player full screen toggle", "operator": "present"}},
+    {"op": "capture", "name": "vocal-transport-wrap"}
+  ]
+}

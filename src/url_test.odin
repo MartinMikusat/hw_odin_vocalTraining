@@ -3277,24 +3277,27 @@ metal_ui_workflows_use_distinct_accents_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-source_monitor_volume_controls_sit_left_of_timestamp_test :: proc(t: ^testing.T) {
-	player := UI_Rect{308, 306, 760, 310}
-	reset := source_reset_rect(player)
-	speed_down := source_speed_down_rect(player)
-	speed_up := source_speed_up_rect(player)
-	down := source_volume_down_rect(player)
-	value := source_volume_value_rect(player)
-	up := source_volume_up_rect(player)
-	timestamp := source_timestamp_rect(player)
-	testing.expect(t, reset.x + reset.w <= speed_down.x)
-	testing.expect(t, speed_up.x + speed_up.w <= down.x)
-	testing.expect(t, down.x + down.w <= value.x)
-	testing.expect(t, value.x + value.w <= up.x)
-	testing.expect(t, up.x + up.w <= timestamp.x)
-	testing.expect(t, timestamp.x + timestamp.w <= player.x + player.w)
-	testing.expect_value(t, source_play_pause_rect(player).y, speed_down.y)
-	testing.expect_value(t, speed_down.y, down.y)
-	testing.expect_value(t, down.y, timestamp.y + 3)
+source_monitor_transport_wraps_semantic_groups_test :: proc(t: ^testing.T) {
+	one_row := player_transport_layout(UI_Rect{308, 306, 796, 310})
+	testing.expect_value(t, one_row.row_count, 1)
+	testing.expect_value(t, one_row.play_pause.y-3, one_row.speed_value.y)
+	testing.expect_value(t, one_row.speed_value.y, one_row.volume_value.y)
+	testing.expect_value(t, one_row.volume_value.y, one_row.timestamp.y)
+	testing.expect_value(t, one_row.timestamp.y, one_row.fullscreen.y-3)
+
+	two_rows := player_transport_layout(UI_Rect{308, 306, 760, 310})
+	testing.expect_value(t, two_rows.row_count, 2)
+	testing.expect_value(t, two_rows.play_pause.y-3, two_rows.speed_value.y)
+	testing.expect_value(t, two_rows.speed_value.y, two_rows.volume_value.y)
+	testing.expect(t, two_rows.volume_value.y > two_rows.timestamp.y)
+	testing.expect_value(t, two_rows.timestamp.y, two_rows.fullscreen.y-3)
+
+	three_rows := player_transport_layout(UI_Rect{308, 306, 304, 310})
+	testing.expect_value(t, three_rows.row_count, 3)
+	testing.expect(t, three_rows.play_pause.y-3 > three_rows.speed_value.y)
+	testing.expect_value(t, three_rows.speed_value.y, three_rows.volume_value.y)
+	testing.expect(t, three_rows.volume_value.y > three_rows.timestamp.y)
+	testing.expect_value(t, three_rows.timestamp.y, three_rows.fullscreen.y-3)
 }
 
 @(test)
@@ -6516,26 +6519,88 @@ rename_clip_updates_memory_and_database_test :: proc(t: ^testing.T) {
 	if stored_name != nil {testing.expect_value(t, string(stored_name), "Renamed")}
 }
 
-@(test)
-player_transport_and_timeline_stay_inside_player_test :: proc(t: ^testing.T) {
-	player := UI_Rect{300, 100, 1000, 360}
-	controls := [11]UI_Rect {
-		source_play_pause_rect(player),
-		source_stop_rect(player),
-		source_reset_rect(player),
-		source_speed_down_rect(player),
-		source_speed_value_rect(player),
-		source_speed_up_rect(player),
-		source_volume_down_rect(player),
-		source_volume_value_rect(player),
-		source_volume_up_rect(player),
-		source_timestamp_rect(player),
-		source_timeline_rect(player),
+player_transport_rects_for_test :: proc(
+	layout: Player_Transport_Layout,
+) -> [13]UI_Rect {
+	return {
+		layout.play_pause,
+		layout.stop,
+		layout.reset,
+		layout.speed_down,
+		layout.speed_value,
+		layout.speed_up,
+		layout.volume_down,
+		layout.volume_value,
+		layout.volume_up,
+		layout.timestamp,
+		layout.ready_status,
+		layout.fullscreen,
+		layout.timeline,
 	}
-	for rect in controls {
+}
+
+player_transport_rects_overlap_for_test :: proc(a, b: UI_Rect) -> bool {
+	return a.x < b.x+b.w && a.x+a.w > b.x &&
+	       a.y < b.y+b.h && a.y+a.h > b.y
+}
+
+expect_player_transport_layout_for_test :: proc(
+	t: ^testing.T,
+	player: UI_Rect,
+	expected_rows: int,
+) {
+	layout := player_transport_layout(player)
+	testing.expect_value(t, layout.row_count, expected_rows)
+	testing.expect_value(
+		t,
+		layout.footer_height,
+		f64(expected_rows+1)*PLAYER_TRANSPORT_ROW_PITCH,
+	)
+	rects := player_transport_rects_for_test(layout)
+	for rect in rects {
+		testing.expect(t, rect.w > 0 && rect.h > 0)
 		testing.expect(t, rect.x >= player.x && rect.x+rect.w <= player.x+player.w)
 		testing.expect(t, rect.y >= player.y && rect.y+rect.h <= player.y+player.h)
 	}
+	for left in 0..<len(rects) {
+		for right in left+1..<len(rects) {
+			testing.expect(
+				t,
+				!player_transport_rects_overlap_for_test(rects[left], rects[right]),
+			)
+		}
+	}
+	content := player_content_rect(player)
+	testing.expect_value(t, content.y, player.y+layout.footer_height)
+	testing.expect(t, layout.timeline.y+layout.timeline.h < content.y)
+	testing.expect(t, layout.ready_status.x+layout.ready_status.w+8 <= layout.fullscreen.x)
+}
+
+@(test)
+player_transport_wraps_at_exact_width_thresholds_test :: proc(t: ^testing.T) {
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 304, 360}, 3)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 503, 360}, 3)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 504, 360}, 2)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 505, 360}, 2)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 795, 360}, 2)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 796, 360}, 1)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 797, 360}, 1)
+}
+
+@(test)
+vocal_player_transport_fits_the_minimum_application_width_test :: proc(
+	t: ^testing.T,
+) {
+	old_width, old_height := ui.width, ui.height
+	old_mode, old_workflow := ui.mode, ui.workflow
+	defer {
+		ui.width, ui.height = old_width, old_height
+		ui.mode, ui.workflow = old_mode, old_workflow
+	}
+	ui.width, ui.height = 1100, 720
+	ui.mode, ui.workflow = .Play, .Vocal
+	_, _, _, _, player, _, _, _, _, _, _ := layout_rects()
+	expect_player_transport_layout_for_test(t, player, 3)
 }
 
 @(test)

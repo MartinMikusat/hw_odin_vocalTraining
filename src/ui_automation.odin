@@ -614,6 +614,14 @@ ui_automation_seed_fixture :: proc() -> bool {
 	fixture_directory := filepath.dir(media_path)
 	source_media_path := fmt.tprintf("%s/ui-test-source.mp4", fixture_directory)
 	clip_media_path := fmt.tprintf("%s/ui-test-clip.mp4", fixture_directory)
+	vocal_source_media_path := fmt.tprintf(
+		"%s/ui-test-vocal-source.mp4",
+		fixture_directory,
+	)
+	vocal_clip_media_path := fmt.tprintf(
+		"%s/ui-test-vocal-clip.mp4",
+		fixture_directory,
+	)
 	if !os.exists(source_media_path) &&
 	   os2.copy_file(source_media_path, media_path) != nil {
 		return false
@@ -622,11 +630,27 @@ ui_automation_seed_fixture :: proc() -> bool {
 	   os2.copy_file(clip_media_path, media_path) != nil {
 		return false
 	}
+	if !os.exists(vocal_source_media_path) &&
+	   os2.copy_file(vocal_source_media_path, media_path) != nil {
+		return false
+	}
+	if !os.exists(vocal_clip_media_path) &&
+	   os2.copy_file(vocal_clip_media_path, media_path) != nil {
+		return false
+	}
 	source_id := "ui-test-source"
 	clip_id := "ui-test-clip"
+	vocal_source_id := "ui-test-vocal-source"
+	vocal_clip_id := "ui-test-vocal-clip"
 	source_exists := source_index_for_id(state.sources[:], source_id) >= 0
 	clip_exists := clip_index_for_id(state.clips[:], clip_id) >= 0
-	if source_exists && clip_exists {return true}
+	vocal_source_exists :=
+		source_index_for_id(state.sources[:], vocal_source_id) >= 0
+	vocal_clip_exists := clip_index_for_id(state.clips[:], vocal_clip_id) >= 0
+	if source_exists && clip_exists &&
+	   vocal_source_exists && vocal_clip_exists {
+		return true
+	}
 	if !source_exists {
 		source, copied := clone_source_video(Source_Video{
 			id = source_id,
@@ -662,6 +686,43 @@ ui_automation_seed_fixture :: proc() -> bool {
 			clip_path = clip_media_path,
 			dance_count_in_bpm = 120,
 			dance_playback_rate = 1,
+		})
+		if !copied {return false}
+		append(&state.clips, clip)
+	}
+	if !vocal_source_exists {
+		source, copied := clone_source_video(Source_Video{
+			id = vocal_source_id,
+			workflow = .Vocal,
+			video_id = "ui-test-vocal-video",
+			title = "UI Test Vocal Source",
+			url = "https://www.youtube.com/watch?v=ui-test-vocal-video",
+			media_path = vocal_source_media_path,
+			duration = 1,
+			metadata = {
+				width = 320,
+				height = 180,
+				fps = 30,
+				vcodec = "h264",
+				acodec = "aac",
+				ext = "mp4",
+				format_id = "ui-test",
+			},
+			metadata_status = .Available,
+			media_available = true,
+		})
+		if !copied {return false}
+		append(&state.sources, source)
+	}
+	if !vocal_clip_exists {
+		clip, copied := clone_clip(Clip{
+			id = vocal_clip_id,
+			source_id = vocal_source_id,
+			workflow = .Vocal,
+			name = "UI Test Vocal Clip",
+			start_seconds = 0,
+			end_seconds = 1,
+			clip_path = vocal_clip_media_path,
 		})
 		if !copied {return false}
 		append(&state.clips, clip)

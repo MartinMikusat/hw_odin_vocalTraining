@@ -315,6 +315,24 @@ UI_State :: struct {
 UI_Rect :: struct {
 	x, y, w, h: f64,
 }
+
+Player_Transport_Layout :: struct {
+	play_pause:   UI_Rect,
+	stop:         UI_Rect,
+	reset:        UI_Rect,
+	speed_down:   UI_Rect,
+	speed_value:  UI_Rect,
+	speed_up:     UI_Rect,
+	volume_down:  UI_Rect,
+	volume_value: UI_Rect,
+	volume_up:    UI_Rect,
+	timestamp:    UI_Rect,
+	ready_status: UI_Rect,
+	fullscreen:   UI_Rect,
+	timeline:     UI_Rect,
+	row_count:    int,
+	footer_height: f64,
+}
 NS_Range :: struct {
 	location, length: uint,
 }
@@ -1505,7 +1523,7 @@ playback_fullscreen_transport_rect :: proc() -> UI_Rect {
 }
 
 player_fullscreen_toggle_rect :: proc(player: UI_Rect) -> UI_Rect {
-	return {player.x+max(0, player.w-34), player.y+3, 24, 24}
+	return player_transport_layout(player).fullscreen
 }
 
 player_fullscreen_toggle_control :: proc() -> ^UI_Control {
@@ -3454,7 +3472,7 @@ transcript_search_rect :: proc(transcript: UI_Rect) -> UI_Rect {
 }
 
 player_content_rect :: proc(player: UI_Rect) -> UI_Rect {
-	bottom_metadata_height := 64.0
+	bottom_metadata_height := player_transport_layout(player).footer_height
 	header_height := 35.0
 	return UI_Rect {
 		player.x + 1,
@@ -3464,66 +3482,130 @@ player_content_rect :: proc(player: UI_Rect) -> UI_Rect {
 	}
 }
 
+PLAYER_TRANSPORT_INSET_X :: 10.0
+PLAYER_TRANSPORT_ROW_PITCH :: 32.0
+PLAYER_TRANSPORT_ONE_ROW_WIDTH :: 776.0
+PLAYER_TRANSPORT_TWO_ROW_WIDTH :: 484.0
+PLAYER_TRANSPORT_MINIMUM_WIDTH :: 284.0
+
+player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_Layout) {
+	inner_x := player.x + PLAYER_TRANSPORT_INSET_X
+	inner_w := max(0, player.w - PLAYER_TRANSPORT_INSET_X*2)
+	result.row_count = 1
+	if inner_w < PLAYER_TRANSPORT_ONE_ROW_WIDTH {
+		result.row_count = 2
+	}
+	if inner_w < PLAYER_TRANSPORT_TWO_ROW_WIDTH {
+		result.row_count = 3
+	}
+
+	when ODIN_DEBUG {
+		assert(
+			inner_w >= PLAYER_TRANSPORT_MINIMUM_WIDTH,
+			"player transport cannot fit its narrowest semantic row",
+		)
+	}
+
+	transport_x := inner_x
+	speed_x := inner_x
+	volume_x := inner_x
+	status_x := inner_x
+	transport_y := player.y
+	speed_y := player.y
+	volume_y := player.y
+	status_y := player.y
+
+	switch result.row_count {
+	case 1:
+		speed_x = inner_x + 226
+		volume_x = inner_x + 366
+		status_x = inner_x + 492
+	case 2:
+		transport_y = player.y + PLAYER_TRANSPORT_ROW_PITCH
+		speed_y = transport_y
+		volume_y = transport_y
+		speed_x = inner_x + 226
+		volume_x = inner_x + 366
+	case 3:
+		transport_y = player.y + PLAYER_TRANSPORT_ROW_PITCH*2
+		speed_y = player.y + PLAYER_TRANSPORT_ROW_PITCH
+		volume_y = speed_y
+		volume_x = inner_x + 140
+	}
+
+	result.play_pause = {transport_x, transport_y+3, 62, 24}
+	result.stop = {transport_x+68, transport_y+3, 48, 24}
+	result.reset = {transport_x+122, transport_y+3, 92, 24}
+	result.speed_down = {speed_x, speed_y+3, 24, 24}
+	result.speed_value = {speed_x+28, speed_y, 76, 30}
+	result.speed_up = {speed_x+108, speed_y+3, 24, 24}
+	result.volume_down = {volume_x, volume_y+3, 24, 24}
+	result.volume_value = {volume_x+28, volume_y, 62, 30}
+	result.volume_up = {volume_x+94, volume_y+3, 24, 24}
+	result.timestamp = {status_x, status_y, 140, 30}
+	result.ready_status = {status_x+152, status_y, 100, 30}
+	result.fullscreen = {inner_x+inner_w-24, status_y+3, 24, 24}
+	result.timeline = {
+		inner_x,
+		player.y+f64(result.row_count)*PLAYER_TRANSPORT_ROW_PITCH+6,
+		inner_w,
+		18,
+	}
+	result.footer_height = f64(result.row_count+1)*PLAYER_TRANSPORT_ROW_PITCH
+	return
+}
+
 source_timestamp_rect :: proc(player: UI_Rect) -> UI_Rect {
-	up := source_volume_up_rect(player)
-	return UI_Rect{up.x + up.w + 8, player.y, 140, 30}
+	return player_transport_layout(player).timestamp
 }
 
 source_volume_up_rect :: proc(player: UI_Rect) -> UI_Rect {
-	value := source_volume_value_rect(player)
-	return UI_Rect{value.x + value.w + 4, player.y + 3, 24, 24}
+	return player_transport_layout(player).volume_up
 }
 
 source_volume_value_rect :: proc(player: UI_Rect) -> UI_Rect {
-	down := source_volume_down_rect(player)
-	return UI_Rect{down.x + down.w + 4, player.y, 62, 30}
+	return player_transport_layout(player).volume_value
 }
 
 source_volume_down_rect :: proc(player: UI_Rect) -> UI_Rect {
-	up := source_speed_up_rect(player)
-	return UI_Rect{up.x + up.w + 8, player.y + 3, 24, 24}
+	return player_transport_layout(player).volume_down
 }
 
 source_play_pause_rect :: proc(player: UI_Rect) -> UI_Rect {
-	return UI_Rect{player.x + 10, player.y + 3, 62, 24}
+	return player_transport_layout(player).play_pause
 }
 
 source_stop_rect :: proc(player: UI_Rect) -> UI_Rect {
-	play := source_play_pause_rect(player)
-	return UI_Rect{play.x + play.w + 6, play.y, 48, play.h}
+	return player_transport_layout(player).stop
 }
 
 source_reset_rect :: proc(player: UI_Rect) -> UI_Rect {
-	stop := source_stop_rect(player)
-	return UI_Rect{stop.x + stop.w + 6, stop.y, 92, stop.h}
+	return player_transport_layout(player).reset
 }
 
 source_hint_option_rect :: proc(player: UI_Rect, option_index, option_count: int) -> UI_Rect {
-	button := source_reset_rect(player)
+	button := player_transport_layout(player).reset
 	return UI_Rect{button.x, button.y + button.h + 34 + f64(option_count - option_index - 1) * 28, button.w, 27}
 }
 
 source_speed_down_rect :: proc(player: UI_Rect) -> UI_Rect {
-	reset := source_reset_rect(player)
-	return UI_Rect{reset.x + reset.w + 12, player.y + 3, 24, 24}
+	return player_transport_layout(player).speed_down
 }
 
 source_speed_value_rect :: proc(player: UI_Rect) -> UI_Rect {
-	down := source_speed_down_rect(player)
-	return UI_Rect{down.x + down.w + 4, player.y, 76, 30}
+	return player_transport_layout(player).speed_value
 }
 
 source_speed_up_rect :: proc(player: UI_Rect) -> UI_Rect {
-	value := source_speed_value_rect(player)
-	return UI_Rect{value.x + value.w + 4, player.y + 3, 24, 24}
+	return player_transport_layout(player).speed_up
 }
 
 source_timeline_rect :: proc(player: UI_Rect) -> UI_Rect {
-	return UI_Rect{player.x + 10, player.y + 38, max(0, player.w - 20), 18}
+	return player_transport_layout(player).timeline
 }
 
 player_timeline_seconds :: proc(point: Point, player: UI_Rect) -> f64 {
-	timeline := source_timeline_rect(player)
+	timeline := player_transport_layout(player).timeline
 	return timeline_seconds_at_point(point, timeline, ui.player_duration)
 }
 
@@ -7188,6 +7270,7 @@ draw_playback_fullscreen_transport :: proc(
 	if !ui.playback_fullscreen_controls_visible || state.player == nil {return}
 	theme := ui_theme_colors()
 	player := playback_fullscreen_transport_rect()
+	transport := player_transport_layout(player)
 	background := theme.header
 	background[3] = 0.92
 	fill_overlay_rect(ctx, player, background)
@@ -7269,7 +7352,7 @@ draw_playback_fullscreen_transport :: proc(
 		ctx,
 		font,
 		fmt.tprintf("SPEED %.1fx", ui.playback_rate),
-		source_speed_value_rect(player),
+		transport.speed_value,
 		.Center,
 		.Center,
 		cyan,
@@ -7296,7 +7379,7 @@ draw_playback_fullscreen_transport :: proc(
 		ctx,
 		font,
 		fmt.tprintf("VOL %d%%", volume_percent(ui.player_volume)),
-		source_volume_value_rect(player),
+		transport.volume_value,
 		.Center,
 		.Center,
 		cyan,
@@ -7310,7 +7393,7 @@ draw_playback_fullscreen_transport :: proc(
 		.Center,
 		ui.player_volume >= 1 ? dim : cyan,
 	)
-	timestamp_rect := source_timestamp_rect(player)
+	timestamp_rect := transport.timestamp
 	if seconds, ok := current_seconds(); ok {
 		draw_timestamp_text_in_rect(
 			ctx,
@@ -7664,6 +7747,7 @@ build_overlay_commands :: proc(modal_only := false) {
 			muted,
 		)
 	} else if state.player != nil {
+		transport := player_transport_layout(player)
 		volume_down := ui_control_rect(.Volume_Down)
 		playing := msg_f32(state.player, sel_registerName("rate")) > 0
 		draw_text_in_rect(ctx, small_font, playing ? "PAUSE" : "PLAY", ui_control_rect(.Source_Play_Pause), .Center, .Center, playing ? accent : cyan)
@@ -7680,7 +7764,7 @@ build_overlay_commands :: proc(modal_only := false) {
 		speed_down_color := cyan
 		if ui.playback_rate <= 0.1 {speed_down_color = dim}
 		draw_text_in_rect(ctx, small_font, "-", ui_control_rect(.Speed_Down), .Center, .Center, speed_down_color)
-		draw_text_in_rect(ctx, small_font, fmt.tprintf("SPEED %.1fx", ui.playback_rate), source_speed_value_rect(player), .Center, .Center, cyan)
+		draw_text_in_rect(ctx, small_font, fmt.tprintf("SPEED %.1fx", ui.playback_rate), transport.speed_value, .Center, .Center, cyan)
 		speed_up_color := cyan
 		if ui.playback_rate >= 2 {speed_up_color = dim}
 		draw_text_in_rect(ctx, small_font, "+", ui_control_rect(.Speed_Up), .Center, .Center, speed_up_color)
@@ -7691,7 +7775,7 @@ build_overlay_commands :: proc(modal_only := false) {
 			ctx,
 			small_font,
 			fmt.tprintf("VOL %d%%", volume_percent(ui.player_volume)),
-			source_volume_value_rect(player),
+			transport.volume_value,
 			.Center,
 			.Center,
 			cyan,
@@ -7707,7 +7791,7 @@ build_overlay_commands :: proc(modal_only := false) {
 			.Center,
 			volume_up_color,
 		)
-		timestamp_rect := source_timestamp_rect(player)
+		timestamp_rect := transport.timestamp
 		if seconds, ok := current_seconds(); ok {
 			timestamp := fmt.tprintf("%s / %s", format_timestamp(seconds), format_timestamp(ui.player_duration))
 			draw_timestamp_text_in_rect(
@@ -7724,7 +7808,7 @@ build_overlay_commands :: proc(modal_only := false) {
 			ctx,
 			small_font,
 			ui.source_playback_active ? "MEDIA READY" : "CLIP READY",
-			UI_Rect{timestamp_rect.x + timestamp_rect.w + 12, player.y, 100, 30},
+			transport.ready_status,
 			.Start,
 			.Center,
 			cyan,
@@ -8937,6 +9021,7 @@ add_player_controls :: proc(
 	controls_visible: bool,
 ) {
 	if state.player == nil {return}
+	transport := player_transport_layout(player)
 	playing := msg_f32(state.player, sel_registerName("rate")) > 0
 	media_name := ui.source_playback_active ? "source" : "clip"
 	add_pointer_control(
@@ -8948,7 +9033,7 @@ add_player_controls :: proc(
 	if !controls_visible {return}
 	add_pointer_control(
 		fmt.tprintf("scrub %s timeline", media_name),
-		source_timeline_rect(player),
+		transport.timeline,
 		.Source_Timeline,
 		{.Primary_Press, .Drag},
 	)
@@ -8957,7 +9042,7 @@ add_player_controls :: proc(
 		element_class,
 		fmt.tprintf("%s %s", playing ? "Pause" : "Play", media_name),
 		"AXButton",
-		source_play_pause_rect(player),
+		transport.play_pause,
 		.Source_Play_Pause,
 		flash_label = fmt.tprintf("play pause %s", media_name),
 	)
@@ -8966,7 +9051,7 @@ add_player_controls :: proc(
 		element_class,
 		fmt.tprintf("Stop %s and return to zero", media_name),
 		"AXButton",
-		source_stop_rect(player),
+		transport.stop,
 		.Source_Stop,
 		flash_label = fmt.tprintf("stop %s", media_name),
 	)
@@ -8983,7 +9068,7 @@ add_player_controls :: proc(
 				format_timestamp(source_initial_seconds(state.active_source)),
 			),
 			"AXButton",
-			source_reset_rect(player),
+			transport.reset,
 			.Source_Hint_Menu,
 			flash_label = "select source timestamp",
 		)
@@ -9027,7 +9112,7 @@ add_player_controls :: proc(
 			element_class,
 			reset_label,
 			"AXButton",
-			source_reset_rect(player),
+			transport.reset,
 			.Source_Reset,
 			flash_label = reset_flash_label,
 		)
@@ -9037,7 +9122,7 @@ add_player_controls :: proc(
 		element_class,
 		fmt.tprintf("Decrease %s playback speed", media_name),
 		"AXButton",
-		source_speed_down_rect(player),
+		transport.speed_down,
 		.Speed_Down,
 		flash_label = "slower",
 	)
@@ -9046,7 +9131,7 @@ add_player_controls :: proc(
 		element_class,
 		fmt.tprintf("Increase %s playback speed", media_name),
 		"AXButton",
-		source_speed_up_rect(player),
+		transport.speed_up,
 		.Speed_Up,
 		flash_label = "faster",
 	)
@@ -9060,7 +9145,7 @@ add_player_controls :: proc(
 			percent,
 		),
 		"AXButton",
-		source_volume_down_rect(player),
+		transport.volume_down,
 		.Volume_Down,
 		flash_label = "quieter",
 	)
@@ -9073,7 +9158,7 @@ add_player_controls :: proc(
 			percent,
 		),
 		"AXButton",
-		source_volume_up_rect(player),
+		transport.volume_up,
 		.Volume_Up,
 		flash_label = "louder",
 	)
@@ -9086,7 +9171,7 @@ add_player_controls :: proc(
 		element_class,
 		fullscreen_label,
 		"AXButton",
-		player_fullscreen_toggle_rect(player),
+		transport.fullscreen,
 		.Playback_Fullscreen_Toggle,
 		flash_label = "full screen playback",
 		functional_name = "player full screen toggle",

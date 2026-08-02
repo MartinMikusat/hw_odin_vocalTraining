@@ -187,6 +187,11 @@ that level when another source or clip is loaded during the session. The
 transport can play, pause, stop at zero, change speed, change volume, and scrub
 across the loaded media. Source reset seeks to the imported URL timestamp.
 Clip reset seeks to the start of the clip.
+The transport wraps complete control groups when the monitor becomes narrow.
+It keeps transport, speed, volume, status, and fullscreen controls together in
+their defined groups. The timeline stays in a separate full-width lane above
+the rows. Each added row reduces the video region and cannot enter an adjacent
+panel.
 The application stores each source's mark-in, mark-out, and optional clip name
 as a separate local draft. It restores these drafts after source changes and
 application relaunches.

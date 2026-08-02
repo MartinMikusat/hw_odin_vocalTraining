@@ -4,9 +4,54 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$ROOT/scripts/ui-test-common.sh"
 ui_test_require_jq
-SCENARIO="$ROOT/tests/ui/fullscreen-playback.json"
+VOCAL_SCENARIO="$ROOT/tests/ui/vocal-transport-wrap.json"
+FULLSCREEN_SCENARIO="$ROOT/tests/ui/fullscreen-playback.json"
 
-result=$("$ROOT/scripts/ui-test.sh" run "$SCENARIO")
+vocal_result=$("$ROOT/scripts/ui-test.sh" run "$VOCAL_SCENARIO")
+vocal_artifact=$(printf '%s\n' "$vocal_result" | jq -r '.data.artifact')
+
+test -s "$vocal_artifact/frame.png"
+test -s "$vocal_artifact/overlay.png"
+test -s "$vocal_artifact/render-trace.json"
+test -s "$vocal_artifact/ui-snapshot.json"
+
+jq -e '
+  .schema_version == 2 and
+  .viewport_width == 1280 and
+  .viewport_height == 800 and
+  .encoder_created == true and
+  .command_buffer_status == "completed" and
+  (.command_buffer_error // "") == "" and
+  .fullscreen == false and
+  any(.commands[]; .texture == "video")
+' "$vocal_artifact/render-trace.json" >/dev/null
+
+jq -e '
+  . as $snapshot |
+  def control($name):
+    first($snapshot.controls[] | select(.functional_name == $name)).rect;
+  (control("scrub clip timeline")) as $timeline |
+  ([
+    "play pause clip",
+    "stop clip",
+    "reset clip",
+    "slower",
+    "faster",
+    "quieter",
+    "louder",
+    "player full screen toggle"
+  ] | map(control(.))) as $controls |
+  .surface.workflow == "vocal" and
+  .surface.mode == "play" and
+  .surface.media_loaded == true and
+  all($controls[];
+    .x >= $timeline.x and .x + .w <= $timeline.x + $timeline.w
+  ) and
+  control("play pause clip").y > control("slower").y and
+  control("slower").y > control("player full screen toggle").y
+' "$vocal_artifact/ui-snapshot.json" >/dev/null
+
+result=$("$ROOT/scripts/ui-test.sh" run "$FULLSCREEN_SCENARIO")
 artifact=$(printf '%s\n' "$result" | jq -r '.data.artifact')
 
 test -s "$artifact/frame.png"
@@ -39,4 +84,5 @@ jq -e '
   .surface.playback_timeline_progress > 0
 ' "$artifact/ui-snapshot.json" >/dev/null
 
-printf 'visual=ok viewport=1280x800 gpu_trace=ok artifact=%s\n' "$artifact"
+printf 'visual=ok viewport=1280x800 vocal_wrap=ok gpu_trace=ok artifact=%s\n' \
+  "$artifact"
