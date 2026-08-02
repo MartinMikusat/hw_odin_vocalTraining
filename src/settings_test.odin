@@ -28,6 +28,132 @@ video_clips_settings_layout_contains_two_columns_at_minimum_size_test :: proc(
 }
 
 @(test)
+video_clips_modals_preserve_base_visual_controls_test :: proc(t: ^testing.T) {
+	previous_state := state
+	previous_ui := ui
+	previous_ui_build := ui_build
+	previous_registry := shared_registry
+	previous_palette := command_palette_state
+	previous_recovery := library_recovery_state
+	previous_pending := major_change_pending
+	defer {
+		command_palette.state_destroy(&command_palette_state)
+		delete(state.clips)
+		state = previous_state
+		ui = previous_ui
+		ui_build = previous_ui_build
+		shared_registry = previous_registry
+		command_palette_state = previous_palette
+		library_recovery_state = previous_recovery
+		major_change_pending = previous_pending
+	}
+
+	state = App_State{active_source = -1}
+	command_palette_state = {}
+	testing.expect(t, command_palette.state_init(
+		&command_palette_state,
+		search_reserve_size = 4*1024*1024,
+		search_commit_size = 64*1024,
+	) == nil)
+	state.clips = make([dynamic]Clip)
+	append(&state.clips, Clip{id = "clip-1", name = "Warm up", workflow = .Vocal})
+	base_ui := UI_State{
+		width = 1100,
+		height = 720,
+		mode = .Play,
+		workflow = .Vocal,
+		active_clip = 0,
+		source_details_index = -1,
+		source_modal_refetch_index = -1,
+		clip_rename_index = -1,
+		clip_metadata_index = -1,
+		transcript_active_match = -1,
+	}
+
+	frame_arena: mem_virtual.Arena
+	testing.expect(t, mem_virtual.arena_init_static(
+		&frame_arena,
+		8*1024*1024,
+		4096,
+	) == nil)
+	defer mem_virtual.arena_destroy(&frame_arena)
+	frame_allocator := mem_virtual.arena_allocator(&frame_arena)
+
+	for modal_index in 0 ..< 14 {
+		ui = base_ui
+		library_recovery_state = {}
+		major_change_pending = {}
+		switch modal_index {
+		case 0: ui.settings_open = true
+		case 1: ui.shortcut_open = true
+		case 2: ui.randomize_help_open = true
+		case 3: ui.pitch.help_open = true
+		case 4: ui.notification_modal_open = true
+		case 5: ui.data_modal_open = true
+		case 6:
+			ui.clip_metadata_open = true
+			ui.clip_metadata_index = 0
+		case 7:
+			ui.clip_rename_open = true
+			ui.clip_rename_index = 0
+			ui.clip_rename = "Renamed"
+		case 8: ui.source_modal_open = true
+		case 9: ui.source_details_open = true
+		case 10: ui.discard_confirm_open = true
+		case 11: major_change_pending.open = true
+		case 12: library_recovery_state.required = true
+		case 13:
+			entries := [1]command_palette.Entry{{
+				id = 1,
+				title = "Test command",
+				category = "Test",
+			}}
+			testing.expect_value(
+				t,
+				command_palette.open(
+					&command_palette_state,
+					entries[:],
+					0,
+				),
+				match_sorter.Search_Error.None,
+			)
+		}
+
+		build_ui_controls(false, frame_allocator)
+		testing.expect(t, ui_controls_valid(ui_build.controls[:]))
+		testing.expect(t, ui_controls_valid(ui_build.base_controls[:]))
+		testing.expect(t, len(ui_build.base_controls) > len(ui_build.controls))
+		testing.expect(
+			t,
+			find_ui_control_by_functional_name(
+				ui_build.controls[:],
+				"filter clips",
+			) == nil,
+		)
+		base_filter := find_ui_control_by_functional_name(
+			ui_build.base_controls[:],
+			"filter clips",
+		)
+		base_clip := find_ui_control_by_functional_name(
+			ui_build.base_controls[:],
+			"select clip clip-1",
+		)
+		testing.expect(t, base_filter != nil)
+		testing.expect(t, base_clip != nil)
+		if base_filter != nil {
+			testing.expect_value(t, base_filter.layer, framework_ui.Layer.Base)
+		}
+		if base_clip != nil {
+			testing.expect_value(t, base_clip.layer, framework_ui.Layer.Base)
+		}
+		for &control in ui_build.controls {
+			if ui_action_is_window(control.action.kind) {continue}
+			testing.expect_value(t, control.layer, framework_ui.Layer.Modal)
+		}
+	}
+}
+
+@(test)
 video_clips_settings_catalog_contains_hw_themes_and_flash_test :: proc(
 	t: ^testing.T,
 ) {

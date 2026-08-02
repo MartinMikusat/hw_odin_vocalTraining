@@ -13,6 +13,7 @@
   "steps": [
     {"op": "activate", "control": "settings"},
     {"op": "assert", "condition": {"kind": "surface", "field": "overlay", "operator": "eq", "value": "settings"}},
+    {"op": "assert", "condition": {"kind": "control", "field": "filter clips", "operator": "absent"}},
     {"op": "capture"},
     {"op": "activate", "control": "close settings"}
   ]

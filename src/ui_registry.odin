@@ -9,6 +9,13 @@ import framework_macos "ui_framework:macos"
 
 shared_registry: framework_ui.Registry_View
 
+ui_control_lookup_records :: proc() -> []UI_Control {
+	if ui_base_control_lookup && len(ui_build.base_controls) > 0 {
+		return ui_build.base_controls[:]
+	}
+	return ui_build.controls[:]
+}
+
 ui_control_id :: proc(functional_name: string) -> UI_Control_ID {
 	value := hash.fnv64a(transmute([]byte)functional_name)
 	if value == 0 {value = 1}
@@ -17,21 +24,21 @@ ui_control_id :: proc(functional_name: string) -> UI_Control_ID {
 
 find_ui_control :: proc(id: UI_Control_ID) -> ^UI_Control {
 	if id == 0 {return nil}
-	for &control in ui_build.controls {
+	for &control in ui_control_lookup_records() {
 		if control.id == id {return &control}
 	}
 	return nil
 }
 
 find_ui_control_by_action :: proc(kind: UI_Action_Kind) -> ^UI_Control {
-	for &control in ui_build.controls {
+	for &control in ui_control_lookup_records() {
 		if control.action.kind == kind {return &control}
 	}
 	return nil
 }
 
 find_ui_control_by_action_and_index :: proc(kind: UI_Action_Kind, index: int) -> ^UI_Control {
-	for &control in ui_build.controls {
+	for &control in ui_control_lookup_records() {
 		if control.action.kind == kind && control.action.index == index {return &control}
 	}
 	return nil
@@ -62,7 +69,7 @@ ui_control_rect_by_value :: proc(
 	kind: UI_Action_Kind,
 	index, value: int,
 ) -> UI_Rect {
-	for &control in ui_build.controls {
+	for &control in ui_control_lookup_records() {
 		if control.action.kind == kind &&
 		   control.action.index == index &&
 		   control.action.value == value {
@@ -230,7 +237,6 @@ publish_shared_control_registry :: proc(allocator: mem.Allocator) {
 		len(ui_build.controls),
 		allocator,
 	)
-	modal_active := framework_modal_active()
 	for &control in ui_build.controls {
 		action_id := framework_ui.Action_ID(u64(control.id))
 		number_code: framework_ui.Number_Code
@@ -246,8 +252,6 @@ publish_shared_control_registry :: proc(allocator: mem.Allocator) {
 			enabled = .Enabled in control.flags,
 			number_code = number_code,
 		})
-		layer := framework_ui.Layer.Base
-		if modal_active && !ui_action_is_window(control.action.kind) {layer = .Modal}
 		append(&controls, framework_ui.Control_Record{
 			id = framework_ui.Key(u64(control.id)),
 			functional_name = control.functional_name,
@@ -263,7 +267,7 @@ publish_shared_control_registry :: proc(allocator: mem.Allocator) {
 				f32(control.rect.w),
 				f32(control.rect.h),
 			},
-			layer = layer,
+			layer = control.layer,
 			focusable = .Editable in control.flags,
 			enabled = .Enabled in control.flags,
 		})

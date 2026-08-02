@@ -438,6 +438,14 @@ action. Dynamic controls include a durable source, segment, or clip identifier
 in their functional name. Static panels and labels stay outside the control
 registry.
 
+When a modal is open, the frame build produces two control projections from the
+current application state and viewport. The base projection supplies rectangles
+for background geometry and text. The active projection contains only the
+topmost modal and permitted window controls. Pointer, keyboard, Accessibility,
+Flash, command-menu, and live CLI input use only the active projection. This
+keeps the complete interface visible below the backdrop without making a
+background action available.
+
 The structural UI checker rebuilds and serializes the current control registry
 on the main thread. A background-state check compares it with an idle baseline.
 It permits expected disabling and the import Stop control. It rejects removed

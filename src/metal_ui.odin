@@ -612,12 +612,19 @@ UI_Control :: struct {
 	anchor:              flash.Anchor,
 	flags:               UI_Control_Flags,
 	action:              UI_Action,
+	layer:               framework_ui.Layer,
 }
 
 UI_Build_Output :: struct {
 	controls:           [dynamic]UI_Control,
+	base_controls:      [dynamic]UI_Control,
 	diagnostic_surface: UI_Diagnostic_Surface,
 	frame:              int,
+}
+
+UI_Control_Build_Scope :: enum {
+	Active,
+	Base_Visual,
 }
 
 ui := UI_State{
@@ -633,6 +640,8 @@ ui := UI_State{
 ui_event_tag: int
 allow_hidden_window_reveal: bool
 ui_build: UI_Build_Output
+ui_control_build_scope: UI_Control_Build_Scope
+ui_base_control_lookup: bool
 flash_state: flash.State
 command_palette_state: command_palette.State
 command_palette_actions: [dynamic]UI_Action
@@ -6497,6 +6506,10 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 }
 
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
+	previous_lookup := ui_base_control_lookup
+	ui_base_control_lookup = true
+	defer ui_base_control_lookup = previous_lookup
+
 	_, _, source_search, source_panel, player, transcript, clip_search, clip_panel, clip_name, pitch_panel, _ :=
 		layout_rects()
 	theme := ui_theme_colors()
@@ -7343,6 +7356,10 @@ draw_playback_fullscreen_transport :: proc(
 }
 
 build_overlay_commands :: proc(modal_only := false) {
+	previous_lookup := ui_base_control_lookup
+	ui_base_control_lookup = !modal_only
+	defer ui_base_control_lookup = previous_lookup
+
 	ctx := rawptr(uintptr(1))
 	small_font := system_monospaced_font(SMALL_FONT_SIZE * ui.scale)
 	assert_foreign(small_font, "Unable to create the small UI font")
@@ -8579,10 +8596,8 @@ build_overlay_commands :: proc(modal_only := false) {
 		)
 		draw_backup_warning(ctx, small_font, bright, muted, warning, danger)
 	}
-	if modal_only {
-		if !ui.playback_fullscreen_active {draw_window_controls(ctx)}
-		draw_flash_hints(ctx, small_font)
-	}
+	if !modal_only && !ui.playback_fullscreen_active {draw_window_controls(ctx)}
+	if modal_only {draw_flash_hints(ctx, small_font)}
 }
 
 append_solid_vertices_to_ordered :: proc(vertices: []Solid_Vertex) {
@@ -8840,6 +8855,14 @@ ui_rect_is_actionable :: proc(rect: UI_Rect) -> bool {
 	return rect.w >= 1 && rect.h >= 1
 }
 
+ui_control_layer_for_build :: proc(kind: UI_Action_Kind) -> framework_ui.Layer {
+	if ui_control_build_scope == .Base_Visual || ui_action_is_window(kind) {
+		return .Base
+	}
+	if framework_modal_active() {return .Modal}
+	return .Base
+}
+
 add_ax_element :: proc(
 	array, element_class: Id,
 	label, role: string,
@@ -8883,6 +8906,7 @@ add_ax_element :: proc(
 		anchor = anchor,
 		flags = flags,
 		action = UI_Action{kind = kind, index = index, value = value, seconds = seconds},
+		layer = ui_control_layer_for_build(kind),
 	}
 	append(&ui_build.controls, control)
 	append_ax_element_for_control(array, element_class, &control)
@@ -8903,6 +8927,7 @@ add_pointer_control :: proc(
 		rect = rect,
 		flags = control_flags,
 		action = UI_Action{kind = kind},
+		layer = ui_control_layer_for_build(kind),
 	})
 }
 
@@ -9136,10 +9161,29 @@ finalize_ui_controls :: proc(
 	}
 }
 
-build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allocator) {
+finalize_ui_control_scope :: proc(
+	scope: UI_Control_Build_Scope,
+	allocator: runtime.Allocator,
+	ax_array, element_class: Id,
+) {
+	if scope == .Active {
+		finalize_ui_controls(allocator, ax_array, element_class)
+	} else {
+		validate_ui_controls()
+	}
+}
+
+build_ui_controls_for_scope :: proc(
+	rebuild_accessibility: bool,
+	allocator: runtime.Allocator,
+	scope: UI_Control_Build_Scope,
+) {
 	previous_temp := context.temp_allocator
+	previous_scope := ui_control_build_scope
 	context.temp_allocator = allocator
+	ui_control_build_scope = scope
 	ui_build.controls = make([dynamic]UI_Control, 0, 64, allocator)
+	ui_build.base_controls = nil
 	ui_build.diagnostic_surface = ui_diagnostic_surface(allocator)
 	ui_build.frame = int(ui.frame_tick)
 	array: Id
@@ -9152,14 +9196,15 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		ax_array = temporary
 	}
 	element_class := objc_getClass("VocalAccessibilityElement")
-	defer finalize_ui_controls(allocator, ax_array, element_class)
+	defer finalize_ui_control_scope(scope, allocator, ax_array, element_class)
+	defer ui_control_build_scope = previous_scope
 	defer context.temp_allocator = previous_temp
 	import_field, import_button, source_search, source_panel, player, transcript, clip_search, clip_panel, clip_name, pitch_panel, controls :=
 		layout_rects()
-	if !ui.playback_fullscreen_active {
+	if scope == .Active && !ui.playback_fullscreen_active {
 		add_window_controls(array, element_class)
 	}
-	if library_recovery_state.required {
+	if scope == .Active && library_recovery_state.required {
 		modal := recovery_modal_rect()
 		if library_recovery_state.analysis_complete {
 			if library_recovery_state.confirm_open {
@@ -9217,7 +9262,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if major_change_pending.open {
+	if scope == .Active && major_change_pending.open {
 		modal := backup_warning_modal_rect()
 		add_ax_element(
 			array,
@@ -9240,7 +9285,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.discard_confirm_open {
+	if scope == .Active && ui.discard_confirm_open {
 		add_ax_element(
 			array,
 			element_class,
@@ -9262,7 +9307,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.shortcut_open {
+	if scope == .Active && ui.shortcut_open {
 		record := video_clips_shortcut_record_rect()
 		if !ui.shortcut_listening {
 			add_ax_element(
@@ -9320,7 +9365,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.settings_open {
+	if scope == .Active && ui.settings_open {
 		add_ax_element(
 			array,
 			element_class,
@@ -9386,7 +9431,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.randomize_help_open {
+	if scope == .Active && ui.randomize_help_open {
 		modal := randomize_help_modal_rect()
 		add_ax_element(
 			array,
@@ -9400,7 +9445,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.pitch.help_open {
+	if scope == .Active && ui.pitch.help_open {
 		modal := pitch_help_modal_rect()
 		add_ax_element(
 			array,
@@ -9414,7 +9459,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.notification_modal_open {
+	if scope == .Active && ui.notification_modal_open {
 		modal := notification_modal_rect()
 		add_ax_element(
 			array,
@@ -9464,7 +9509,9 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if !ui.playback_fullscreen_active &&
+	include_footer := scope == .Base_Visual ||
+	                  !command_palette.is_open(&command_palette_state)
+	if include_footer && !ui.playback_fullscreen_active &&
 	   len(notification_history.footer_task_ids) > 0 {
 		task_layout := footer_task_layout(
 			ui.width,
@@ -9553,7 +9600,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 				functional_name = "footer notification task overflow",
 			)
 		}
-	} else if !ui.playback_fullscreen_active {
+	} else if include_footer && !ui.playback_fullscreen_active {
 		status_rect := footer_status_rect()
 		if status_rect.w >= 1 {
 			add_ax_element(
@@ -9610,7 +9657,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			}
 		}
 	}
-	if command_palette.is_open(&command_palette_state) {
+	if scope == .Active && command_palette.is_open(&command_palette_state) {
 		modal := command_palette_rect()
 		add_ax_element(
 			array,
@@ -9644,7 +9691,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.data_modal_open {
+	if scope == .Active && ui.data_modal_open {
 		modal := data_modal_rect()
 		if ui.library_import_confirm_open {
 			add_ax_element(
@@ -9718,7 +9765,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.clip_metadata_open {
+	if scope == .Active && ui.clip_metadata_open {
 		modal := clip_metadata_modal_rect()
 		add_ax_element(
 			array,
@@ -9741,7 +9788,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.clip_rename_open {
+	if scope == .Active && ui.clip_rename_open {
 		modal := clip_rename_modal_rect()
 		add_ax_element(
 			array,
@@ -9773,7 +9820,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.source_modal_open {
+	if scope == .Active && ui.source_modal_open {
 		refetching := ui.source_modal_refetch_index >= 0
 		if ui.source_modal_refetch_index < 0 {
 			add_ax_element(array, element_class, "YouTube URLs", "AXTextField", import_field, .URL, flash_label = "youtube urls")
@@ -9857,7 +9904,7 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 		validate_ui_controls()
 		return
 	}
-	if ui.source_details_open {
+	if scope == .Active && ui.source_details_open {
 		modal := source_details_rect()
 		add_ax_element(array, element_class, "Close source details", "AXButton", source_details_close_rect(modal), .Close_Source_Details, flash_label = "close source details")
 		add_ax_element(array, element_class, "Refetch and select quality", "AXButton", source_details_refetch_rect(modal), .Refetch_Source_Details, flash_label = "refetch quality")
@@ -10236,6 +10283,33 @@ build_ui_controls :: proc(rebuild_accessibility: bool, allocator := context.allo
 			functional_name = "commit clip output",
 		)
 	}
+}
+
+build_ui_controls :: proc(
+	rebuild_accessibility: bool,
+	allocator := context.allocator,
+) {
+	previous_lookup := ui_base_control_lookup
+	ui_base_control_lookup = false
+	defer ui_base_control_lookup = previous_lookup
+
+	build_ui_controls_for_scope(
+		rebuild_accessibility,
+		allocator,
+		.Active,
+	)
+	if !framework_modal_active() {
+		ui_build.base_controls = ui_build.controls
+		return
+	}
+
+	active_build := ui_build
+	active_registry := shared_registry
+	build_ui_controls_for_scope(false, allocator, .Base_Visual)
+	base_controls := ui_build.controls
+	ui_build = active_build
+	ui_build.base_controls = base_controls
+	shared_registry = active_registry
 }
 
 cancel_ui_flash :: proc() {
