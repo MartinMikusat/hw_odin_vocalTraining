@@ -85,9 +85,9 @@ accent. Dancing uses `#36516F` in HW Light and `#7896B3` in HW Dark.
 Both workflows use the same green colors for active and successful states.
 Warnings and exceptional actions keep the orange accent in both workflows.
 
-Vocal Clips gives 20% of the content width to the clip library, 30% to video,
-and 50% to the pitch monitor. Vocal source and clip playback share one saved
-speed.
+Vocal Clips gives 40% of the content width to a single column that stacks
+the clip library above the video player, and 60% to the pitch monitor.
+Vocal source and clip playback share one saved speed.
 
 Dancing Clips gives 20% of the content width to the clip library, 60% to
 video, and 20% to Dance Tools. Each Dancing clip stores its own playback speed,

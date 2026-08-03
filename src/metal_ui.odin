@@ -2866,17 +2866,26 @@ layout_rects :: proc(
 		transcript = UI_Rect{center_x, body_y, center_w, max(80, body_h - player_h - gap)}
 	} else {
 		available_w := w - margin * 2 - gap * 2
-		left_w = available_w * 0.20
-		center_w = available_w * (
-			ui.workflow == .Vocal ? 0.30 : 0.60
-		)
-		pitch_w := available_w - left_w - center_w
-		center_x = margin + left_w + gap
-		right_x = center_x + center_w + gap
-		clip_search = UI_Rect{margin + 8, body_top - 72, left_w - 16, 28}
-		clip_panel = UI_Rect{margin, body_y, left_w, body_h}
-		player = UI_Rect{center_x, body_y, center_w, body_h}
-		pitch_panel = UI_Rect{right_x, body_y, pitch_w, body_h}
+		if ui.workflow == .Vocal {
+			left_w = available_w * 0.40
+			pitch_w := available_w - left_w
+			right_x := margin + left_w + gap
+			list_h := (body_h - gap) / 2
+			clip_panel = UI_Rect{margin, body_y, left_w, list_h}
+			clip_search = UI_Rect{margin + 8, clip_panel.y + list_h - 71, left_w - 16, 28}
+			player = UI_Rect{margin, body_y + list_h + gap, left_w, body_h - list_h - gap}
+			pitch_panel = UI_Rect{right_x, body_y, pitch_w, body_h}
+		} else {
+			left_w = available_w * 0.20
+			center_w = available_w * 0.60
+			pitch_w := available_w - left_w - center_w
+			center_x := margin + left_w + gap
+			right_x := center_x + center_w + gap
+			clip_search = UI_Rect{margin + 8, body_top - 72, left_w - 16, 28}
+			clip_panel = UI_Rect{margin, body_y, left_w, body_h}
+			player = UI_Rect{center_x, body_y, center_w, body_h}
+			pitch_panel = UI_Rect{right_x, body_y, pitch_w, body_h}
+		}
 	}
 	controls = UI_Rect{margin, 42, w - margin * 2, 28}
 	return

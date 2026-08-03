@@ -124,21 +124,23 @@ pitch_trace_keeps_only_the_newest_twelve_seconds_test :: proc(t: ^testing.T) {
 }
 
 @(test)
-pitch_play_layout_uses_twenty_thirty_fifty_partition_test :: proc(
+pitch_play_layout_uses_forty_sixty_partition_test :: proc(
 	t: ^testing.T,
 ) {
-	old_width, old_height, old_mode := ui.width, ui.height, ui.mode
+	old_width, old_height, old_mode, old_workflow := ui.width, ui.height, ui.mode, ui.workflow
 	defer {
-		ui.width, ui.height, ui.mode = old_width, old_height, old_mode
+		ui.width, ui.height, ui.mode, ui.workflow = old_width, old_height, old_mode, old_workflow
 	}
-	ui.width, ui.height, ui.mode = 1100, 720, .Play
+	ui.width, ui.height, ui.mode, ui.workflow = 1100, 720, .Play, .Vocal
 	_, _, _, _, player, _, _, clip, _, pitch, _ := layout_rects()
 	available := ui.width - 36 - 20
-	testing.expect(t, math.abs(clip.w - available * 0.20) < 0.001)
-	testing.expect(t, math.abs(player.w - available * 0.30) < 0.001)
-	testing.expect(t, math.abs(pitch.w - available * 0.50) < 0.001)
-	testing.expect(t, clip.x + clip.w < player.x)
-	testing.expect(t, player.x + player.w < pitch.x)
+	testing.expect(t, math.abs(clip.w - available * 0.40) < 0.001)
+	testing.expect(t, math.abs(player.w - available * 0.40) < 0.001)
+	testing.expect(t, math.abs(pitch.w - available * 0.60) < 0.001)
+	testing.expect(t, clip.x == player.x)
+	testing.expect(t, clip.y < player.y)
+	testing.expect(t, clip.y + clip.h < player.y)
+	testing.expect(t, clip.x + clip.w < pitch.x)
 	testing.expect(t, pitch.x + pitch.w <= ui.width - 18)
 }
 
