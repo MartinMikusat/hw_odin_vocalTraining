@@ -260,7 +260,7 @@ ui_automation_action_effect :: proc(
 	     .Dance_Loop_Toggle, .Dance_Count_In,
 	     .Dance_Count_Each_Loop_Toggle, .Dance_BPM_Down,
 	     .Dance_BPM_Up, .Pitch_Reference_Down, .Pitch_Reference_Up,
-	     .Pitch_Range, .Pitch_Labels, .Pitch_Transpose,
+	     .Pitch_Octaves_Down, .Pitch_Octaves_Up, .Pitch_Labels, .Pitch_Transpose,
 	     .Pitch_Highlight, .Speed_Down, .Speed_Up, .Source_Hint,
 	     .Start, .End, .Captions, .Confirm_Clip_Rename:
 		return .Persistent

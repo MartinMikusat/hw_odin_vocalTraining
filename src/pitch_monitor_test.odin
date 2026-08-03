@@ -79,7 +79,7 @@ pitch_yin_rejects_silence_and_weak_input_test :: proc(t: ^testing.T) {
 pitch_settings_round_trip_and_reject_invalid_values_test :: proc(t: ^testing.T) {
 	settings := Pitch_Settings{
 		reference_hz = 442,
-		range = .C1_C6,
+		octaves = 4,
 		labels = .Solfege,
 		transpose = 7,
 		highlight = false,
@@ -163,11 +163,85 @@ pitch_settings_round_trip_through_application_preferences_test :: proc(
 	testing.expect(t, database_create_schema(database))
 	settings := Pitch_Settings{
 		reference_hz = 432,
-		range = .C3_C8,
+		octaves = 5,
 		labels = .Numbers,
 		transpose = 11,
 		highlight = false,
 	}
 	testing.expect(t, database_pitch_settings_save(database, settings))
 	testing.expect_value(t, database_pitch_settings_load(database), settings)
+}
+
+@(test)
+pitch_plot_window_covers_the_configured_octave_span_test :: proc(
+	t: ^testing.T,
+) {
+	state: Pitch_Monitor_State
+	state.settings = pitch_default_settings()
+	state.settings.octaves = 3
+	state.window_center_midi = 60
+	minimum, maximum := pitch_plot_window_midi(&state)
+	testing.expect_value(t, maximum-minimum, 36)
+	testing.expect(t, minimum <= 60 && maximum >= 60)
+	state.settings.octaves = 6
+	minimum, maximum = pitch_plot_window_midi(&state)
+	testing.expect_value(t, maximum-minimum, 72)
+	state.settings.octaves = 1
+	minimum, maximum = pitch_plot_window_midi(&state)
+	testing.expect_value(t, maximum-minimum, 12)
+}
+
+@(test)
+pitch_plot_window_stays_inside_the_analysis_band_test :: proc(
+	t: ^testing.T,
+) {
+	state: Pitch_Monitor_State
+	state.settings = pitch_default_settings()
+	state.settings.octaves = 6
+	state.window_center_midi = PITCH_ANALYSIS_MIN_MIDI
+	minimum, maximum := pitch_plot_window_midi(&state)
+	testing.expect(t, minimum >= PITCH_ANALYSIS_MIN_MIDI)
+	testing.expect(t, maximum <= PITCH_ANALYSIS_MAX_MIDI)
+	state.window_center_midi = PITCH_ANALYSIS_MAX_MIDI
+	minimum, maximum = pitch_plot_window_midi(&state)
+	testing.expect(t, minimum >= PITCH_ANALYSIS_MIN_MIDI)
+	testing.expect(t, maximum <= PITCH_ANALYSIS_MAX_MIDI)
+}
+
+@(test)
+pitch_window_follow_recenters_on_voiced_pitch_and_holds_on_silence_test :: proc(
+	t: ^testing.T,
+) {
+	state: Pitch_Monitor_State
+	state.settings = pitch_default_settings()
+	state.window_center_midi = PITCH_DEFAULT_WINDOW_CENTER_MIDI
+	state.current_midi = 72
+	state.voiced = true
+	pitch_window_follow(&state)
+	testing.expect(t, math.abs(state.window_center_midi - 72) < 0.001)
+	state.voiced = false
+	state.current_midi = 60
+	pitch_window_follow(&state)
+	testing.expect(t, math.abs(state.window_center_midi - 72) < 0.001)
+}
+
+@(test)
+pitch_window_follow_clamps_the_center_into_the_analysis_band_test :: proc(
+	t: ^testing.T,
+) {
+	state: Pitch_Monitor_State
+	state.settings = pitch_default_settings()
+	state.settings.octaves = 6
+	state.current_midi = PITCH_ANALYSIS_MIN_MIDI
+	state.voiced = true
+	pitch_window_follow(&state)
+	minimum, maximum := pitch_plot_window_midi(&state)
+	testing.expect(t, minimum >= PITCH_ANALYSIS_MIN_MIDI)
+	testing.expect(t, maximum <= PITCH_ANALYSIS_MAX_MIDI)
+	state.current_midi = PITCH_ANALYSIS_MAX_MIDI
+	state.voiced = true
+	pitch_window_follow(&state)
+	minimum, maximum = pitch_plot_window_midi(&state)
+	testing.expect(t, minimum >= PITCH_ANALYSIS_MIN_MIDI)
+	testing.expect(t, maximum <= PITCH_ANALYSIS_MAX_MIDI)
 }

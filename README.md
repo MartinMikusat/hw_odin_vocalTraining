@@ -104,11 +104,14 @@ the default input is a Bluetooth headset, the app uses the Mac's built-in
 microphone to preserve high-quality headphone playback. Clip playback and
 pitch tracking can run together.
 
-The pitch settings select the A4 reference from 400 to 480 Hz, the displayed
-range, note labels, chromatic transposition, and nearest-note highlight. The app
-stores these settings locally. Label and transposition settings change only the
-displayed note names. Select the pitch monitor **?** control for the complete
-setting rules and microphone behavior.
+The pitch settings select the A4 reference from 400 to 480 Hz, the visible
+pitch window from 1 to 6 octaves, note labels, chromatic transposition, and
+nearest-note highlight. The chart re-centers on the current voiced pitch and
+holds position during silence, while the detector continues to accept the
+full C1-to-C8 band so the window can catch up after a jump. The app
+stores these settings locally. Label and transposition settings change only
+the displayed note names. Select the pitch monitor **?** control for the
+complete setting rules and microphone behavior.
 
 In Clips, select **Randomize** to choose from the complete workflow clip library
 and start playback. An active search does not limit the random pool. When two

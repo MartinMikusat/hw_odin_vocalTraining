@@ -533,7 +533,8 @@ UI_Action_Kind :: enum {
 	Pitch_Toggle,
 	Pitch_Reference_Down,
 	Pitch_Reference_Up,
-	Pitch_Range,
+	Pitch_Octaves_Down,
+	Pitch_Octaves_Up,
 	Pitch_Labels,
 	Pitch_Transpose,
 	Pitch_Highlight,
@@ -3417,14 +3418,13 @@ pitch_reference_rect :: proc(panel: UI_Rect, part: int) -> UI_Rect {
 	return UI_Rect{x, y, widths[part], 26}
 }
 
-pitch_range_option_rect :: proc(panel: UI_Rect, index: int) -> UI_Rect {
+pitch_octaves_rect :: proc(panel: UI_Rect, part: int) -> UI_Rect {
 	settings := pitch_settings_rect(panel)
-	return UI_Rect{
-		settings.x,
-		settings.y + settings.h - 104 - f64(index) * 25,
-		settings.w,
-		23,
-	}
+	y := settings.y + settings.h - 104
+	widths := [3]f64{32, settings.w - 64, 32}
+	x := settings.x
+	for index in 0 ..< part {x += widths[index]}
+	return UI_Rect{x, y, widths[part], 26}
 }
 
 pitch_label_option_rect :: proc(panel: UI_Rect, index: int) -> UI_Rect {
@@ -5646,7 +5646,7 @@ draw_pitch_monitor :: proc(
 		muted,
 		8,
 	)
-	minimum_midi, maximum_midi := pitch_range_midi(ui.pitch.settings.range)
+	minimum_midi, maximum_midi := pitch_plot_window_midi(&ui.pitch)
 	natural := [12]bool{true, false, true, false, true, true, false, true, false, true, false, true}
 	for midi in minimum_midi ..= maximum_midi {
 		pitch_class := midi % 12
@@ -5703,26 +5703,24 @@ draw_pitch_monitor :: proc(
 	draw_text_in_rect(
 		ctx,
 		font,
-		"RANGE",
+		"OCTAVES",
 		UI_Rect{settings.x, top - 80, settings.w, 18},
 		.Start,
 		.Center,
 		muted,
 	)
-	range_labels := [3]string{"C3 TO C8", "C2 TO C7", "C1 TO C6"}
-	for label, index in range_labels {
-		color := muted
-		if index == int(ui.pitch.settings.range) {color = cool}
-		draw_text_in_rect(
-			ctx,
-			font,
-			label,
-			ui_control_rect(.Pitch_Range, index),
-			.Center,
-			.Center,
-			color,
-		)
-	}
+	octave_value := clamp(ui.pitch.settings.octaves, 1, 6)
+	draw_text_in_rect(ctx, font, "-", ui_control_rect(.Pitch_Octaves_Down), .Center, .Center, bright)
+	draw_text_in_rect(
+		ctx,
+		font,
+		fmt.tprintf("%d OCT", octave_value),
+		pitch_octaves_rect(panel, 1),
+		.Center,
+		.Center,
+		bright,
+	)
+	draw_text_in_rect(ctx, font, "+", ui_control_rect(.Pitch_Octaves_Up), .Center, .Center, bright)
 
 	draw_text_in_rect(
 		ctx,
@@ -5894,14 +5892,15 @@ draw_pitch_help :: proc(
 		.Center,
 		bright,
 	)
-	lines := [8]string{
+	lines := [9]string{
 		fmt.tprintf(
 			"Press action %s to start or stop live microphone analysis.",
 			pitch_numbered_action_text(),
 		),
 		"The first start asks macOS for microphone access. No audio is stored.",
 		"Pitch Standard changes the A4 reference frequency from 400 to 480 Hz.",
-		"Range selects the frequencies shown by the chart and detector.",
+		"Octaves sets the visible pitch window from 1 to 6 octaves.",
+		"The chart follows the current pitch and holds position during silence.",
 		"Note Labels and Transpose change displayed names. They do not change measured pitch.",
 		"Highlight marks the nearest stable note while a voiced pitch is detected.",
 		"The trace keeps the most recent 12 seconds and clears on the next start.",
@@ -6644,7 +6643,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		plot := pitch_plot_rect(pitch_panel)
 		push_rect(vertices, chart, row_color)
 		push_rect(vertices, settings, field)
-		minimum_midi, maximum_midi := pitch_range_midi(ui.pitch.settings.range)
+		minimum_midi, maximum_midi := pitch_plot_window_midi(&ui.pitch)
 		for midi in minimum_midi ..= maximum_midi {
 			y := pitch_plot_y(plot, f64(midi), minimum_midi, maximum_midi)
 			line_color := rule
@@ -6723,16 +6722,22 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			if contains(rect, ui.mouse) {color = row_hover}
 			push_rect(vertices, rect, color)
 		}
+		octaves_kinds := [2]UI_Action_Kind{
+			.Pitch_Octaves_Down,
+			.Pitch_Octaves_Up,
+		}
+		for kind in octaves_kinds {
+			rect := ui_control_rect(kind)
+			if rect.w <= 0 {continue}
+			control := find_ui_control_by_action(kind)
+			enabled := control != nil && .Enabled in control.flags
+			color := enabled ? panel_alt : field
+			if enabled && contains(rect, ui.mouse) {color = row_hover}
+			push_rect(vertices, rect, color)
+			if enabled {push_border(vertices, rect, UI_COLOR_GUM_32)}
+		}
 		for index in 0 ..< 3 {
-			rect := ui_control_rect(.Pitch_Range, index)
-			push_rect(vertices, rect, panel_alt)
-			if index == int(ui.pitch.settings.range) {
-				push_border(vertices, rect, UI_COLOR_GUM_32)
-				push_rect(vertices, left_accent_edge_rect(rect), UI_COLOR_GUM_32)
-			} else if contains(rect, ui.mouse) {
-				push_rect(vertices, rect, row_hover)
-			}
-			rect = ui_control_rect(.Pitch_Labels, index)
+			rect := ui_control_rect(.Pitch_Labels, index)
 			push_rect(vertices, rect, panel_alt)
 			if index == int(ui.pitch.settings.labels) {
 				push_border(vertices, rect, UI_COLOR_GUM_32)
@@ -8887,8 +8892,17 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		       ui.workflow == .Vocal &&
 		       ui.pitch.settings.reference_hz < 480
 	}
-	if kind == .Pitch_Range ||
-	   kind == .Pitch_Labels ||
+	if kind == .Pitch_Octaves_Down {
+		return ui.mode == .Play &&
+		       ui.workflow == .Vocal &&
+		       ui.pitch.settings.octaves > 1
+	}
+	if kind == .Pitch_Octaves_Up {
+		return ui.mode == .Play &&
+		       ui.workflow == .Vocal &&
+		       ui.pitch.settings.octaves < 6
+	}
+	if kind == .Pitch_Labels ||
 	   kind == .Pitch_Transpose ||
 	   kind == .Pitch_Highlight ||
 	   kind == .Open_Pitch_Help {
@@ -10185,21 +10199,24 @@ build_ui_controls_for_scope :: proc(
 			.Pitch_Reference_Up,
 			flash_label = "raise pitch reference",
 		)
-		range_labels := [3]string{"C3 to C8", "C2 to C7", "C1 to C6"}
-		for label, index in range_labels {
-			add_ax_element(
-				array,
-				element_class,
-				label,
-				"AXRadioButton",
-				pitch_range_option_rect(pitch_panel, index),
-				.Pitch_Range,
-				index,
-				value = index,
-				flash_label = "pitch range",
-				functional_name = fmt.tprintf("pitch range %d", index),
-			)
-		}
+		add_ax_element(
+			array,
+			element_class,
+			"Decrease visible pitch octaves",
+			"AXButton",
+			pitch_octaves_rect(pitch_panel, 0),
+			.Pitch_Octaves_Down,
+			flash_label = "fewer pitch octaves",
+		)
+		add_ax_element(
+			array,
+			element_class,
+			"Increase visible pitch octaves",
+			"AXButton",
+			pitch_octaves_rect(pitch_panel, 2),
+			.Pitch_Octaves_Up,
+			flash_label = "more pitch octaves",
+		)
 		label_labels := [3]string{"Note labels ABCDEFG", "Note labels Do Re Mi", "Note labels 1 to 7"}
 		for label, index in label_labels {
 			add_ax_element(
@@ -10704,8 +10721,13 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 			min(480, ui.pitch.settings.reference_hz + 1)
 		pitch_trace_clear(&ui.pitch)
 		save_pitch_settings()
-	case .Pitch_Range:
-		ui.pitch.settings.range = Pitch_Range(action.value)
+	case .Pitch_Octaves_Down:
+		ui.pitch.settings.octaves =
+			max(1, ui.pitch.settings.octaves - 1)
+		save_pitch_settings()
+	case .Pitch_Octaves_Up:
+		ui.pitch.settings.octaves =
+			min(6, ui.pitch.settings.octaves + 1)
 		save_pitch_settings()
 	case .Pitch_Labels:
 		ui.pitch.settings.labels = Pitch_Label_Mode(action.value)

@@ -31,6 +31,9 @@ PITCH_TRACE_POINTS        :: 360
 PITCH_ANALYSIS_FRAME_STEP :: uint(2)
 PITCH_YIN_THRESHOLD       :: 0.15
 PITCH_RMS_THRESHOLD       :: 0.008
+PITCH_ANALYSIS_MIN_MIDI   :: 24
+PITCH_ANALYSIS_MAX_MIDI   :: 108
+PITCH_DEFAULT_WINDOW_CENTER_MIDI :: 60.0
 
 Pitch_Permission :: enum i32 {
 	Unknown,
@@ -46,12 +49,6 @@ Pitch_Capture_Status :: enum i32 {
 	Start_Failed,
 }
 
-Pitch_Range :: enum i32 {
-	C3_C8,
-	C2_C7,
-	C1_C6,
-}
-
 Pitch_Label_Mode :: enum i32 {
 	Letters,
 	Solfege,
@@ -60,7 +57,7 @@ Pitch_Label_Mode :: enum i32 {
 
 Pitch_Settings :: struct {
 	reference_hz: i32,
-	range:        Pitch_Range,
+	octaves:      i32,
 	labels:       Pitch_Label_Mode,
 	transpose:    i32,
 	highlight:    bool,
@@ -89,6 +86,7 @@ Pitch_Monitor_State :: struct {
 	trace:              [PITCH_TRACE_POINTS]Pitch_Point,
 	trace_start:        int,
 	trace_count:        int,
+	window_center_midi: f64,
 	current_hz:         f64,
 	current_midi:       f64,
 	current_cents:      f64,
@@ -100,7 +98,7 @@ Pitch_Monitor_State :: struct {
 pitch_default_settings :: proc() -> Pitch_Settings {
 	return {
 		reference_hz = 440,
-		range = .C2_C7,
+		octaves = 3,
 		labels = .Letters,
 		transpose = 0,
 		highlight = true,
@@ -110,8 +108,8 @@ pitch_default_settings :: proc() -> Pitch_Settings {
 pitch_settings_valid :: proc(settings: Pitch_Settings) -> bool {
 	return settings.reference_hz >= 400 &&
 	       settings.reference_hz <= 480 &&
-	       int(settings.range) >= int(Pitch_Range.C3_C8) &&
-	       int(settings.range) <= int(Pitch_Range.C1_C6) &&
+	       settings.octaves >= 1 &&
+	       settings.octaves <= 6 &&
 	       int(settings.labels) >= int(Pitch_Label_Mode.Letters) &&
 	       int(settings.labels) <= int(Pitch_Label_Mode.Numbers) &&
 	       settings.transpose >= 0 &&
@@ -122,7 +120,7 @@ pitch_settings_encode :: proc(settings: Pitch_Settings) -> string {
 	return fmt.tprintf(
 		"%d|%d|%d|%d|%d",
 		settings.reference_hz,
-		int(settings.range),
+		settings.octaves,
 		int(settings.labels),
 		settings.transpose,
 		settings.highlight ? 1 : 0,
@@ -141,7 +139,7 @@ pitch_settings_decode :: proc(value: string) -> (Pitch_Settings, bool) {
 	}
 	settings := Pitch_Settings{
 		reference_hz = i32(values[0]),
-		range = Pitch_Range(values[1]),
+		octaves = i32(values[1]),
 		labels = Pitch_Label_Mode(values[2]),
 		transpose = i32(values[3]),
 		highlight = values[4] != 0,
@@ -149,16 +147,23 @@ pitch_settings_decode :: proc(value: string) -> (Pitch_Settings, bool) {
 	return settings, pitch_settings_valid(settings)
 }
 
-pitch_range_midi :: proc(value: Pitch_Range) -> (minimum, maximum: int) {
-	switch value {
-	case .C3_C8:
-		return 48, 108
-	case .C1_C6:
-		return 24, 84
-	case .C2_C7:
-		return 36, 96
+pitch_plot_window_midi :: proc(state: ^Pitch_Monitor_State) -> (minimum, maximum: int) {
+	span := max(1, state.settings.octaves) * 12
+	half := f64(span) / 2
+	center := state.window_center_midi
+	minimum = int(math.floor(center - half))
+	maximum = int(math.ceil(center + half))
+	if minimum < PITCH_ANALYSIS_MIN_MIDI {
+		shift := PITCH_ANALYSIS_MIN_MIDI - minimum
+		minimum += shift
+		maximum += shift
 	}
-	return 36, 96
+	if maximum > PITCH_ANALYSIS_MAX_MIDI {
+		shift := maximum - PITCH_ANALYSIS_MAX_MIDI
+		maximum -= shift
+		minimum -= shift
+	}
+	return
 }
 
 pitch_midi_frequency :: proc(midi: f64, reference_hz: f64) -> f64 {
@@ -343,16 +348,24 @@ pitch_resample_latest :: proc(state: ^Pitch_Monitor_State) -> bool {
 	return true
 }
 
+pitch_window_follow :: proc(state: ^Pitch_Monitor_State) {
+	if !state.voiced {return}
+	span := max(1, state.settings.octaves) * 12
+	half := f64(span) / 2
+	minimum := f64(PITCH_ANALYSIS_MIN_MIDI) + half
+	maximum := f64(PITCH_ANALYSIS_MAX_MIDI) - half
+	state.window_center_midi = clamp(state.current_midi, minimum, maximum)
+}
+
 pitch_analyze :: proc(state: ^Pitch_Monitor_State) {
 	if !pitch_resample_latest(state) {
 		state.voiced = false
 		pitch_trace_append(state, Pitch_Point{})
 		return
 	}
-	minimum_midi, maximum_midi := pitch_range_midi(state.settings.range)
 	reference := f64(state.settings.reference_hz)
-	minimum_hz := pitch_midi_frequency(f64(minimum_midi), reference)
-	maximum_hz := pitch_midi_frequency(f64(maximum_midi), reference)
+	minimum_hz := pitch_midi_frequency(f64(PITCH_ANALYSIS_MIN_MIDI), reference)
+	maximum_hz := pitch_midi_frequency(f64(PITCH_ANALYSIS_MAX_MIDI), reference)
 	frequency, confidence, voiced := pitch_detect_yin(
 		state.analysis[:],
 		PITCH_ANALYSIS_RATE,
@@ -384,6 +397,7 @@ pitch_monitor_initialize :: proc(
 	if !pitch_settings_valid(settings) {
 		state.settings = pitch_default_settings()
 	}
+	state.window_center_midi = PITCH_DEFAULT_WINDOW_CENTER_MIDI
 	state.permission = Pitch_Permission(hw_video_clips_pitch_permission_status())
 	state.capture_status = .Stopped
 }
@@ -419,6 +433,7 @@ pitch_monitor_start_capture :: proc(state: ^Pitch_Monitor_State) -> bool {
 	state.input_count = 0
 	state.sample_rate = 0
 	state.start_after_permission = false
+	state.window_center_midi = PITCH_DEFAULT_WINDOW_CENTER_MIDI
 	pitch_trace_clear(state)
 	return true
 }
@@ -490,6 +505,7 @@ pitch_monitor_poll :: proc(
 	}
 	if frame_tick % PITCH_ANALYSIS_FRAME_STEP == 0 {
 		pitch_analyze(state)
+		pitch_window_follow(state)
 		changed = true
 	}
 	return changed

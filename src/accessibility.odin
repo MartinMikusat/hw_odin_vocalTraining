@@ -45,7 +45,6 @@ append_ax_element_for_control :: proc(
 	)
 	if kind == .Toggle_Save_Source_Browser ||
 	   kind == .Pitch_Highlight ||
-	   kind == .Pitch_Range ||
 	   kind == .Pitch_Labels ||
 	   kind == .Pitch_Transpose ||
 	   kind == .Shuffle_Toggle ||
@@ -56,8 +55,6 @@ append_ax_element_for_control :: proc(
 			if ui.save_source_browser_choice {checked = 1}
 		case .Pitch_Highlight:
 			if ui.pitch.settings.highlight {checked = 1}
-		case .Pitch_Range:
-			if selected_value == int(ui.pitch.settings.range) {checked = 1}
 		case .Pitch_Labels:
 			if selected_value == int(ui.pitch.settings.labels) {checked = 1}
 		case .Pitch_Transpose:

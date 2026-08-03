@@ -4836,8 +4836,9 @@ pitch_monitor_registers_controls_and_help_overlay_test :: proc(
 	testing.expect(t, find_ui_control_by_action(.Pitch_Toggle) != nil)
 	testing.expect(t, find_ui_control_by_action(.Pitch_Reference_Down) != nil)
 	testing.expect(t, find_ui_control_by_action(.Pitch_Reference_Up) != nil)
+	testing.expect(t, find_ui_control_by_action(.Pitch_Octaves_Down) != nil)
+	testing.expect(t, find_ui_control_by_action(.Pitch_Octaves_Up) != nil)
 	for index in 0 ..< 3 {
-		testing.expect(t, find_ui_control_by_action_and_index(.Pitch_Range, index) != nil)
 		testing.expect(t, find_ui_control_by_action_and_index(.Pitch_Labels, index) != nil)
 	}
 	for index in 0 ..< 12 {
