@@ -1093,7 +1093,7 @@ seek_seconds :: proc(seconds: f64) {
 	cancel_dance_count_in()
 	ui.playback_completion_pending = false
 	request_transcript_follow_to(seconds)
-	resume := msg_f32(state.player, sel_registerName("rate")) > 0
+	resume := playback_actively_playing()
 	seek_video_seconds(seconds)
 	metal_audio_seek(seconds, resume)
 }
@@ -3164,7 +3164,7 @@ on_toggle_playback :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if state.player == nil { return }
-	if msg_f32(state.player, sel_registerName("rate")) > 0 {
+	if playback_actively_playing() {
 		pause_player_playback()
 	} else {
 		request_transcript_follow()

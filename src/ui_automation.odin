@@ -380,9 +380,7 @@ ui_automation_surface_value :: proc(field: string) -> UI_Automation_Value {
 			string = ui.clip_selection_ids[int(ui.workflow)],
 		}
 	case "playback.active":
-		active := state.player != nil &&
-		          msg_f32(state.player, sel_registerName("rate")) > 0
-		return {kind=.Boolean, boolean=active}
+		return {kind=.Boolean, boolean=playback_actively_playing()}
 	case "playback.seconds":
 		seconds, _ := current_seconds()
 		return {kind=.Number, number=seconds}

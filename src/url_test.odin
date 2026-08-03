@@ -3671,6 +3671,46 @@ metal_player_survives_autorelease_pool_drain_and_replacement_test :: proc(t: ^te
 }
 
 @(test)
+paused_scrub_does_not_start_audio_during_frame_warmup_test :: proc(t: ^testing.T) {
+	headless, skip := os.lookup_env("HW_VIDEO_CLIPS_HEADLESS_TEST")
+	delete(headless)
+	if skip {return}
+	objc_handle := os.dlopen("/usr/lib/libobjc.A.dylib", os.RTLD_NOW)
+	testing.expect(t, objc_handle != nil)
+	testing.expect(t, os.dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", os.RTLD_NOW) != nil)
+	testing.expect(t, os.dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", os.RTLD_NOW) != nil)
+	testing.expect(t, os.dlopen("/System/Library/Frameworks/AVFAudio.framework/AVFAudio", os.RTLD_NOW) != nil)
+	previous_send := send_address
+	send_address = os.dlsym(objc_handle, "objc_msgSend")
+	testing.expect(t, send_address != nil)
+	defer {
+		metal_player_clear()
+		send_address = previous_send
+	}
+	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
+	testing.expect(t, app != nil)
+
+	ui.frame_tick = 200
+	testing.expect(t, metal_player_load("/System/Library/Sounds/Glass.aiff"))
+	testing.expect_value(t, msg_f32(state.player, sel_registerName("rate")), f32(0))
+
+	seek_seconds(0.1)
+	testing.expect(t, !metal_audio_engine_running())
+	ui.frame_tick = ui.video_frame_warmup_due_tick
+	advance_paused_video_frame_warmup()
+	testing.expect(t, ui.video_frame_warmup_active)
+	testing.expect(t, msg_f32(state.player, sel_registerName("rate")) > 0)
+	testing.expect(t, !playback_actively_playing())
+
+	seek_seconds(0.2)
+	testing.expect(t, !metal_audio_engine_running())
+
+	complete_video_frame_refresh()
+	testing.expect(t, !ui.video_frame_warmup_active)
+	testing.expect_value(t, msg_f32(state.player, sel_registerName("rate")), f32(0))
+}
+
+@(test)
 virtual_arena_reset_reclaims_the_complete_frame_test :: proc(t: ^testing.T) {
 	arena: mem_virtual.Arena
 	init_error := mem_virtual.arena_init_static(&arena, 1024*1024, 4096)
@@ -7362,4 +7402,12 @@ video_frame_refresh_retries_until_completion_or_deadline_test :: proc(
 	request_video_frame_refresh()
 	testing.expect(t, !ui.video_frame_pending)
 	testing.expect_value(t, ui.video_frame_deadline, uint(0))
+}
+
+@(test)
+playback_state_active_ignores_paused_frame_warmup_test :: proc(t: ^testing.T) {
+	testing.expect(t, !playback_state_active(0, false))
+	testing.expect(t, playback_state_active(1, false))
+	testing.expect(t, !playback_state_active(1, true))
+	testing.expect(t, !playback_state_active(0, true))
 }

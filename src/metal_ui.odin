@@ -7309,7 +7309,7 @@ draw_playback_fullscreen_transport :: proc(
 		if contains(rect, ui.mouse) {color = theme.row_hover}
 		fill_overlay_rect(ctx, rect, color)
 	}
-	playing := msg_f32(state.player, sel_registerName("rate")) > 0
+	playing := playback_actively_playing()
 	draw_text_in_rect(
 		ctx,
 		font,
@@ -7763,7 +7763,7 @@ build_overlay_commands :: proc(modal_only := false) {
 	} else if state.player != nil {
 		transport := player_transport_layout(player)
 		volume_down := ui_control_rect(.Volume_Down)
-		playing := msg_f32(state.player, sel_registerName("rate")) > 0
+		playing := playback_actively_playing()
 		draw_text_in_rect(ctx, small_font, playing ? "PAUSE" : "PLAY", ui_control_rect(.Source_Play_Pause), .Center, .Center, playing ? accent : cyan)
 		draw_text_in_rect(ctx, small_font, "STOP", ui_control_rect(.Source_Stop), .Center, .Center, muted)
 		hint_control := Source_Hint_Control.Reset
@@ -9045,7 +9045,7 @@ add_player_controls :: proc(
 ) {
 	if state.player == nil {return}
 	transport := player_transport_layout(player)
-	playing := msg_f32(state.player, sel_registerName("rate")) > 0
+	playing := playback_actively_playing()
 	media_name := ui.source_playback_active ? "source" : "clip"
 	add_pointer_control(
 		fmt.tprintf("toggle %s playback from player surface", media_name),

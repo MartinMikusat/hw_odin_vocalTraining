@@ -58,6 +58,18 @@ cancel_paused_video_frame_warmup :: proc() {
 	ui.video_frame_warmup_due_tick = 0
 }
 
+playback_state_active :: proc(rate: f32, warmup_active: bool) -> bool {
+	return rate > 0 && !warmup_active
+}
+
+playback_actively_playing :: proc() -> bool {
+	if state.player == nil {return false}
+	return playback_state_active(
+		msg_f32(state.player, sel_registerName("rate")),
+		ui.video_frame_warmup_active,
+	)
+}
+
 complete_video_frame_refresh :: proc() {
 	clear_video_frame_refresh()
 }
