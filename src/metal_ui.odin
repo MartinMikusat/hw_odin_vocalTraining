@@ -18,6 +18,7 @@ import match_sorter "match_sorter:."
 import framework_coretext "ui_framework:coretext"
 import framework_ui "ui_framework:core"
 import framework_draw "ui_framework:draw"
+import framework_macos "ui_framework:macos"
 import framework_metal "ui_framework:metal"
 
 foreign import avfaudio "system:AVFAudio.framework"
@@ -178,6 +179,7 @@ UI_State :: struct {
 	layer:              Id,
 	device:             Id,
 	queue:              Id,
+	frame_timer:        framework_macos.Frame_Timer,
 	texture_cache:      rawptr,
 	video_output:       Id,
 	audio_engine:       Id,
@@ -11418,6 +11420,7 @@ activate_selected_command_palette_result :: proc() -> bool {
 }
 
 ui_memory_destroy :: proc() {
+	framework_macos.frame_timer_stop(&ui.frame_timer)
 	_ = flush_active_clip_draft()
 	pitch_monitor_stop(&ui.pitch)
 	metal_player_clear()
@@ -13112,26 +13115,14 @@ video_clips_gui_initialize :: proc() -> bool {
 	}
 
 	if ui.mode == .Create {restore_source_selection()} else {restore_clip_selection()}
-	// The Objective-C runtime requires the exact floating-point signature, so
-	// construct the repeating timer through a typed send.
-	timer_send := transmute(proc "c" (
-		_: Id,
-		_: Sel,
-		_: f64,
-		_: Id,
-		_: Sel,
-		_: Id,
-		_: bool,
-	) -> Id)send_address
-	_ = timer_send(
-		objc_getClass("NSTimer"),
-		sel_registerName("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
-		1.0 / 60.0,
+	if !framework_macos.frame_timer_start(
+		&ui.frame_timer,
 		state.delegate_target,
-		sel_registerName("metalFrame:"),
-		nil,
-		true,
-	)
+		"metalFrame:",
+	) {
+		fmt.eprintln("Unable to start the interface frame timer")
+		return false
+	}
 
 	screen := msg_id(objc_getClass("NSScreen"), sel_registerName("mainScreen"))
 	window_frame := msg_rect(screen, sel_registerName("visibleFrame"))
