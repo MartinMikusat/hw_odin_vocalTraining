@@ -115,6 +115,9 @@ UI_Theme :: enum {
 	HW_Dark,
 }
 
+UI_LIST_ROW_HEIGHT :: 23.0
+UI_LIST_ROW_STEP   :: 24.0
+
 ui_theme_is_dark :: proc(theme: UI_Theme) -> bool {
 	#partial switch theme {
 	case .HW_Dark:
@@ -2842,11 +2845,11 @@ ensure_active_list_selection_visible :: proc() {
 			if index == state.active_source {
 				content := source_content_rect(source_search, source_panel)
 				ui.source_scroll = bounded_scroll(
-					f64(visible_index)*30-content.h/2+14.5,
+					f64(visible_index)*UI_LIST_ROW_STEP-content.h/2+UI_LIST_ROW_HEIGHT/2,
 					0,
 					filtered_source_count(),
-					29,
-					30,
+					UI_LIST_ROW_HEIGHT,
+					UI_LIST_ROW_STEP,
 					content.h,
 				)
 				return
@@ -2863,11 +2866,11 @@ ensure_active_list_selection_visible :: proc() {
 			if index == ui.active_clip {
 				content := clip_content_rect(clip_search, clip_panel, clip_name)
 				ui.clip_scroll = bounded_scroll(
-					f64(visible_index)*30-content.h/2+14.5,
+					f64(visible_index)*UI_LIST_ROW_STEP-content.h/2+UI_LIST_ROW_HEIGHT/2,
 					0,
 					filtered_clip_count(),
-					29,
-					30,
+					UI_LIST_ROW_HEIGHT,
+					UI_LIST_ROW_STEP,
 					content.h,
 				)
 				return
@@ -3923,6 +3926,14 @@ filtered_source_count :: proc() -> int {
 	return count
 }
 
+source_clip_count :: proc(source_id: string) -> int {
+	count := 0
+	for clip in state.clips {
+		if clip.source_id == source_id {count += 1}
+	}
+	return count
+}
+
 source_matches_search :: proc(source: Source_Video, query: string) -> bool {
 	if source.workflow != ui.workflow {return false}
 	if len(query) == 0 {return true}
@@ -4055,8 +4066,8 @@ transcript_playback_match :: proc(
 
 transcript_centered_scroll :: proc(match_index, item_count: int, viewport_height: f64) -> f64 {
 	if match_index < 0 || match_index >= item_count {return 0}
-	desired := f64(match_index)*26 - viewport_height/2 + 12.5
-	return bounded_scroll(desired, 0, item_count, 25, 26, viewport_height)
+	desired := f64(match_index)*UI_LIST_ROW_STEP - viewport_height/2 + UI_LIST_ROW_HEIGHT/2
+	return bounded_scroll(desired, 0, item_count, UI_LIST_ROW_HEIGHT, UI_LIST_ROW_STEP, viewport_height)
 }
 
 transcript_follow_should_center :: proc(
@@ -4160,16 +4171,16 @@ normalize_scroll_offsets :: proc() {
 			ui.source_scroll,
 			0,
 			filtered_source_count(),
-			29,
-			30,
+			UI_LIST_ROW_HEIGHT,
+			UI_LIST_ROW_STEP,
 			source_content.h,
 		)
 		ui.transcript_scroll = bounded_scroll(
 			ui.transcript_scroll,
 			0,
 			active_segment_count(),
-			25,
-			26,
+			UI_LIST_ROW_HEIGHT,
+			UI_LIST_ROW_STEP,
 			transcript_content.h,
 		)
 	} else {
@@ -4178,8 +4189,8 @@ normalize_scroll_offsets :: proc() {
 			ui.clip_scroll,
 			0,
 			filtered_clip_count(),
-			29,
-			30,
+			UI_LIST_ROW_HEIGHT,
+			UI_LIST_ROW_STEP,
 			clip_content.h,
 		)
 	}
@@ -7048,9 +7059,9 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		source_content := source_content_rect(source_search, source_panel)
 		row := UI_Rect {
 			source_content.x,
-			source_content.y + source_content.h - 29 + ui.source_scroll,
+			source_content.y + source_content.h - UI_LIST_ROW_HEIGHT + ui.source_scroll,
 			source_content.w,
-			29,
+			UI_LIST_ROW_HEIGHT,
 		}
 		for source, index in state.sources {
 			if !source_matches_search(source, ui.source_search) {continue}
@@ -7068,15 +7079,15 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 					push_rect(vertices, left_accent_edge_rect(row), UI_COLOR_COFFEE_32)
 				}
 			}
-			row.y -= 30
+			row.y -= UI_LIST_ROW_STEP
 		}
 
 		transcript_content := transcript_content_rect(transcript)
 		row = UI_Rect {
 			transcript_content.x,
-			transcript_content.y + transcript_content.h - 25 + ui.transcript_scroll,
+			transcript_content.y + transcript_content.h - UI_LIST_ROW_HEIGHT + ui.transcript_scroll,
 			transcript_content.w,
-			25,
+			UI_LIST_ROW_HEIGHT,
 		}
 		ensure_transcript_matches()
 		for segment_index, result_index in ui.transcript_matches {
@@ -7094,7 +7105,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 					push_rect(vertices, bottom_progress_edge_rect(row, progress), accent)
 				}
 			}
-			row.y -= 26
+			row.y -= UI_LIST_ROW_STEP
 		}
 	}
 
@@ -7102,9 +7113,9 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		clip_content := clip_content_rect(clip_search, clip_panel, clip_name)
 		row := UI_Rect {
 			clip_content.x,
-			clip_content.y + clip_content.h - 29 + ui.clip_scroll,
+			clip_content.y + clip_content.h - UI_LIST_ROW_HEIGHT + ui.clip_scroll,
 			clip_content.w,
-			29,
+			UI_LIST_ROW_HEIGHT,
 		}
 		for clip, index in state.clips {
 			if !clip_matches_filter(clip, ui.clip_search) {continue}
@@ -7119,7 +7130,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 					push_rect(vertices, left_accent_edge_rect(row), accent)
 				}
 			}
-			row.y -= 30
+			row.y -= UI_LIST_ROW_STEP
 		}
 	}
 
@@ -7867,54 +7878,50 @@ build_overlay_commands :: proc(modal_only := false) {
 		}
 		row := UI_Rect {
 			source_content.x,
-			source_content.y + source_content.h - 29 + ui.source_scroll,
+			source_content.y + source_content.h - UI_LIST_ROW_HEIGHT + ui.source_scroll,
 			source_content.w,
-			29,
+			UI_LIST_ROW_HEIGHT,
 		}
-		visible_source_index := 1
 		for source, index in state.sources {
 			if !source_matches_search(source, ui.source_search) {continue}
 			control := find_ui_control_by_action_and_index(.Source, index)
 			if control != nil {
 				row = control.rect
+				clip_count := source_clip_count(source.id)
+				clip_label := fmt.tprintf("%d", clip_count)
+				clip_label_width := clip_count >= 100 ? 30.0 : 20.0
+				clip_right := row.x + row.w - 8
+				if !source.media_available {clip_right -= 72}
+				clip_rect := UI_Rect{clip_right-clip_label_width, row.y, clip_label_width, row.h}
 				row_color := ink
 				if index == state.active_source {row_color = accent}
 				if !source.media_available {row_color = danger}
 				draw_text_in_rect(
 					ctx,
 					small_font,
-					fmt.tprintf("%02d", visible_source_index),
-					UI_Rect{row.x + 8, row.y, 28, row.h},
-					.Start,
-					.Center,
-					muted,
-				)
-				draw_text_in_rect(
-					ctx,
-					small_font,
 					source.title,
-					UI_Rect{row.x + 42, row.y, row.w - (source.media_available ? 48 : 112), row.h},
+					UI_Rect{row.x + 8, row.y, max(0, clip_rect.x-row.x-16), row.h},
 					.Start,
 					.Center,
 					row_color,
 				)
+				draw_text_in_rect(ctx, small_font, clip_label, clip_rect, .End, .Center, muted)
 				if !source.media_available {
 					draw_text_in_rect(ctx, small_font, "MISSING", UI_Rect{row.x + row.w - 70, row.y, 62, row.h}, .End, .Center, danger)
 				}
 			}
-			row.y -= 30
-			visible_source_index += 1
+			row.y -= UI_LIST_ROW_STEP
 		}
 		if filtered_source_count() == 0 {
 			draw_text_in_rect(
 				ctx,
 				small_font,
-				"0000  REGISTER EMPTY",
+				"REGISTER EMPTY",
 				UI_Rect {
 					source_content.x,
-					source_content.y + source_content.h - 29,
+					source_content.y + source_content.h - UI_LIST_ROW_HEIGHT,
 					source_content.w,
-					29,
+					UI_LIST_ROW_HEIGHT,
 				},
 				.Start,
 				.Center,
@@ -8131,9 +8138,9 @@ build_overlay_commands :: proc(modal_only := false) {
 		}
 		row := UI_Rect {
 			transcript_content.x,
-			transcript_content.y + transcript_content.h - 25 + ui.transcript_scroll,
+			transcript_content.y + transcript_content.h - UI_LIST_ROW_HEIGHT + ui.transcript_scroll,
 			transcript_content.w,
-			25,
+			UI_LIST_ROW_HEIGHT,
 		}
 		ensure_transcript_matches()
 		for transcript_index, result_index in ui.transcript_matches {
@@ -8170,7 +8177,7 @@ build_overlay_commands :: proc(modal_only := false) {
 						active ? accent : ink,
 					)
 				}
-			row.y -= 26
+			row.y -= UI_LIST_ROW_STEP
 		}
 		if len(ui.transcript_matches) == 0 {
 			draw_timestamp_text_in_rect(
@@ -8179,9 +8186,9 @@ build_overlay_commands :: proc(modal_only := false) {
 				len(ui.transcript_search) > 0 ? "00:00:00  NO TRANSCRIPT MATCHES" : "00:00:00  NO TIMECODE DATA / LOAD CAPTIONS",
 				UI_Rect {
 					transcript_content.x,
-					transcript_content.y + transcript_content.h - 25,
+					transcript_content.y + transcript_content.h - UI_LIST_ROW_HEIGHT,
 					transcript_content.w,
-					25,
+					UI_LIST_ROW_HEIGHT,
 				},
 				.Start,
 				.Center,
@@ -8277,9 +8284,9 @@ build_overlay_commands :: proc(modal_only := false) {
 		}
 		row := UI_Rect {
 			clip_content.x,
-			clip_content.y + clip_content.h - 29 + ui.clip_scroll,
+			clip_content.y + clip_content.h - UI_LIST_ROW_HEIGHT + ui.clip_scroll,
 			clip_content.w,
-			29,
+			UI_LIST_ROW_HEIGHT,
 		}
 		clip_index := 1
 		for clip, index in state.clips {
@@ -8308,7 +8315,7 @@ build_overlay_commands :: proc(modal_only := false) {
 					row_color,
 				)
 			}
-			row.y -= 30
+			row.y -= UI_LIST_ROW_STEP
 			clip_index += 1
 		}
 		if filtered_clip_count() == 0 {
@@ -8318,9 +8325,9 @@ build_overlay_commands :: proc(modal_only := false) {
 				"E00  LIBRARY EMPTY",
 				UI_Rect {
 					clip_content.x,
-					clip_content.y + clip_content.h - 29,
+					clip_content.y + clip_content.h - UI_LIST_ROW_HEIGHT,
 					clip_content.w,
-					29,
+					UI_LIST_ROW_HEIGHT,
 				},
 				.Start,
 				.Center,
@@ -10361,17 +10368,19 @@ build_ui_controls_for_scope :: proc(
 		source_content := source_content_rect(source_search, source_panel)
 		row := UI_Rect {
 			source_content.x,
-			source_content.y + source_content.h - 29 + ui.source_scroll,
+			source_content.y + source_content.h - UI_LIST_ROW_HEIGHT + ui.source_scroll,
 			source_content.w,
-			29,
+			UI_LIST_ROW_HEIGHT,
 		}
 		for source, index in state.sources {
 			if !source_matches_search(source, ui.source_search) {continue}
 			if row.y >= source_content.y && row.y + row.h <= source_content.y + source_content.h {
+				clip_count := source_clip_count(source.id)
+				clip_label := clip_count == 1 ? "1 clip" : fmt.tprintf("%d clips", clip_count)
 				add_ax_element(
 					array,
 					element_class,
-					source.title,
+					fmt.tprintf("%s, %s", source.title, clip_label),
 					"AXButton",
 					row,
 					.Source,
@@ -10392,14 +10401,14 @@ build_ui_controls_for_scope :: proc(
 					functional_name = fmt.tprintf("source details %s", source.id),
 				)
 			}
-			row.y -= 30
+			row.y -= UI_LIST_ROW_STEP
 		}
 		transcript_content := transcript_content_rect(transcript)
 		row = UI_Rect {
 			transcript_content.x,
-			transcript_content.y + transcript_content.h - 25 + ui.transcript_scroll,
+			transcript_content.y + transcript_content.h - UI_LIST_ROW_HEIGHT + ui.transcript_scroll,
 			transcript_content.w,
-			25,
+			UI_LIST_ROW_HEIGHT,
 		}
 		ensure_transcript_matches()
 		for segment_index in ui.transcript_matches {
@@ -10420,7 +10429,7 @@ build_ui_controls_for_scope :: proc(
 						functional_name = fmt.tprintf("transcript segment %s", segment.id),
 					)
 				}
-			row.y -= 26
+			row.y -= UI_LIST_ROW_STEP
 		}
 		add_ax_element(
 			array,
@@ -10444,9 +10453,9 @@ build_ui_controls_for_scope :: proc(
 		clip_content := clip_content_rect(clip_search, clip_panel, clip_name)
 		row := UI_Rect {
 			clip_content.x,
-			clip_content.y + clip_content.h - 29 + ui.clip_scroll,
+			clip_content.y + clip_content.h - UI_LIST_ROW_HEIGHT + ui.clip_scroll,
 			clip_content.w,
-			29,
+			UI_LIST_ROW_HEIGHT,
 		}
 		for clip, index in state.clips {
 			if !clip_matches_filter(clip, ui.clip_search) {continue}
@@ -10464,7 +10473,7 @@ build_ui_controls_for_scope :: proc(
 					functional_name = fmt.tprintf("select clip %s", clip.id),
 				)
 			}
-			row.y -= 30
+			row.y -= UI_LIST_ROW_STEP
 		}
 		if ui.workflow == .Vocal {
 			add_ax_element(
@@ -12282,8 +12291,8 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 			ui.source_scroll,
 			delta,
 			filtered_source_count(),
-			29,
-			30,
+			UI_LIST_ROW_HEIGHT,
+			UI_LIST_ROW_STEP,
 			source_content.h,
 		)
 	} else if ui.mode == .Create && contains(transcript_content, point) {
@@ -12291,8 +12300,8 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 			ui.transcript_scroll,
 			delta,
 			active_segment_count(),
-			25,
-			26,
+			UI_LIST_ROW_HEIGHT,
+			UI_LIST_ROW_STEP,
 			transcript_content.h,
 		)
 		if state.player != nil && msg_f32(state.player, sel_registerName("rate")) > 0 {
@@ -12305,8 +12314,8 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 			ui.clip_scroll,
 			delta,
 			filtered_clip_count(),
-			29,
-			30,
+			UI_LIST_ROW_HEIGHT,
+			UI_LIST_ROW_STEP,
 			clip_content.h,
 		)
 	}
