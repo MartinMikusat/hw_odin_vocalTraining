@@ -158,6 +158,7 @@ Major_Change_Pending_Kind :: enum {
 	None,
 	Source_Import,
 	Source_Refetch,
+	Source_Delete,
 	Local_Source_Relink,
 	Library_Replacement,
 }
@@ -179,6 +180,7 @@ last_imported_source: int = -1
 source_local_paths: [dynamic]string
 source_local_titles: [dynamic]string
 pending_local_relink_path: string
+pending_source_delete_id: string
 
 Helper_Status :: struct {
 	checked: bool,
@@ -2860,6 +2862,8 @@ major_change_backup_cancel :: proc() {
 	delete(major_change_pending.detail)
 	delete(pending_local_relink_path)
 	pending_local_relink_path = ""
+	delete(pending_source_delete_id)
+	pending_source_delete_id = ""
 	major_change_pending = {}
 	ui.needs_redraw = true
 }
@@ -2876,6 +2880,8 @@ major_change_backup_continue :: proc() {
 		on_import(nil, nil, nil)
 	case .Source_Refetch:
 		refetch_source(source_index, maximum_height, auth_browser)
+	case .Source_Delete:
+		delete_source_by_id(pending_source_delete_id)
 	case .Local_Source_Relink:
 		relink_local_source_path(source_index, pending_local_relink_path)
 	case .Library_Replacement:
@@ -2884,6 +2890,117 @@ major_change_backup_continue :: proc() {
 		major_change_pending.allow_once = false
 	}
 	ui.needs_redraw = true
+}
+
+source_managed_files_remove :: proc(
+	workflow: Workflow_Kind,
+	video_id: string,
+	media_path: string,
+	clip_paths: []string,
+) -> int {
+	failed := 0
+	if os.exists(media_path) && os.remove(media_path) != nil {failed += 1}
+	directory := workflow_source_directory(workflow)
+	handle, open_error := os.open(directory)
+	if open_error == nil {
+		entries, read_error := os.read_dir(handle, -1, context.temp_allocator)
+		os.close(handle)
+		if read_error == nil {
+			prefix := fmt.tprintf("%s.", video_id)
+			for entry in entries {
+				if !strings.has_prefix(entry.name, prefix) {continue}
+				path := fmt.tprintf("%s/%s", directory, entry.name)
+				if os.remove(path) != nil && os.exists(path) {failed += 1}
+			}
+		}
+	}
+	for path in clip_paths {
+		if os.exists(path) && os.remove(path) != nil {failed += 1}
+	}
+	return failed
+}
+
+delete_source_by_id :: proc(source_id: string) -> bool {
+	if len(source_id) == 0 || library_transfer_busy() ||
+	   len(import_jobs) > 0 || len(export_jobs) > 0 {return false}
+	index := source_index_for_id(state.sources[:], source_id)
+	if index < 0 {return false}
+	if !major_change_backup_preflight(.Source_Delete, source_index=index) {return false}
+	allow_without_backup := major_change_backup_override
+	major_change_backup_override = false
+	source := &state.sources[index]
+	workflow := source.workflow
+	video_id := strings.clone(source.video_id, context.temp_allocator)
+	media_path := strings.clone(source.media_path, context.temp_allocator)
+	clip_paths := make([dynamic]string, context.temp_allocator)
+	for clip in state.clips {
+		if clip.source_id == source_id {append(&clip_paths, strings.clone(clip.clip_path, context.temp_allocator))}
+	}
+	active_source_id := ""
+	if state.active_source >= 0 && state.active_source < len(state.sources) {
+		active_source_id = strings.clone(state.sources[state.active_source].id, context.temp_allocator)
+	}
+	active_clip_id := ""
+	if ui.active_clip >= 0 && ui.active_clip < len(state.clips) {
+		active_clip_id = strings.clone(state.clips[ui.active_clip].id, context.temp_allocator)
+	}
+	active_source_deleted := state.active_source >= 0 &&
+		state.active_source < len(state.sources) &&
+		state.sources[state.active_source].id == source_id
+	active_clip_deleted := ui.active_clip >= 0 && ui.active_clip < len(state.clips) &&
+		state.clips[ui.active_clip].source_id == source_id
+
+	candidate, copied := app_state_collections_clone(&state)
+	if !copied {return false}
+	defer app_state_collections_destroy(&candidate)
+	delete_source_video(&candidate.sources[index])
+	ordered_remove(&candidate.sources, index)
+	for hint_index := len(candidate.hints)-1; hint_index >= 0; hint_index -= 1 {
+		if candidate.hints[hint_index].source_id != source_id {continue}
+		delete_import_hint(&candidate.hints[hint_index])
+		ordered_remove(&candidate.hints, hint_index)
+	}
+	for clip_index := len(candidate.clips)-1; clip_index >= 0; clip_index -= 1 {
+		if candidate.clips[clip_index].source_id != source_id {continue}
+		delete_clip(&candidate.clips[clip_index])
+		ordered_remove(&candidate.clips, clip_index)
+	}
+	remaining_segments := make([dynamic]Transcript_Segment, context.temp_allocator)
+	for segment in candidate.transcripts.segments {
+		if segment.source_id != source_id {append(&remaining_segments, segment)}
+	}
+	replacement, replacement_ok := transcript_generation_copy(remaining_segments[:])
+	if !replacement_ok {return false}
+	transcript_generation_destroy(&candidate.transcripts)
+	candidate.transcripts = replacement
+	if !commit_library_state(&candidate, allow_without_backup=allow_without_backup) {
+		set_error_status("Unable to delete the source from the library")
+		return false
+	}
+	_ = database_clip_drafts_prune(library_database)
+	state.active_source = source_index_for_id(state.sources[:], active_source_id)
+	ui.active_clip = clip_index_for_id(state.clips[:], active_clip_id)
+	if active_source_deleted || active_clip_deleted {
+		metal_player_clear()
+		state.active_source = -1
+		ui.active_clip = -1
+		ui.source_playback_active = false
+		reset_clip_output()
+	}
+	close_source_details()
+	ui.source_delete_confirm_open = false
+	failed_files := source_managed_files_remove(workflow, video_id, media_path, clip_paths[:])
+	delete(pending_source_delete_id)
+	pending_source_delete_id = ""
+	refresh_sources()
+	refresh_transcript()
+	refresh_clips()
+	if failed_files > 0 {
+		set_error_status(fmt.tprintf("Source deleted; %d managed file(s) could not be removed", failed_files))
+	} else {
+		set_success_status("Source and managed media deleted")
+	}
+	return true
 }
 
 refetch_source :: proc(
@@ -4363,6 +4480,7 @@ video_clips_process_main :: proc(args := os.args) {
 	defer library_recovery_state_destroy()
 	defer delete(major_change_pending.detail)
 	defer delete(pending_local_relink_path)
+	defer delete(pending_source_delete_id)
 	defer source_local_paths_clear()
 	defer source_probe_results_clear()
 	defer source_probe_cache_clear()

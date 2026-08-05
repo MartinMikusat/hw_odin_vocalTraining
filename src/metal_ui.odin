@@ -240,6 +240,7 @@ UI_State :: struct {
 	local_source_title_index: int,
 	source_details_open: bool,
 	source_details_index: int,
+	source_delete_confirm_open: bool,
 	clip_rename_open: bool,
 	clip_rename_index: int,
 	clip_metadata_open: bool,
@@ -519,6 +520,9 @@ UI_Action_Kind :: enum {
 	Browse_Source_Files,
 	Cancel_Source_Modal,
 	Close_Source_Details,
+	Request_Delete_Source,
+	Cancel_Delete_Source,
+	Confirm_Delete_Source,
 	Refetch_Source_Details,
 	Open_Source_Details,
 	URL,
@@ -1514,6 +1518,7 @@ playback_fullscreen_input_scope_active :: proc() -> bool {
 	       ui.shortcut_open ||
 	       ui.source_modal_open ||
 	       ui.source_details_open ||
+	       ui.source_delete_confirm_open ||
 	       ui.clip_rename_open ||
 	       ui.clip_metadata_open ||
 	       ui.randomize_help_open ||
@@ -1971,6 +1976,24 @@ source_details_refetch_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + modal.w - 286, modal.y + 22, 262, 34}
 }
 
+source_details_delete_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 148, modal.y + 22, 156, 34}
+}
+
+source_delete_confirm_rect :: proc() -> UI_Rect {
+	width := min(600.0, ui.width-48)
+	height := 270.0
+	return {(ui.width-width)/2, (ui.height-height)/2, width, height}
+}
+
+source_delete_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return {modal.x+24, modal.y+24, 124, 34}
+}
+
+source_delete_confirm_action_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return {modal.x+modal.w-190, modal.y+24, 166, 34}
+}
+
 active_player_has_audio :: proc() -> bool {
 	if ui.source_playback_active && state.active_source >= 0 &&
 	   state.active_source < len(state.sources) {
@@ -2326,6 +2349,27 @@ close_source_details :: proc() {
 	cancel_ui_flash()
 	ui.source_details_open = false
 	ui.source_details_index = -1
+	ui.needs_redraw = true
+}
+
+request_source_delete :: proc() -> bool {
+	if !ui.source_details_open || ui.source_details_index < 0 ||
+	   ui.source_details_index >= len(state.sources) {return false}
+	if library_transfer_busy() || len(import_jobs) > 0 || len(export_jobs) > 0 {
+		set_error_status("Wait for active media operations before deleting a source")
+		return false
+	}
+	delete(pending_source_delete_id)
+	pending_source_delete_id = strings.clone(state.sources[ui.source_details_index].id)
+	ui.source_delete_confirm_open = true
+	ui.needs_redraw = true
+	return true
+}
+
+cancel_source_delete :: proc() {
+	ui.source_delete_confirm_open = false
+	delete(pending_source_delete_id)
+	pending_source_delete_id = ""
 	ui.needs_redraw = true
 }
 
@@ -6628,10 +6672,11 @@ draw_notification_history :: proc(
 	}
 }
 
-draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
+draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan, danger: [4]f64) {
 	if !ui.source_details_open || ui.source_details_index < 0 || ui.source_details_index >= len(state.sources) {return}
 	modal := source_details_rect()
 	close_button := ui_control_rect(.Close_Source_Details)
+	delete_button := ui_control_rect(.Request_Delete_Source)
 	refetch_button := ui_control_rect(.Refetch_Source_Details)
 	source := &state.sources[ui.source_details_index]
 	metadata := source.metadata
@@ -6683,6 +6728,11 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	if contains(close_button, ui.mouse) {close_color = theme.row_hover}
 	fill_overlay_rect(ctx, close_button, close_color)
 	draw_text_in_rect(ctx, font, "CLOSE", close_button, .Center, .Center, muted)
+	delete_color := theme.panel_alt
+	if contains(delete_button, ui.mouse) {delete_color = theme.row_hover}
+	fill_overlay_rect(ctx, delete_button, delete_color)
+	fill_overlay_border(ctx, delete_button, danger)
+	draw_text_in_rect(ctx, font, "DELETE SOURCE…", delete_button, .Center, .Center, danger)
 	refetch_control := find_ui_control_by_action(.Refetch_Source_Details)
 	refetch_enabled := refetch_control != nil && .Enabled in refetch_control.flags
 	refetch_color := theme.panel_alt
@@ -6695,6 +6745,34 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	if refetch_enabled {fill_overlay_border(ctx, refetch_button, UI_COLOR_COFFEE_64)}
 	action_label := source.kind == .Local ? (source.media_available ? "MANAGED COPY AVAILABLE" : "LOCATE ORIGINAL…") : "REFETCH / SELECT QUALITY"
 	draw_text_in_rect(ctx, font, action_label, refetch_button, .Center, .Center, refetch_text_color)
+}
+
+draw_source_delete_confirmation :: proc(ctx, font: rawptr, bright, muted, danger: [4]f64) {
+	if !ui.source_delete_confirm_open {return}
+	index := source_index_for_id(state.sources[:], pending_source_delete_id)
+	if index < 0 {cancel_source_delete(); return}
+	source := &state.sources[index]
+	clip_count := 0
+	for clip in state.clips {if clip.source_id == source.id {clip_count += 1}}
+	modal := source_delete_confirm_rect()
+	theme := ui_theme_colors()
+	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, theme.backdrop)
+	fill_overlay_rect(ctx, modal, theme.modal)
+	header := UI_Rect{modal.x, modal.y+modal.h-54, modal.w, 54}
+	fill_overlay_rect(ctx, header, theme.panel_alt)
+	draw_text_in_rect(ctx, font, "DELETE SOURCE?", UI_Rect{header.x+20, header.y, header.w-40, header.h}, .Start, .Center, danger)
+	draw_text_in_rect(ctx, font, source.title, UI_Rect{modal.x+24, modal.y+modal.h-100, modal.w-48, 28}, .Start, .Center, bright)
+	draw_text_in_rect(ctx, font, fmt.tprintf("This removes the source, transcripts, hints, and %d clip(s).", clip_count), UI_Rect{modal.x+24, modal.y+modal.h-140, modal.w-48, 24}, .Start, .Center, muted)
+	message := "Managed source media and generated clip files will be permanently deleted. The metadata backup does not contain video bytes."
+	if source.kind == .Local {message = "Managed media and generated clips will be permanently deleted. Your original local file is unchanged; the backup contains metadata only."}
+	draw_text_in_rect(ctx, font, message, UI_Rect{modal.x+24, modal.y+modal.h-188, modal.w-48, 44}, .Start, .Center, muted, 10)
+	cancel := ui_control_rect(.Cancel_Delete_Source)
+	confirm := ui_control_rect(.Confirm_Delete_Source)
+	fill_overlay_rect(ctx, cancel, contains(cancel, ui.mouse) ? theme.row_hover : theme.panel_alt)
+	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
+	fill_overlay_rect(ctx, confirm, contains(confirm, ui.mouse) ? theme.row_hover : theme.panel_alt)
+	fill_overlay_border(ctx, confirm, danger)
+	draw_text_in_rect(ctx, font, "DELETE SOURCE", confirm, .Center, .Center, danger)
 }
 
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
@@ -8519,7 +8597,8 @@ build_overlay_commands :: proc(modal_only := false) {
 		}
 	}
 	}
-	draw_source_details(ctx, small_font, bright, muted, cyan)
+	draw_source_details(ctx, small_font, bright, muted, cyan, danger)
+	draw_source_delete_confirmation(ctx, small_font, bright, muted, danger)
 	draw_clip_rename(ctx, small_font, bright, muted, dim, accent)
 	draw_clip_metadata(ctx, small_font, bright, muted, dim, cyan, danger)
 	draw_randomize_help(ctx, small_font, bright, muted, dim, cyan)
@@ -9008,6 +9087,9 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 	}
 	if kind == .Import {
 		return !source_import_media_job_blocks()
+	}
+	if kind == .Request_Delete_Source || kind == .Confirm_Delete_Source {
+		return !library_transfer_busy() && len(import_jobs) == 0 && len(export_jobs) == 0
 	}
 	if kind == .Start || kind == .End {
 		return state.player != nil &&
@@ -10205,10 +10287,18 @@ build_ui_controls_for_scope :: proc(
 		validate_ui_controls()
 		return
 	}
+	if scope == .Active && ui.source_delete_confirm_open {
+		modal := source_delete_confirm_rect()
+		add_ax_element(array, element_class, "Cancel source deletion", "AXButton", source_delete_cancel_rect(modal), .Cancel_Delete_Source, flash_label="cancel source deletion")
+		add_ax_element(array, element_class, "Permanently delete source and managed media", "AXButton", source_delete_confirm_action_rect(modal), .Confirm_Delete_Source, flash_label="delete source")
+		validate_ui_controls()
+		return
+	}
 	if scope == .Active && ui.source_details_open {
 		modal := source_details_rect()
 		source := &state.sources[ui.source_details_index]
 		add_ax_element(array, element_class, "Close source details", "AXButton", source_details_close_rect(modal), .Close_Source_Details, flash_label = "close source details")
+		add_ax_element(array, element_class, "Delete source and managed media", "AXButton", source_details_delete_rect(modal), .Request_Delete_Source, flash_label="delete source")
 		if source.kind == .YouTube || !source.media_available {
 			add_ax_element(array, element_class, source.kind == .Local ? "Locate original local video" : "Refetch and select quality", "AXButton", source_details_refetch_rect(modal), .Refetch_Source_Details, flash_label = source.kind == .Local ? "locate original" : "refetch quality")
 		}
@@ -10777,6 +10867,13 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		request_modal_discard(.Source)
 	case .Close_Source_Details:
 		close_source_details()
+	case .Request_Delete_Source:
+		return request_source_delete()
+	case .Cancel_Delete_Source:
+		cancel_source_delete()
+	case .Confirm_Delete_Source:
+		ui.source_delete_confirm_open = false
+		return delete_source_by_id(pending_source_delete_id)
 	case .Refetch_Source_Details:
 		if ui.source_details_index >= 0 &&
 		   ui.source_details_index < len(state.sources) &&
@@ -11932,6 +12029,12 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
+	if ui.source_delete_confirm_open {
+		modal := source_delete_confirm_rect()
+		if !contains(modal, point) {cancel_source_delete(); return}
+		_ = activate_registered_target_at_point(point, click_count)
+		return
+	}
 	if ui.source_details_open {
 		modal := source_details_rect()
 		if !contains(modal, point) {close_source_details(); return}
@@ -12708,6 +12811,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	if ui.source_modal_open && key == 53 {request_modal_discard(.Source); return}
 	if key == 53 && unfocus_text_input() {return}
+	if ui.source_delete_confirm_open && key == 53 {cancel_source_delete(); return}
 	if ui.source_details_open && key == 53 {close_source_details(); return}
 	if key == 53 && ui.number_prefix != 0 {
 		clear_number_prefix()

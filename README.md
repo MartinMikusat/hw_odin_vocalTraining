@@ -198,6 +198,12 @@ match the stored SHA-256 before the app restores its managed copy and rebuilds
 its clips. Open its failed task in
 the notification history to find the private `yt-dlp-<operation-id>.log`.
 
+Source Details also provides **Delete Source…**. After confirmation and the
+normal verified metadata-backup preflight, deletion removes the source record,
+captions, timestamp hints, drafts, generated clips, and managed media. It never
+removes the user's original local file. Portable backups contain metadata, not
+video bytes.
+
 Select a source, load its captions, and click a timed transcript row to seek.
 Use the transcript search field to rank fuzzy caption matches. Clear the field
 to restore the transcript's time order.
