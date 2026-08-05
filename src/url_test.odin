@@ -3,8 +3,9 @@ package main
 import "core:testing"
 import "core:encoding/json"
 import "core:fmt"
-import "core:os"
-import os2 "core:os/os2"
+import os "core:os/old"
+import os2 "core:os"
+
 import "core:path/filepath"
 import "core:strings"
 import "core:sync"
@@ -7410,4 +7411,48 @@ playback_state_active_ignores_paused_frame_warmup_test :: proc(t: ^testing.T) {
 	testing.expect(t, playback_state_active(1, false))
 	testing.expect(t, !playback_state_active(1, true))
 	testing.expect(t, !playback_state_active(0, true))
+}
+
+@(test)
+local_source_metadata_helpers_test :: proc(t: ^testing.T) {
+	name := local_source_title("/tmp/Dance Lesson.mov", context.temp_allocator)
+	testing.expect_value(t, name, "Dance Lesson")
+	testing.expect_value(t, local_source_parse_rate("30000/1001"), 30000.0/1001.0)
+	testing.expect_value(t, local_source_parse_rate("0/0"), 0.0)
+}
+
+@(test)
+silent_clip_export_omits_audio_filters_test :: proc(t: ^testing.T) {
+	command := clip_export_command(
+		"/tmp/source.mp4",
+		"/tmp/clip.mp4",
+		1,
+		2,
+		ffmpeg = "/usr/bin/ffmpeg",
+		log_path = "/tmp/ffmpeg.log",
+		has_audio = false,
+	)
+	testing.expect(t, strings.contains(command, " -an "))
+	testing.expect(t, !strings.contains(command, "-af 'asetpts"))
+}
+
+@(test)
+portable_local_source_requires_content_hash_test :: proc(t: ^testing.T) {
+	data := Portable_Library{
+		format = PORTABLE_LIBRARY_FORMAT,
+		version = PORTABLE_LIBRARY_VERSION,
+		scope = "vocal",
+		sources = []Portable_Source{{
+			id = "source-local",
+			workflow = .Vocal,
+			kind = .Local,
+			video_id = "local-source",
+			title = "Local source",
+			original_filename = "source.mov",
+			duration = 10,
+		}},
+	}
+	testing.expect_value(t, portable_library_validate(&data), Portable_Library_Error.Decode)
+	data.sources[0].content_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testing.expect_value(t, portable_library_validate(&data), Portable_Library_Error.None)
 }

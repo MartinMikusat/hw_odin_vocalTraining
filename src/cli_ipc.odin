@@ -3,8 +3,9 @@ package main
 import "core:c"
 import "core:encoding/json"
 import "core:fmt"
-import "core:os"
-import os2 "core:os/os2"
+import os "core:os/old"
+import os2 "core:os"
+
 import "core:strings"
 import "core:sync"
 import "core:thread"

@@ -435,8 +435,9 @@ media_queue_schedule_import :: proc(
 	}
 	resource_key: u64
 	if !barrier {
-		video_id, valid := parse_video_id(job.input)
-		if valid {
+		if len(job.local_path) > 0 {
+			resource_key = media_queue_resource_key(job.workflow, job.local_path)
+		} else if video_id, valid := parse_video_id(job.input); valid {
 			resource_key = media_queue_resource_key(
 				job.workflow,
 				video_id,
@@ -456,7 +457,7 @@ media_queue_schedule_import :: proc(
 				resource_key,
 			),
 			release_on_finish = true,
-			label = "Download source",
+			label = len(job.local_path) > 0 ? "Import local source" : "Download source",
 		},
 	)
 	if add_error != .None {

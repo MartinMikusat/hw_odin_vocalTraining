@@ -2,7 +2,8 @@ package main
 
 import "core:encoding/json"
 import "core:fmt"
-import "core:os"
+import os "core:os/old"
+import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
 import mem_virtual "core:mem/virtual"
@@ -41,6 +42,7 @@ CLI_Request :: struct {
 	command: CLI_Command,
 	workflow: Workflow_Kind,
 	url: string,
+	local_file: string,
 	source_id: string,
 	from_segment: string,
 	to_segment: string,
@@ -82,6 +84,10 @@ CLI_Source_Output :: struct {
 	video_id: string,
 	title: string,
 	url: string,
+	source_kind: string,
+	original_filename: string,
+	content_sha256: string,
+	has_audio: bool,
 	duration_seconds: f64,
 	media_path: string,
 	media_available: bool,
@@ -371,7 +377,8 @@ cli_parse_flags :: proc(request: ^CLI_Request, args: []string, allowed: []string
 		case "--name": request.name = value
 		case "--baseline": request.baseline_path = value
 		case "--scenario": request.scenario = value
-		case "--file": request.scenario_file = value
+		case "--file":
+			if request.command == .Source_Add {request.local_file = value} else {request.scenario_file = value}
 		case "--control": request.target_control = value
 		case "--key-code":
 			key_code, ok := strconv.parse_int(value)
@@ -412,7 +419,7 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 	switch {
 	case group == "source" && action == "add":
 		request.command = .Source_Add
-		allowed = []string{"--url", "--max-height", "--allow-without-backup", "--workflow"}
+		allowed = []string{"--url", "--file", "--name", "--max-height", "--allow-without-backup", "--workflow"}
 	case group == "source" && action == "list":
 		request.command = .Source_List
 		allowed = []string{"--workflow"}
@@ -472,7 +479,10 @@ cli_parse_request :: proc(args: []string) -> (CLI_Request, CLI_Result, bool) {
 	}
 	switch request.command {
 	case .Source_Add:
-		if len(strings.trim_space(request.url)) == 0 {return {}, cli_error(request.command, .Usage, "usage", "source add requires --url"), false}
+		has_url := len(strings.trim_space(request.url)) > 0
+		has_file := len(strings.trim_space(request.local_file)) > 0
+		if has_url == has_file {return {}, cli_error(request.command, .Usage, "usage", "source add requires exactly one of --url or --file"), false}
+		if has_url && len(strings.trim_space(request.name)) > 0 {return {}, cli_error(request.command, .Usage, "usage", "--name can only be used with --file"), false}
 	case .Transcript_Get:
 		if len(strings.trim_space(request.source_id)) == 0 {return {}, cli_error(request.command, .Usage, "usage", "transcript get requires --source"), false}
 	case .Clip_Create:
@@ -569,6 +579,10 @@ cli_source_output :: proc(source: ^Source_Video) -> CLI_Source_Output {
 		video_id=source.video_id,
 		title=source.title,
 		url=source.url,
+		source_kind=source.kind == .Local ? "local" : "youtube",
+		original_filename=source.original_filename,
+		content_sha256=source.content_sha256,
+		has_audio=source.has_audio,
 		duration_seconds=source.duration,
 		media_path=source.media_path,
 		media_available=os.exists(source.media_path),
@@ -613,6 +627,7 @@ cli_source_list :: proc(request: CLI_Request) -> CLI_Result {
 }
 
 cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
+	if len(request.local_file) > 0 {return cli_source_add_local(request)}
 	video_id, valid_url := parse_video_id(request.url)
 	if !valid_url {return cli_error(request.command, .Invalid, "invalid_url", "The URL is not a supported YouTube video URL")}
 	backup := library_backup_create(library_database)
@@ -656,6 +671,36 @@ cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
 	return CLI_Result{output=cli_encode(response), exit_code=.Success}
 }
 
+cli_source_add_local :: proc(request: CLI_Request) -> CLI_Result {
+	path, path_error := filepath.abs(request.local_file, context.temp_allocator)
+	if path_error != nil || !os.exists(path) {
+		return cli_error(request.command, .Invalid, "file_not_found", "The local video file does not exist")
+	}
+	backup := library_backup_create(library_database)
+	defer library_backup_result_destroy(&backup)
+	if backup.status == .Failed && !request.allow_without_backup {
+		return cli_error(request.command, .Storage, "backup_failed", "Unable to verify a library backup; pass --allow-without-backup to continue")
+	}
+	helpers := [2]string{"ffmpeg", "ffprobe"}
+	for helper in helpers {
+		if available, reason := helper_available(helper); !available {
+			return cli_error(request.command, .Media, "helper_unavailable", reason, diagnostic_log_path(helper))
+		}
+	}
+	job := import_job_create_local(path, request.name, request.workflow)
+	if job == nil {return cli_error(request.command, .Storage, "allocation_failed", "Unable to allocate the local import job")}
+	defer import_job_destroy(job)
+	job.allow_without_backup = request.allow_without_backup
+	if import_job_process_local(job) {job.accepted = 1} else {job.failed = 1}
+	if job.failed > 0 {return cli_error(request.command, .Media, "media_validation_failed", "The local file could not be inspected, normalized, or validated", job.log_path)}
+	if !import_job_apply(job) {return cli_error(request.command, .Storage, "storage_failed", "The local source was prepared but the library update failed")}
+	source := cli_find_source(job.last_video_id, request.workflow)
+	if source == nil {return cli_error(request.command, .Storage, "storage_failed", "The local source is missing after the library update")}
+	status := len(job.new_sources) > 0 ? "imported" : "existing"
+	response := CLI_Source_Add_Response{ok=true, command=cli_command_name(request.command), data=CLI_Source_Add_Data{status=status, source=cli_source_output(source)}}
+	return CLI_Result{output=cli_encode(response), exit_code=.Success}
+}
+
 cli_source_add_enqueue :: proc(
 	request: CLI_Request,
 	work: ^CLI_IPC_Work,
@@ -671,6 +716,9 @@ cli_source_add_enqueue :: proc(
 			),
 		)
 		return true
+	}
+	if len(request.local_file) > 0 {
+		return cli_source_add_local_enqueue(request, work)
 	}
 	video_id, valid_url := parse_video_id(request.url)
 	if !valid_url {
@@ -780,6 +828,43 @@ cli_source_add_enqueue :: proc(
 	return true
 }
 
+cli_source_add_local_enqueue :: proc(request: CLI_Request, work: ^CLI_IPC_Work) -> bool {
+	path, path_error := filepath.abs(request.local_file, context.temp_allocator)
+	if path_error != nil || !os.exists(path) {
+		cli_ipc_work_finish(work, cli_error(request.command, .Invalid, "file_not_found", "The local video file does not exist"))
+		return true
+	}
+	backup := library_backup_create(library_database)
+	defer library_backup_result_destroy(&backup)
+	if backup.status == .Failed && !request.allow_without_backup {
+		cli_ipc_work_finish(work, cli_error(request.command, .Storage, "backup_failed", "Unable to verify a library backup; pass --allow-without-backup to continue"))
+		return true
+	}
+	helpers := [2]string{"ffmpeg", "ffprobe"}
+	for helper in helpers {
+		if available, reason := helper_available(helper); !available {
+			cli_ipc_work_finish(work, cli_error(request.command, .Media, "helper_unavailable", reason, diagnostic_log_path(helper)))
+			return true
+		}
+	}
+	job := import_job_create_local(path, request.name, request.workflow)
+	if job == nil {
+		cli_ipc_work_finish(work, cli_error(request.command, .Storage, "allocation_failed", "Unable to allocate the local import job"))
+		return true
+	}
+	job.allow_without_backup = request.allow_without_backup
+	job.cli_work = work
+	job.cli_existing_hint_count = len(state.hints)
+	fields := [1]Notification_Field{{label="CLI file", value=path}}
+	job.notification_id = notification_begin("CLI local source import queued", "The command waits while the file is copied into the managed library.", fields[:])
+	_ = os.write_entire_file(job.log_path, nil)
+	if !media_queue_schedule_import(job, barrier=true) {
+		import_job_destroy(job)
+		cli_ipc_work_finish(work, cli_error(request.command, .Storage, "queue_failed", "Unable to queue the local source import"))
+	}
+	return true
+}
+
 cli_source_add_finish :: proc(job: ^Import_Job) {
 	work := job.cli_work
 	if job.cancelled {
@@ -801,8 +886,8 @@ cli_source_add_finish :: proc(job: ^Import_Job) {
 		return
 	}
 	if job.failed > 0 || job.accepted == 0 {
-		code := "download_failed"
-		message := "The YouTube download failed"
+		code := len(job.local_path) > 0 ? "media_validation_failed" : "download_failed"
+		message := len(job.local_path) > 0 ? "The local file could not be inspected, normalized, or validated" : "The YouTube download failed"
 		if job.invalid_merged_media > 0 {
 			code = "media_validation_failed"
 			message = "The staged MP4 did not contain compatible H.264 video and AAC audio"
@@ -963,7 +1048,7 @@ cli_clip_create :: proc(request: CLI_Request) -> CLI_Result {
 		dance_playback_rate=1,
 	}
 	_ = os.write_entire_file(log_path, nil)
-	if !export_clip(&clip, source.media_path, log_path = log_path) {
+	if !export_clip(&clip, source.media_path, log_path = log_path, has_audio = source.has_audio) {
 		return cli_error(
 			request.command,
 			.Media,

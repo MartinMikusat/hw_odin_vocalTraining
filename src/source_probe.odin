@@ -2,8 +2,9 @@ package main
 
 import "core:encoding/json"
 import "core:fmt"
-import "core:os"
-import "core:os/os2"
+import os "core:os/old"
+import os2 "core:os"
+
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
@@ -358,7 +359,6 @@ source_probe_one :: proc(
 	}
 	sync.mutex_unlock(&job.process_mutex)
 	process_state, wait_error := os2.process_wait(process)
-	_ = os2.process_close(process)
 	_ = os2.close(output_file)
 	_ = os2.close(log_file)
 	sync.mutex_lock(&job.process_mutex)

@@ -4,8 +4,9 @@ import "core:fmt"
 import "core:encoding/json"
 import "core:math/rand"
 import "core:mem"
-import "core:os"
-import os2 "core:os/os2"
+import os "core:os/old"
+import os2 "core:os"
+
 import "core:path/filepath"
 import "core:strings"
 import "core:thread"
@@ -49,6 +50,11 @@ Source_Metadata_Status :: enum i32 {
 	Unavailable,
 }
 
+Source_Kind :: enum i32 {
+	YouTube,
+	Local,
+}
+
 Workflow_Kind :: enum i32 {
 	Vocal,
 	Dancing,
@@ -57,9 +63,13 @@ Workflow_Kind :: enum i32 {
 Source_Video :: struct {
 	id: string,
 	workflow: Workflow_Kind,
+	kind: Source_Kind,
 	video_id: string,
 	title: string,
 	url: string,
+	original_filename: string,
+	content_sha256: string,
+	has_audio: bool,
 	media_path: string,
 	duration: f64,
 	metadata: Source_Context_Metadata,
@@ -148,6 +158,7 @@ Major_Change_Pending_Kind :: enum {
 	None,
 	Source_Import,
 	Source_Refetch,
+	Local_Source_Relink,
 	Library_Replacement,
 }
 
@@ -165,6 +176,9 @@ major_change_pending: Major_Change_Pending
 major_change_backup_override: bool
 system_address: rawptr
 last_imported_source: int = -1
+source_local_paths: [dynamic]string
+source_local_titles: [dynamic]string
+pending_local_relink_path: string
 
 Helper_Status :: struct {
 	checked: bool,
@@ -174,6 +188,7 @@ Helper_Status :: struct {
 
 yt_dlp_helper_status: Helper_Status
 ffmpeg_helper_status: Helper_Status
+ffprobe_helper_status: Helper_Status
 
 Import_Phase :: enum {
 	Preparing,
@@ -191,6 +206,8 @@ Import_Job :: struct {
 	progress_path: string,
 	log_path: string,
 	input: string,
+	local_path: string,
+	local_title: string,
 	workflow: Workflow_Kind,
 	sources: [dynamic]Source_Video,
 	hints: [dynamic]Import_Hint,
@@ -256,6 +273,7 @@ Export_Job :: struct {
 	operation_id: u64,
 	clip: Clip,
 	source_path: string,
+	has_audio: bool,
 	log_path: string,
 	operation: Export_Operation,
 	notification_id: i64,
@@ -774,7 +792,7 @@ refresh_import_progress :: proc() {
 }
 
 embedded_helper_path :: proc(executable_path, name: string) -> string {
-	executable_dir := filepath.dir(executable_path, context.temp_allocator)
+	executable_dir := filepath.dir(executable_path)
 	path, _ := filepath.join(
 		[]string{executable_dir, "..", "Resources", "helpers", name},
 		context.temp_allocator,
@@ -816,12 +834,16 @@ clip_export_command :: proc(
 	end_seconds: f64,
 	ffmpeg := "",
 	log_path := "",
+	has_audio := true,
 ) -> string {
 	ffmpeg_command := ffmpeg
 	if len(ffmpeg_command) == 0 { ffmpeg_command = helper_command("ffmpeg") }
 	output_log := log_path
 	if len(output_log) == 0 {output_log = diagnostic_log_path("ffmpeg")}
-	return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -vf 'setpts=PTS-STARTPTS' -af 'asetpts=PTS-STARTPTS' -c:v libx264 -c:a aac -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(output_log))
+	if !has_audio {
+		return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -vf 'setpts=PTS-STARTPTS' -an -c:v h264_videotoolbox -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(output_log))
+	}
+	return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -vf 'setpts=PTS-STARTPTS' -af 'asetpts=PTS-STARTPTS' -c:v h264_videotoolbox -c:a aac -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(output_log))
 }
 
 workflow_source_directory :: proc(workflow: Workflow_Kind) -> string {
@@ -874,11 +896,13 @@ import_url :: proc(url: string) -> bool {
 	append(&state.sources, Source_Video{
 		id=id_copy,
 		workflow=ui.workflow,
+		kind=.YouTube,
 		video_id=strings.clone(video_id),
 		title=strings.clone(video_id),
 		url=url_copy,
 		media_path=strings.clone(media_path),
 		media_available=true,
+		has_audio=true,
 	})
 	last_imported_source = len(state.sources)-1
 	if metadata, loaded := load_download_metadata(video_id, ui.workflow); loaded {
@@ -914,9 +938,9 @@ helper_available :: proc(name: string) -> (available: bool, reason: string) {
 
 	version_flag := "--version"
 	expected_output := "[0-9]*.[0-9]*.[0-9]*"
-	if name == "ffmpeg" {
+	if name == "ffmpeg" || name == "ffprobe" {
 		version_flag = "-version"
-		expected_output = "ffmpeg\\ version\\ *"
+		expected_output = name == "ffmpeg" ? "ffmpeg\\ version\\ *" : "ffprobe\\ version\\ *"
 	}
 	os.make_directory(app_support_dir())
 	log_path := diagnostic_log_path(name)
@@ -941,6 +965,8 @@ helper_status :: proc(name: string) -> ^Helper_Status {
 		return &yt_dlp_helper_status
 	case "ffmpeg":
 		return &ffmpeg_helper_status
+	case "ffprobe":
+		return &ffprobe_helper_status
 	}
 	return nil
 }
@@ -959,8 +985,10 @@ check_helper_once :: proc(name: string) -> ^Helper_Status {
 helper_statuses_destroy :: proc() {
 	delete(yt_dlp_helper_status.reason)
 	delete(ffmpeg_helper_status.reason)
+	delete(ffprobe_helper_status.reason)
 	yt_dlp_helper_status = {}
 	ffmpeg_helper_status = {}
+	ffprobe_helper_status = {}
 }
 
 require_helper :: proc(name: string) -> bool {
@@ -977,7 +1005,8 @@ require_helper :: proc(name: string) -> bool {
 validate_startup_helpers :: proc() {
 	yt_dlp := check_helper_once("yt-dlp")
 	ffmpeg := check_helper_once("ffmpeg")
-	if yt_dlp.available && ffmpeg.available { return }
+	ffprobe := check_helper_once("ffprobe")
+	if yt_dlp.available && ffmpeg.available && ffprobe.available { return }
 
 	message := "hw_videoClips checked its media helpers before starting."
 	if !yt_dlp.available {
@@ -985,6 +1014,9 @@ validate_startup_helpers :: proc() {
 	}
 	if !ffmpeg.available {
 		message = fmt.tprintf("%s\n\n%s. Import, refetch, preview, and clip export are unavailable.", message, ffmpeg.reason)
+	}
+	if !ffprobe.available {
+		message = fmt.tprintf("%s\n\n%s. Local video import is unavailable.", message, ffprobe.reason)
 	}
 	message = fmt.tprintf("%s\n\nNo media task was started. Contact the person who provided this app.", message)
 	set_text(state.status, message)
@@ -1446,7 +1478,7 @@ load_source_player :: proc(index: int) -> bool {
 	remember_list_selection(.Create, source.id)
 	load_clip_draft_for_source(index)
 	source.media_available = os.exists(source.media_path)
-	if !source.media_available || !media_file_validate(source.media_path) {
+	if !source.media_available || !media_file_validate_tracks(source.media_path, source.has_audio) {
 		metal_player_clear()
 		refresh_transcript()
 		return false
@@ -1454,7 +1486,7 @@ load_source_player :: proc(index: int) -> bool {
 	path := source.media_path
 	ui.playback_rate =
 		source.workflow == .Vocal ? ui.vocal_playback_rate : 1
-	if !metal_player_load(path) {metal_player_clear(); return false}
+	if !metal_player_load(path, source.has_audio) {metal_player_clear(); return false}
 	ui.player_duration = source.duration
 	set_source_playback_active(true)
 	if state.has_pending_hint {
@@ -1503,6 +1535,7 @@ export_clip :: proc(
 	source_path: string,
 	allocator := context.allocator,
 	log_path := "",
+	has_audio := true,
 ) -> bool {
 	dir := workflow_clip_directory(clip.workflow)
 	os.make_directory(dir)
@@ -1513,6 +1546,7 @@ export_clip :: proc(
 		clip.start_seconds,
 		clip.end_seconds,
 		log_path = log_path,
+		has_audio = has_audio,
 	)
 	c_command := strings.clone_to_cstring(command)
 	defer delete(c_command)
@@ -1548,6 +1582,7 @@ export_job_execute :: proc(job: ^Export_Job) -> bool {
 		job.clip.start_seconds,
 		job.clip.end_seconds,
 		log_path = job.log_path,
+		has_audio = job.has_audio,
 	)
 	arguments := []string{"/bin/sh", "-c", command}
 	process, start_error := os2.process_start({command = arguments})
@@ -1563,7 +1598,6 @@ export_job_execute :: proc(job: ^Export_Job) -> bool {
 	}
 	sync.mutex_unlock(&job.process_mutex)
 	process_state, wait_error := os2.process_wait(process)
-	_ = os2.process_close(process)
 	sync.mutex_lock(&job.process_mutex)
 	job.has_process = false
 	cancelled = job.cancelled
@@ -1614,7 +1648,6 @@ clip_normalize_process_run :: proc(
 	if cancelled {_ = kill(i32(process.pid), 15)}
 	sync.mutex_unlock(&job.process_mutex)
 	process_state, wait_error := os2.process_wait(process)
-	_ = os2.process_close(process)
 	sync.mutex_lock(&job.process_mutex)
 	job.has_process = false
 	cancelled = job.cancelled
@@ -1636,7 +1669,9 @@ clip_normalize_job_execute :: proc(job: ^Clip_Normalize_Job) {
 			continue
 		}
 		source := &job.library.sources[source_index]
-		if filepath.clean(source.media_path) == filepath.clean(clip.clip_path) {
+		clean_source_path, _ := filepath.clean(source.media_path, context.temp_allocator)
+		clean_clip_path, _ := filepath.clean(clip.clip_path, context.temp_allocator)
+		if clean_source_path == clean_clip_path {
 			clip_normalize_failure_add(job, clip.id, "The clip path matches its source path")
 			continue
 		}
@@ -1660,6 +1695,7 @@ clip_normalize_job_execute :: proc(job: ^Clip_Normalize_Job) {
 			clip.start_seconds,
 			clip.end_seconds,
 			log_path = job.log_path,
+			has_audio = source.has_audio,
 		)
 		if !clip_normalize_process_run(job, command) {
 			_ = os.remove(staging_path)
@@ -1668,7 +1704,7 @@ clip_normalize_job_execute :: proc(job: ^Clip_Normalize_Job) {
 			}
 			continue
 		}
-		if !media_file_validate(staging_path) {
+		if !media_file_validate_tracks(staging_path, source.has_audio) {
 			_ = os.remove(staging_path)
 			clip_normalize_failure_add(job, clip.id, "The staged clip failed media validation")
 			continue
@@ -1838,6 +1874,19 @@ import_job_create :: proc(
 	return job
 }
 
+import_job_create_local :: proc(
+	path: string,
+	title := "",
+	workflow := ui.workflow,
+) -> ^Import_Job {
+	job := import_job_create("", workflow=workflow)
+	if job == nil {return nil}
+	allocator := mem_virtual.arena_allocator(job.arena)
+	job.local_path = strings.clone(path, allocator)
+	job.local_title = strings.clone(title, allocator)
+	return job
+}
+
 import_job_find_source :: proc(job: ^Import_Job, video_id: string) -> ^Source_Video {
 	for &source in job.sources {
 		if source.workflow == job.workflow && source.video_id == video_id {
@@ -1942,6 +1991,15 @@ staged_source_validate :: proc(directory, staging_name: string) -> bool {
 }
 
 media_file_validate :: proc(media_path: string) -> bool {
+	return media_file_validate_tracks(media_path, true)
+}
+
+media_file_validate_tracks :: proc(media_path: string, expect_audio: bool) -> bool {
+	if !expect_audio {
+		command := [12]string{helper_command("ffmpeg"), "-v", "error", "-i", media_path, "-map", "0:v:0", "-t", "1", "-f", "null", "-"}
+		process_state, _, _, process_error := os2.process_exec({command=command[:]}, context.temp_allocator)
+		return process_error == nil && process_state.success
+	}
 	command := [14]string{helper_command("ffmpeg"), "-v", "info", "-i", media_path, "-map", "0:v:0", "-map", "0:a:0", "-t", "1", "-f", "null", "-"}
 	process_state, stdout, stderr, process_error := os2.process_exec({command=command[:]}, context.temp_allocator)
 	_ = stdout
@@ -1978,7 +2036,6 @@ import_job_run_download :: proc(
 ) -> bool {
 	progress_file, progress_error := os2.open(job.progress_path, {.Write, .Create, .Trunc, .Inheritable})
 	if progress_error != nil {return false}
-	defer os2.close(progress_file)
 	log_file, log_error := os2.open(job.log_path, {.Write, .Create, .Append, .Inheritable})
 	if log_error != nil {return false}
 	defer os2.close(log_file)
@@ -1999,7 +2056,6 @@ import_job_run_download :: proc(
 	if cancelled {_ = kill(i32(process.pid), 15)}
 	sync.mutex_unlock(&job.process_mutex)
 	process_state, wait_error := os2.process_wait(process)
-	_ = os2.process_close(process)
 	sync.mutex_lock(&job.process_mutex)
 	job.has_process = false
 	cancelled = job.cancelled
@@ -2146,11 +2202,13 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	source := Source_Video{
 		id=strings.clone(source_id, allocator),
 		workflow=job.workflow,
+		kind=.YouTube,
 		video_id=strings.clone(video_id, allocator),
 		title=strings.clone(video_id, allocator),
 		url=strings.clone(url, allocator),
 		media_path=strings.clone(media_path, allocator),
 		media_available=true,
+		has_audio=true,
 	}
 	if metadata, loaded := load_download_metadata(
 		video_id,
@@ -2198,6 +2256,10 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 
 import_job_execute :: proc(job: ^Import_Job) {
 	context = runtime.default_context()
+	if len(job.local_path) > 0 {
+		if import_job_process_local(job) {job.accepted += 1} else {job.failed += 1}
+		return
+	}
 	for raw in strings.split_lines(job.input) {
 		if import_job_is_cancelled(job) {break}
 		url := strings.trim_space(raw)
@@ -2724,7 +2786,6 @@ library_recovery_start :: proc() -> bool {
 		set_success_status("Library imported")
 		return true
 	}
-	if !require_helper("yt-dlp") || !require_helper("ffmpeg") {return false}
 	recovery := new(Library_Recovery)
 	recovery.notification_id = notification_begin(
 		"Library imported; preparing source recovery",
@@ -2736,6 +2797,7 @@ library_recovery_start :: proc() -> bool {
 		len(state.sources),
 	)
 	for source in state.sources {
+		if source.kind == .Local {continue}
 		append(
 			&recovery.entries,
 			Library_Recovery_Entry {
@@ -2744,6 +2806,12 @@ library_recovery_start :: proc() -> bool {
 				workflow = source.workflow,
 			},
 		)
+	}
+	if len(recovery.entries) > 0 &&
+	   (!require_helper("yt-dlp") || !require_helper("ffmpeg")) {
+		delete(recovery.entries)
+		free(recovery)
+		return false
 	}
 	library_recovery = recovery
 	library_recovery_start_next()
@@ -2779,6 +2847,8 @@ major_change_backup_preflight :: proc(
 
 major_change_backup_cancel :: proc() {
 	delete(major_change_pending.detail)
+	delete(pending_local_relink_path)
+	pending_local_relink_path = ""
 	major_change_pending = {}
 	ui.needs_redraw = true
 }
@@ -2795,6 +2865,8 @@ major_change_backup_continue :: proc() {
 		on_import(nil, nil, nil)
 	case .Source_Refetch:
 		refetch_source(source_index, maximum_height, auth_browser)
+	case .Local_Source_Relink:
+		relink_local_source_path(source_index, pending_local_relink_path)
 	case .Library_Replacement:
 		confirm_library_import()
 	case .None:
@@ -2893,11 +2965,14 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 		set_text(state.status, "Wait for the queued library replacement")
 		return
 	}
-	if !require_helper("yt-dlp") || !require_helper("ffmpeg") { return }
+	has_local := len(source_local_paths) > 0
+	if !require_helper("ffmpeg") {return}
+	if has_local && !require_helper("ffprobe") {return}
 	input := strings.trim_space(field_text(state.url_input))
-	if len(input) == 0 { set_text(state.status, "Paste at least one YouTube URL"); return }
-	if source_probe_job != nil {set_text(state.status, "Wait for the metadata check to finish"); return}
-	if !source_probe_ready(input) {
+	if len(input) == 0 && !has_local { set_text(state.status, "Paste a YouTube URL or choose a local video file"); return }
+	if len(input) > 0 && !require_helper("yt-dlp") {return}
+	if len(input) > 0 && source_probe_job != nil {set_text(state.status, "Wait for the metadata check to finish"); return}
+	if len(input) > 0 && !source_probe_ready(input) {
 		set_text(state.status, "Check the URL metadata and select an available quality first")
 		source_probe_request()
 		return
@@ -2963,14 +3038,33 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 		}
 		queued += 1
 	}
+	for path, index in source_local_paths {
+		title := index < len(source_local_titles) ? source_local_titles[index] : ""
+		job := import_job_create_local(path, title)
+		if job == nil {continue}
+		job.allow_without_backup = allow_without_backup
+		fields := [1]Notification_Field{{label="File", value=path}}
+		job.notification_id = notification_begin(
+			"Local source import queued",
+			"The file will be hashed, inspected, normalized when necessary, validated, and copied into the managed library.",
+			fields[:],
+		)
+		os.write_entire_file(job.log_path, nil)
+		if !media_queue_schedule_import(job, barrier=true) {
+			_ = notification_finish(job.notification_id, .Error, "Unable to queue local source import")
+			import_job_destroy(job)
+			continue
+		}
+		queued += 1
+	}
 	if queued == 0 {
 		set_text(state.status, "Unable to queue the source download")
 		return
 	}
 	close_source_modal()
-	status := "Queued 1 source download"
+	status := "Queued 1 source operation"
 	if queued > 1 {
-		status = fmt.tprintf("Queued %d source downloads", queued)
+		status = fmt.tprintf("Queued %d source operations", queued)
 	}
 	set_text(state.status, status)
 }
@@ -3243,6 +3337,12 @@ export_job_create :: proc(
 	if !copied { export_job_destroy(job); return nil }
 	job.clip = copy
 	job.source_path = strings.clone(source_path, allocator)
+	if source_index := source_index_for_id(state.sources[:], clip.source_id);
+	   source_index >= 0 {
+		job.has_audio = state.sources[source_index].has_audio
+	} else {
+		job.has_audio = true
+	}
 	job.log_path = strings.clone(
 		clip_export_log_path(job.clip.id, job.operation_id),
 		allocator,
@@ -3321,7 +3421,7 @@ finish_export_job :: proc(job: ^Export_Job) {
 		return
 	}
 	if job.operation == .Preview {
-		if !metal_player_load(job.clip.clip_path) {
+		if !metal_player_load(job.clip.clip_path, job.has_audio) {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
@@ -3362,7 +3462,7 @@ finish_export_job :: proc(job: ^Export_Job) {
 		}
 		clip := &state.clips[index]
 		refresh_clips()
-		if !metal_player_load(clip.clip_path) {
+		if !metal_player_load(clip.clip_path, job.has_audio) {
 			_ = notification_finish(
 				job.notification_id,
 				.Error,
@@ -3432,9 +3532,13 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 	} else {
 		source := &state.sources[index]
 		if !source.media_available {
-			set_text(state.status, "MEDIA MISSING / The merged MP4 was not created. Right-click this source and refetch it.")
+			if source.kind == .Local {
+				set_text(state.status, "MEDIA MISSING / Open Source Details and locate the original local video.")
+			} else {
+				set_text(state.status, "MEDIA MISSING / The merged MP4 was not created. Right-click this source and refetch it.")
+			}
 		} else {
-			set_text(state.status, "VIDEO INVALID / The MP4 does not contain decodable H.264 video and AAC audio. Right-click this source and refetch it.")
+			set_text(state.status, "VIDEO INVALID / The managed MP4 does not contain decodable H.264 video with its expected audio state.")
 		}
 	}
 }
@@ -3460,7 +3564,7 @@ play_clip :: proc(index: int) -> bool {
 		}
 		source := &state.sources[source_index]
 		if !source.media_available || !os.exists(source.media_path) {
-			set_text(state.status, "The original source file is missing. Refetch the source before rebuilding this clip.")
+			set_text(state.status, source.kind == .Local ? "The managed source is missing. Locate the original local video before rebuilding this clip." : "The original source file is missing. Refetch the source before rebuilding this clip.")
 			return false
 		}
 		if !valid_clip_range(clip.start_seconds, clip.end_seconds, source.duration) {
@@ -3490,7 +3594,9 @@ play_clip :: proc(index: int) -> bool {
 		}
 		return true
 	}
-	if !metal_player_load(clip.clip_path) {
+	source_index := source_index_for_id(state.sources[:], clip.source_id)
+	has_audio := source_index < 0 || state.sources[source_index].has_audio
+	if !metal_player_load(clip.clip_path, has_audio) {
 		set_text(state.status, "Unable to load the selected clip")
 		return false
 	}
@@ -3864,6 +3970,132 @@ library_panel_path :: proc(
 	return path, clone_error == nil
 }
 
+source_local_paths_clear :: proc() {
+	for path in source_local_paths {delete(path)}
+	for title in source_local_titles {delete(title)}
+	delete(source_local_paths)
+	delete(source_local_titles)
+	source_local_paths = make([dynamic]string)
+	source_local_titles = make([dynamic]string)
+}
+
+source_local_path_append :: proc(path: string) -> bool {
+	if len(strings.trim_space(path)) == 0 || !os.exists(path) {return false}
+	for existing in source_local_paths {
+		if existing == path {return false}
+	}
+	append(&source_local_paths, strings.clone(path))
+	append(&source_local_titles, local_source_title(path))
+	return true
+}
+
+source_local_path_remove :: proc(index: int) -> bool {
+	if index < 0 || index >= len(source_local_paths) ||
+	   index >= len(source_local_titles) {return false}
+	delete(source_local_paths[index])
+	delete(source_local_titles[index])
+	ordered_remove(&source_local_paths, index)
+	ordered_remove(&source_local_titles, index)
+	if ui.local_source_title_index == index {
+		ui.focus = .None
+		ui.local_source_title_index = -1
+	} else if ui.local_source_title_index > index {
+		ui.local_source_title_index -= 1
+	}
+	ui.needs_redraw = true
+	return true
+}
+
+source_local_files_with_panel :: proc() -> bool {
+	panel := msg_id(objc_getClass("NSOpenPanel"), sel_registerName("openPanel"))
+	if panel == nil {return false}
+	msg_void_bool(panel, sel_registerName("setCanChooseFiles:"), true)
+	msg_void_bool(panel, sel_registerName("setCanChooseDirectories:"), false)
+	msg_void_bool(panel, sel_registerName("setAllowsMultipleSelection:"), true)
+	if msg_i64(panel, sel_registerName("runModal")) != 1 {return false}
+	urls := msg_id(panel, sel_registerName("URLs"))
+	count := int(msg_uint(urls, sel_registerName("count")))
+	added := false
+	for index in 0 ..< count {
+		url := msg_id_uint(urls, sel_registerName("objectAtIndex:"), uint(index))
+		path_value := msg_id(url, sel_registerName("path"))
+		utf8 := msg_id(path_value, sel_registerName("UTF8String"))
+		if utf8 == nil {continue}
+		path := string(cstring(utf8))
+		if source_local_path_append(path) {added = true}
+	}
+	if added {
+		ui.needs_redraw = true
+		set_text(state.status, fmt.tprintf("Added %d local file(s) to the source batch", count))
+	}
+	return added
+}
+
+on_browse_source_files :: proc "c" (self: Id, command: Sel, sender: Id) {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	_ = source_local_files_with_panel()
+}
+
+source_local_file_with_panel :: proc() -> (string, bool) {
+	panel := msg_id(objc_getClass("NSOpenPanel"), sel_registerName("openPanel"))
+	if panel == nil {return "", false}
+	msg_void_bool(panel, sel_registerName("setCanChooseFiles:"), true)
+	msg_void_bool(panel, sel_registerName("setCanChooseDirectories:"), false)
+	msg_void_bool(panel, sel_registerName("setAllowsMultipleSelection:"), false)
+	if msg_i64(panel, sel_registerName("runModal")) != 1 {return "", false}
+	url := msg_id(panel, sel_registerName("URL"))
+	path_value := msg_id(url, sel_registerName("path"))
+	utf8 := msg_id(path_value, sel_registerName("UTF8String"))
+	if utf8 == nil {return "", false}
+	path, clone_error := strings.clone(string(cstring(utf8)))
+	return path, clone_error == nil
+}
+
+relink_local_source :: proc(source_index: int) {
+	if source_index < 0 || source_index >= len(state.sources) {return}
+	source := &state.sources[source_index]
+	if source.kind != .Local {return}
+	path, selected := source_local_file_with_panel()
+	if !selected {return}
+	defer delete(path)
+	delete(pending_local_relink_path)
+	pending_local_relink_path = strings.clone(path)
+	relink_local_source_path(source_index, path)
+}
+
+relink_local_source_path :: proc(source_index: int, path: string) {
+	if source_index < 0 || source_index >= len(state.sources) {return}
+	source := &state.sources[source_index]
+	if source.kind != .Local || len(path) == 0 {return}
+	if !require_helper("ffmpeg") || !require_helper("ffprobe") {return}
+	if !major_change_backup_preflight(.Local_Source_Relink, source_index=source_index) {return}
+	job := import_job_create_local(path, source.title, source.workflow)
+	if job == nil {set_error_status("Unable to allocate the local source recovery"); return}
+	allocator := mem_virtual.arena_allocator(job.arena)
+	job.replace_video_id = strings.clone(source.video_id, allocator)
+	job.allow_without_backup = major_change_backup_override
+	major_change_backup_override = false
+	fields := [2]Notification_Field{
+		{label="Source", value=source.title},
+		{label="Selected file", value=path},
+	}
+	job.notification_id = notification_begin(
+		"Local source recovery queued",
+		"The selected file must match the original SHA-256 before the managed media and clips are rebuilt.",
+		fields[:],
+	)
+	os.write_entire_file(job.log_path, nil)
+	if !media_queue_schedule_import(job, barrier=true) {
+		import_job_destroy(job)
+		set_error_status("Unable to queue the local source recovery")
+		return
+	}
+	delete(pending_local_relink_path)
+	pending_local_relink_path = ""
+	set_text(state.status, "Local source recovery queued")
+}
+
 export_library_with_panel :: proc(
 	scope := Portable_Library_Scope.All,
 ) {
@@ -4114,6 +4346,8 @@ video_clips_process_main :: proc(args := os.args) {
 	defer app_state_memory_destroy()
 	defer library_recovery_state_destroy()
 	defer delete(major_change_pending.detail)
+	defer delete(pending_local_relink_path)
+	defer source_local_paths_clear()
 	defer source_probe_results_clear()
 	defer source_probe_cache_clear()
 	defer database_close()

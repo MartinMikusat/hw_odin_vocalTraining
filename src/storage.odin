@@ -3,7 +3,7 @@ package main
 import "core:encoding/json"
 import "core:fmt"
 import "core:math"
-import "core:os"
+import os "core:os/old"
 import "core:path/filepath"
 import "core:strings"
 import "core:time"
@@ -36,7 +36,7 @@ Source_Context_Metadata :: struct {
 }
 
 PORTABLE_LIBRARY_FORMAT  :: "hw-video-clips-library"
-PORTABLE_LIBRARY_VERSION :: 1
+PORTABLE_LIBRARY_VERSION :: 2
 LEGACY_PORTABLE_LIBRARY_FORMAT :: "vocal-training-library"
 
 Portable_Library_Scope :: enum {
@@ -68,9 +68,13 @@ portable_library_scope_from_name :: proc(
 Portable_Source :: struct {
 	id:              string,
 	workflow:        Workflow_Kind,
+	kind:            Source_Kind,
 	video_id:        string,
 	title:           string,
 	url:             string,
+	original_filename: string,
+	content_sha256:  string,
+	has_audio:       bool,
 	duration:        f64,
 	metadata:        Source_Context_Metadata,
 	metadata_status: Source_Metadata_Status,
@@ -193,7 +197,7 @@ portable_source_index :: proc(sources: []Portable_Source, id: string) -> int {
 
 portable_library_validate :: proc(data: ^Portable_Library) -> Portable_Library_Error {
 	if data.format != PORTABLE_LIBRARY_FORMAT {return .Format}
-	if data.version != PORTABLE_LIBRARY_VERSION {return .Version}
+	if data.version != 1 && data.version != PORTABLE_LIBRARY_VERSION {return .Version}
 	scope, scope_valid := portable_library_scope_from_name(data.scope)
 	if !scope_valid {return .Format}
 	for source, index in data.sources {
@@ -202,8 +206,14 @@ portable_library_validate :: proc(data: ^Portable_Library) -> Portable_Library_E
 			return .Identifier
 		}
 		if !portable_seconds_valid(source.duration) {return .Timestamp}
+		if source.kind == .YouTube && len(source.url) == 0 {return .Decode}
+		if source.kind == .Local && len(source.content_sha256) != 64 {return .Decode}
 		switch source.workflow {
 		case .Vocal, .Dancing:
+		case: return .Format
+		}
+		switch source.kind {
+		case .YouTube, .Local:
 		case: return .Format
 		}
 		if (scope == .Vocal && source.workflow != .Vocal) ||
@@ -577,9 +587,13 @@ database_create_schema_v8 :: proc(database: ^SQLite_DB) -> bool {
 		CREATE TABLE IF NOT EXISTS sources (
 			id TEXT PRIMARY KEY,
 			workflow INTEGER NOT NULL,
+			source_kind INTEGER NOT NULL DEFAULT 0,
 			video_id TEXT NOT NULL,
 			title TEXT NOT NULL,
 			url TEXT NOT NULL,
+			original_filename TEXT NOT NULL DEFAULT '',
+			content_sha256 TEXT NOT NULL DEFAULT '',
+			has_audio INTEGER NOT NULL DEFAULT 1,
 			media_path TEXT NOT NULL,
 			duration REAL NOT NULL,
 			position INTEGER NOT NULL,
@@ -677,7 +691,7 @@ database_create_schema_v8 :: proc(database: ^SQLite_DB) -> bool {
 		INSERT OR IGNORE INTO library_revisions (
 			revision, committed_at_ms
 		) VALUES (1, 0);
-		PRAGMA user_version = 8;
+		PRAGMA user_version = 9;
 	`)
 }
 
@@ -1081,6 +1095,16 @@ database_migrate_v7_to_v8 :: proc(database: ^SQLite_DB) -> bool {
 	`)
 }
 
+database_migrate_v8_to_v9 :: proc(database: ^SQLite_DB) -> bool {
+	return sqlite_execute(database, `
+		ALTER TABLE sources ADD COLUMN source_kind INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE sources ADD COLUMN original_filename TEXT NOT NULL DEFAULT '';
+		ALTER TABLE sources ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT '';
+		ALTER TABLE sources ADD COLUMN has_audio INTEGER NOT NULL DEFAULT 1;
+		PRAGMA user_version = 9;
+	`)
+}
+
 database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 	version, version_read := library_database_user_version(database)
 	if !version_read {return false}
@@ -1096,6 +1120,10 @@ database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 	if version == 7 {
 		if !database_migrate_v7_to_v8(database) {return false}
 		version = 8
+	}
+	if version == 8 {
+		if !database_migrate_v8_to_v9(database) {return false}
+		version = 9
 	}
 	if version != 0 && version != LIBRARY_SCHEMA_VERSION {return false}
 	return database_create_schema_v8(database)
@@ -1614,30 +1642,35 @@ database_insert_source :: proc(database: ^SQLite_DB, source: Source_Video, posit
 	statement, ok := sqlite_prepare(
 		database,
 		`INSERT INTO sources (
-			id, workflow, video_id, title, url, media_path, duration, position,
+			id, workflow, source_kind, video_id, title, url, original_filename,
+			content_sha256, has_audio, media_path, duration, position,
 			metadata_status, width, height, fps, video_codec, audio_codec,
 			container, format_id, file_size
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if !ok {return false}
 	defer sqlite3_finalize(statement)
 	return sqlite_bind_text_value(statement, 1, source.id) &&
 		sqlite3_bind_int(statement, 2, i32(source.workflow)) == SQLITE_OK &&
-		sqlite_bind_text_value(statement, 3, source.video_id) &&
-		sqlite_bind_text_value(statement, 4, source.title) &&
-		sqlite_bind_text_value(statement, 5, source.url) &&
-		sqlite_bind_text_value(statement, 6, database_file_path_for_storage(source.media_path)) &&
-		sqlite3_bind_double(statement, 7, source.duration) == SQLITE_OK &&
-		sqlite3_bind_int(statement, 8, i32(position)) == SQLITE_OK &&
-		sqlite3_bind_int(statement, 9, i32(source.metadata_status)) == SQLITE_OK &&
-		sqlite3_bind_int(statement, 10, i32(source.metadata.width)) == SQLITE_OK &&
-		sqlite3_bind_int(statement, 11, i32(source.metadata.height)) == SQLITE_OK &&
-		sqlite3_bind_double(statement, 12, source.metadata.fps) == SQLITE_OK &&
-		sqlite_bind_text_value(statement, 13, source.metadata.vcodec) &&
-		sqlite_bind_text_value(statement, 14, source.metadata.acodec) &&
-		sqlite_bind_text_value(statement, 15, source.metadata.ext) &&
-		sqlite_bind_text_value(statement, 16, source.metadata.format_id) &&
-		sqlite3_bind_int64(statement, 17, source.metadata.filesize_approx) == SQLITE_OK &&
+		sqlite3_bind_int(statement, 3, i32(source.kind)) == SQLITE_OK &&
+		sqlite_bind_text_value(statement, 4, source.video_id) &&
+		sqlite_bind_text_value(statement, 5, source.title) &&
+		sqlite_bind_text_value(statement, 6, source.url) &&
+		sqlite_bind_text_value(statement, 7, source.original_filename) &&
+		sqlite_bind_text_value(statement, 8, source.content_sha256) &&
+		sqlite3_bind_int(statement, 9, source.has_audio ? 1 : 0) == SQLITE_OK &&
+		sqlite_bind_text_value(statement, 10, database_file_path_for_storage(source.media_path)) &&
+		sqlite3_bind_double(statement, 11, source.duration) == SQLITE_OK &&
+		sqlite3_bind_int(statement, 12, i32(position)) == SQLITE_OK &&
+		sqlite3_bind_int(statement, 13, i32(source.metadata_status)) == SQLITE_OK &&
+		sqlite3_bind_int(statement, 14, i32(source.metadata.width)) == SQLITE_OK &&
+		sqlite3_bind_int(statement, 15, i32(source.metadata.height)) == SQLITE_OK &&
+		sqlite3_bind_double(statement, 16, source.metadata.fps) == SQLITE_OK &&
+		sqlite_bind_text_value(statement, 17, source.metadata.vcodec) &&
+		sqlite_bind_text_value(statement, 18, source.metadata.acodec) &&
+		sqlite_bind_text_value(statement, 19, source.metadata.ext) &&
+		sqlite_bind_text_value(statement, 20, source.metadata.format_id) &&
+		sqlite3_bind_int64(statement, 21, source.metadata.filesize_approx) == SQLITE_OK &&
 		sqlite3_step(statement) == SQLITE_DONE
 }
 
@@ -1824,9 +1857,13 @@ portable_library_from_state :: proc(
 		sources[source_position] = Portable_Source {
 			id = source.id,
 			workflow = source.workflow,
+			kind = source.kind,
 			video_id = source.video_id,
 			title = source.title,
 			url = source.url,
+			original_filename = source.original_filename,
+			content_sha256 = source.content_sha256,
+			has_audio = source.has_audio,
 			duration = source.duration,
 			metadata = source.metadata,
 			metadata_status = source.metadata_status,
@@ -1964,7 +2001,11 @@ portable_library_read_scoped :: proc(
 				dance_playback_rate=1,
 			}
 		}
-		for &source in legacy.sources {source.workflow = .Vocal}
+		for &source in legacy.sources {
+			source.workflow = .Vocal
+			source.kind = .YouTube
+			source.has_audio = true
+		}
 		data = Portable_Library{
 			format=PORTABLE_LIBRARY_FORMAT,
 			version=PORTABLE_LIBRARY_VERSION,
@@ -1979,6 +2020,12 @@ portable_library_read_scoped :: proc(
 		if decode_error := json.unmarshal(bytes, &data, .JSON, allocator);
 		   decode_error != nil {
 			return {}, .All, .Decode
+		}
+		if data.version == 1 {
+			for &source in data.sources {
+				source.kind = .YouTube
+				source.has_audio = true
+			}
 		}
 	}
 	if validation_error := portable_library_validate(&data); validation_error != .None {
@@ -2003,9 +2050,13 @@ portable_library_read_scoped :: proc(
 		runtime_source := Source_Video {
 			id = source.id,
 			workflow = source.workflow,
+			kind = source.kind,
 			video_id = source.video_id,
 			title = source.title,
 			url = source.url,
+			original_filename = source.original_filename,
+			content_sha256 = source.content_sha256,
+			has_audio = source.has_audio,
 			media_path = fmt.aprintf(
 				"%s/%s.mp4",
 				workflow_source_directory(source.workflow),
@@ -2237,7 +2288,8 @@ library_state_valid :: proc(value: ^App_State) -> bool {
 		if !portable_identifier_valid(source.id) ||
 		   !portable_identifier_valid(source.video_id) ||
 		   len(source.title) == 0 ||
-		   len(source.url) == 0 ||
+		   (source.kind == .YouTube && len(source.url) == 0) ||
+		   (source.kind == .Local && len(source.content_sha256) != 64) ||
 		   len(source.media_path) == 0 ||
 		   !utf8.valid_string(source.title) ||
 		   !utf8.valid_string(source.url) ||
@@ -2259,6 +2311,10 @@ library_state_valid :: proc(value: ^App_State) -> bool {
 		}
 		switch source.metadata_status {
 		case .Missing, .Available, .Unavailable:
+		case: return false
+		}
+		switch source.kind {
+		case .YouTube, .Local:
 		case: return false
 		}
 	}
@@ -2343,7 +2399,8 @@ database_load_state_result :: proc(
 
 	statement, ok := sqlite_prepare(
 		database,
-		`SELECT id, workflow, video_id, title, url, media_path, duration,
+		`SELECT id, workflow, source_kind, video_id, title, url,
+		        original_filename, content_sha256, has_audio, media_path, duration,
 		        metadata_status, width, height, fps, video_codec, audio_codec,
 		        container, format_id, file_size
 		 FROM sources
@@ -2361,21 +2418,25 @@ database_load_state_result :: proc(
 		copied: bool
 		source.id, copied = sqlite_column_required_string(statement, 0); if !copied {sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source identifier is invalid")}
 		source.workflow = Workflow_Kind(sqlite3_column_int(statement, 1))
-		source.video_id, copied = sqlite_column_required_string(statement, 2); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source video identifier is invalid")}
-		source.title, copied = sqlite_column_required_string(statement, 3); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source title is invalid")}
-		source.url, copied = sqlite_column_required_string(statement, 4); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source URL is invalid")}
-		stored_media_path, stored_media_path_copied := sqlite_column_required_string(statement, 5, context.temp_allocator)
+		source.kind = Source_Kind(sqlite3_column_int(statement, 2))
+		source.video_id, copied = sqlite_column_required_string(statement, 3); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source video identifier is invalid")}
+		source.title, copied = sqlite_column_required_string(statement, 4); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source title is invalid")}
+		source.url, copied = sqlite_column_required_string(statement, 5); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source URL is invalid")}
+		source.original_filename, copied = sqlite_column_required_string(statement, 6); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source filename is invalid")}
+		source.content_sha256, copied = sqlite_column_required_string(statement, 7); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source content hash is invalid")}
+		source.has_audio = sqlite3_column_int(statement, 8) != 0
+		stored_media_path, stored_media_path_copied := sqlite_column_required_string(statement, 9, context.temp_allocator)
 		if !stored_media_path_copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source media path is invalid")}
 		source.media_path, copied = database_file_path_for_runtime(stored_media_path)
 		if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "Unable to resolve a source media path")}
-		source.duration = sqlite3_column_double(statement, 6)
-		source.metadata_status = Source_Metadata_Status(sqlite3_column_int(statement, 7))
-		source.metadata.width = int(sqlite3_column_int(statement, 8)); source.metadata.height = int(sqlite3_column_int(statement, 9)); source.metadata.fps = sqlite3_column_double(statement, 10)
-		source.metadata.vcodec, copied = sqlite_column_required_string(statement, 11); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source video codec is invalid")}
-		source.metadata.acodec, copied = sqlite_column_required_string(statement, 12); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source audio codec is invalid")}
-		source.metadata.ext, copied = sqlite_column_required_string(statement, 13); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source container is invalid")}
-		source.metadata.format_id, copied = sqlite_column_required_string(statement, 14); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source format identifier is invalid")}
-		source.metadata.filesize_approx = sqlite3_column_int64(statement, 15)
+		source.duration = sqlite3_column_double(statement, 10)
+		source.metadata_status = Source_Metadata_Status(sqlite3_column_int(statement, 11))
+		source.metadata.width = int(sqlite3_column_int(statement, 12)); source.metadata.height = int(sqlite3_column_int(statement, 13)); source.metadata.fps = sqlite3_column_double(statement, 14)
+		source.metadata.vcodec, copied = sqlite_column_required_string(statement, 15); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source video codec is invalid")}
+		source.metadata.acodec, copied = sqlite_column_required_string(statement, 16); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source audio codec is invalid")}
+		source.metadata.ext, copied = sqlite_column_required_string(statement, 17); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source container is invalid")}
+		source.metadata.format_id, copied = sqlite_column_required_string(statement, 18); if !copied {delete_source_video(&source); sqlite3_finalize(statement); return library_load_failure(database, .Sources, "A source format identifier is invalid")}
+		source.metadata.filesize_approx = sqlite3_column_int64(statement, 19)
 		source.media_available = os.exists(source.media_path)
 		append(&sources, source)
 	}

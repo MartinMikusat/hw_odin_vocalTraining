@@ -3,15 +3,16 @@ package main
 import "core:fmt"
 import crypto_hash "core:crypto/hash"
 import "core:encoding/json"
-import "core:os"
-import os2 "core:os/os2"
+import os "core:os/old"
+import os2 "core:os"
+
 import "core:path/filepath"
 import "core:slice"
 import "core:strings"
 import "core:time"
 import "base:runtime"
 
-LIBRARY_SCHEMA_VERSION :: 8
+LIBRARY_SCHEMA_VERSION :: 9
 LIBRARY_BACKUP_RETENTION :: 10
 
 Library_Storage_Mode :: enum {
@@ -195,9 +196,13 @@ library_database_user_version :: proc(database: ^SQLite_DB) -> (int, bool) {
 source_storage_equal :: proc(a, b: Source_Video) -> bool {
 	return a.id == b.id &&
 	       a.workflow == b.workflow &&
+	       a.kind == b.kind &&
 	       a.video_id == b.video_id &&
 	       a.title == b.title &&
 	       a.url == b.url &&
+	       a.original_filename == b.original_filename &&
+	       a.content_sha256 == b.content_sha256 &&
+	       a.has_audio == b.has_audio &&
 	       a.media_path == b.media_path &&
 	       a.duration == b.duration &&
 	       a.metadata_status == b.metadata_status &&
@@ -761,7 +766,8 @@ library_salvage_source_valid :: proc(value: ^Source_Video) -> bool {
 	if !portable_identifier_valid(value.id) ||
 	   !portable_identifier_valid(value.video_id) ||
 	   len(value.title) == 0 ||
-	   len(value.url) == 0 ||
+	   (value.kind == .YouTube && len(value.url) == 0) ||
+	   (value.kind == .Local && len(value.content_sha256) != 64) ||
 	   len(value.media_path) == 0 ||
 	   !portable_seconds_valid(value.duration) ||
 	   !portable_seconds_valid(value.metadata.fps) ||
@@ -797,7 +803,8 @@ database_salvage_state :: proc(
 		database,
 		`SELECT id, video_id, title, url, media_path, duration,
 		        metadata_status, width, height, fps, video_codec,
-		        audio_codec, container, format_id, file_size
+		        audio_codec, container, format_id, file_size, source_kind,
+		        original_filename, content_sha256, has_audio
 		 FROM sources ORDER BY position`,
 	)
 	if !prepared {
@@ -831,6 +838,10 @@ database_salvage_state :: proc(
 			if valid {source.metadata.ext, valid = sqlite_column_required_string(statement, 12)}
 			if valid {source.metadata.format_id, valid = sqlite_column_required_string(statement, 13)}
 			source.metadata.filesize_approx = sqlite3_column_int64(statement, 14)
+			source.kind = Source_Kind(sqlite3_column_int(statement, 15))
+			if valid {source.original_filename, valid = sqlite_column_required_string(statement, 16)}
+			if valid {source.content_sha256, valid = sqlite_column_required_string(statement, 17)}
+			source.has_audio = sqlite3_column_int(statement, 18) != 0
 			valid = valid &&
 			        library_salvage_source_valid(&source) &&
 			        library_source_index(result.sources[:], source.id) < 0

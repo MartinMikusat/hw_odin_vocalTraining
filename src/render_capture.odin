@@ -3,7 +3,7 @@ package main
 import "base:runtime"
 import "core:fmt"
 import "core:hash"
-import "core:os"
+import os "core:os/old"
 import "core:path/filepath"
 import "core:strings"
 import mem_virtual "core:mem/virtual"

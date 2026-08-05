@@ -13,13 +13,14 @@ Models used:
 
 ### Requirements
 
-Install the media tools:
+Install the media tools. Homebrew's FFmpeg formula supplies both `ffmpeg` and
+`ffprobe`:
 
 ```sh
 brew install yt-dlp ffmpeg
 ```
 
-The app validates both tools at startup and immediately before each media
+The app validates `yt-dlp`, `ffmpeg`, and `ffprobe` at startup and immediately before each media
 operation. It prefers executables packaged in
 `Contents/Resources/helpers/`, then searches the development machine's
 `PATH`; it never installs or downloads tools itself.
@@ -142,7 +143,21 @@ already open, it appends new URL lines and skips exact duplicates. Other
 clipboard text keeps its normal focused-field paste behavior.
 
 Press **Add** in the Source Register to open the ingest dialog manually, then
-paste one or more YouTube URLs with one URL per line. URLs are normalized by
+paste one or more YouTube URLs with one URL per line, select **Browse Files…**,
+or drop local video files into the application. A drop preserves the active
+workflow, switches to Sources, and opens Add Source. The dialog combines URLs
+and local files in one batch. Local titles default to filenames without their
+extensions and remain editable until import.
+
+The application calculates each local file's SHA-256 and reuses an existing
+source when the same content already exists in the active workflow. It copies
+new media into the managed library. Compatible H.264 MP4 files copy directly,
+compatible streams in other containers are remuxed, and incompatible streams
+are normalized to H.264/AAC MP4. The original file remains unchanged. Local
+video without audio is accepted; the Source and Clip players show **NO AUDIO
+TRACK** while that media is loaded.
+
+YouTube URLs are normalized by
 video ID, while timestamps supplied through `t`, `start`, or `youtu.be` URL
 forms become initial playhead hints. The dialog checks each URL in the
 background and shows its title, duration, and available video resolutions.
@@ -176,7 +191,10 @@ The app downloads into staging files. It verifies H.264 video and AAC audio,
 decodes one second of both tracks, and then replaces the active source files.
 
 The Source Register marks a source as **MISSING** when its merged MP4 file is
-not available. Right-click that source and refetch it. Open its failed task in
+not available. Right-click a YouTube source and refetch it. For a local source,
+open Source Details and select **Locate Original…**. The selected file must
+match the stored SHA-256 before the app restores its managed copy and rebuilds
+its clips. Open its failed task in
 the notification history to find the private `yt-dlp-<operation-id>.log`.
 
 Select a source, load its captions, and click a timed transcript row to seek.
@@ -299,7 +317,9 @@ this local activity history.
 Library exports use the versioned `.hwvideoclips.json` format. They contain
 source URLs, saved quality metadata, transcripts, timestamp hints, and clip
 definitions, including Dancing clip settings. They do not contain downloaded
-videos or clips. Import validates the complete file, then replaces the selected
+videos, local source videos, or clips. Local source records include the original
+filename and content hash so recovery can validate a manually selected file.
+Import validates the complete file, then replaces the selected
 scope in one database transaction. Existing media files remain in place. The
 app recovers each source sequentially at its exact saved resolution and
 rebuilds its clips. Legacy `.vocaltraining.json` files import into Vocal only.
@@ -313,6 +333,7 @@ result to standard output. Failed media commands include the diagnostic path.
 
 ```sh
 build/hw_videoClips source add --url 'https://youtu.be/VIDEO_ID?t=120'
+build/hw_videoClips source add --file '/absolute/path/lesson.mov' --name 'Lesson'
 build/hw_videoClips source list
 build/hw_videoClips source add --workflow dancing --url 'https://youtu.be/VIDEO_ID'
 build/hw_videoClips source list --workflow dancing
@@ -331,6 +352,10 @@ build/hw_videoClips playback fullscreen --state off
 Source, transcript, and clip commands accept `--workflow vocal|dancing`.
 Vocal is the default. The command resolves video IDs within that workflow and
 writes the workflow name into source and clip JSON results.
+
+`source add` requires exactly one of `--url` or `--file`. A relative file path
+is resolved from the command's working directory. `--name` overrides the local
+filename-derived title and is valid only with `--file`.
 
 `source add` selects compatible media at or below 1080p. Use `--max-height N`
 to set another limit. The command downloads one URL at a time. If backup
@@ -590,7 +615,7 @@ build for non-technical users. Complete these items before external
 distribution:
 
 - Package pinned standalone `yt-dlp` and relocatable Apple Silicon `ffmpeg`
-  executables under `Contents/Resources/helpers/`. Ship helper updates through
+  and `ffprobe` executables under `Contents/Resources/helpers/`. Ship helper updates through
   new app releases; do not install Homebrew, mutate the user's global `PATH`, or
   download executables on first launch.
 - Build the bundled FFmpeg configuration without the current GPL `libx264`

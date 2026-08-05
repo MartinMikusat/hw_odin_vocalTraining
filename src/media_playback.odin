@@ -94,6 +94,9 @@ metal_audio_engine_running :: proc() -> bool {
 }
 
 metal_audio_play :: proc() -> bool {
+	if ui.audio_engine == nil && ui.audio_player == nil && ui.audio_file == nil {
+		return true
+	}
 	if ui.audio_engine == nil || ui.audio_player == nil {return false}
 	if !metal_audio_engine_running() {
 		error: Id
@@ -378,7 +381,7 @@ metal_player_clear :: proc() {
 	metal_audio_release(audio_engine, audio_player, audio_pitch, audio_file)
 }
 
-metal_player_load :: proc(path: string) -> bool {
+metal_player_load :: proc(path: string, has_audio := true) -> bool {
 	media_setup_started_ms := ui_automation_media_setup_begin()
 	defer ui_automation_media_setup_finish(media_setup_started_ms)
 	url := msg_id_id(objc_getClass("NSURL"), sel_registerName("fileURLWithPath:"), nsstring(path))
@@ -413,11 +416,15 @@ metal_player_load :: proc(path: string) -> bool {
 		return false
 	}
 	msg_void_bool(player, sel_registerName("setMuted:"), true)
-	audio_engine, audio_player, audio_pitch, audio_file, audio_ok := metal_audio_load(url)
-	if !audio_ok {
-		msg_void(player, sel_registerName("release"))
-		msg_void(output, sel_registerName("release"))
-		return false
+	audio_engine, audio_player, audio_pitch, audio_file: Id
+	if has_audio {
+		audio_ok: bool
+		audio_engine, audio_player, audio_pitch, audio_file, audio_ok = metal_audio_load(url)
+		if !audio_ok {
+			msg_void(player, sel_registerName("release"))
+			msg_void(output, sel_registerName("release"))
+			return false
+		}
 	}
 
 	old_player := state.player

@@ -227,9 +227,11 @@ transcript_generation_replace_source :: proc(
 clone_source_video :: proc(source: Source_Video, allocator := context.allocator) -> (Source_Video, bool) {
 	result := Source_Video{
 		workflow=source.workflow,
+		kind=source.kind,
 		duration=source.duration,
 		metadata_status=source.metadata_status,
 		media_available=source.media_available,
+		has_audio=source.has_audio,
 	}
 	copied := false
 	defer if !copied { delete_source_video(&result, allocator) }
@@ -237,6 +239,8 @@ clone_source_video :: proc(source: Source_Video, allocator := context.allocator)
 	value, err = strings.clone(source.video_id, allocator); if err != nil { return {}, false }; result.video_id = value
 	value, err = strings.clone(source.title, allocator); if err != nil { return {}, false }; result.title = value
 	value, err = strings.clone(source.url, allocator); if err != nil { return {}, false }; result.url = value
+	value, err = strings.clone(source.original_filename, allocator); if err != nil { return {}, false }; result.original_filename = value
+	value, err = strings.clone(source.content_sha256, allocator); if err != nil { return {}, false }; result.content_sha256 = value
 	value, err = strings.clone(source.media_path, allocator); if err != nil { return {}, false }; result.media_path = value
 	result.metadata = Source_Context_Metadata{width=source.metadata.width, height=source.metadata.height, fps=source.metadata.fps, filesize_approx=source.metadata.filesize_approx}
 	value, err = strings.clone(source.metadata.vcodec, allocator); if err != nil { return {}, false }; result.metadata.vcodec = value
@@ -281,7 +285,7 @@ clone_clip :: proc(clip: Clip, allocator := context.allocator) -> (Clip, bool) {
 
 delete_source_video :: proc(source: ^Source_Video, allocator := context.allocator) {
 	if source == nil { return }
-	delete(source.id, allocator); delete(source.video_id, allocator); delete(source.title, allocator); delete(source.url, allocator); delete(source.media_path, allocator)
+	delete(source.id, allocator); delete(source.video_id, allocator); delete(source.title, allocator); delete(source.url, allocator); delete(source.original_filename, allocator); delete(source.content_sha256, allocator); delete(source.media_path, allocator)
 	delete_source_context_metadata(&source.metadata, allocator)
 	source^ = {}
 }

@@ -6,7 +6,8 @@ import "core:fmt"
 import "core:hash"
 import "core:math"
 import mem_virtual "core:mem/virtual"
-import "core:os"
+import os "core:os/old"
+import "core:path/filepath"
 import "core:strings"
 import "core:time"
 import posix "core:sys/posix"
@@ -96,6 +97,7 @@ UI_Focus :: enum {
 	Command_Palette,
 	Settings_Search,
 	URL,
+	Local_Source_Title,
 	Source_Search,
 	Transcript_Search,
 	Clip_Search,
@@ -229,6 +231,7 @@ UI_State :: struct {
 	clip_rename_initial_hash: u64,
 	source_modal_open:  bool,
 	source_modal_refetch_index: int,
+	local_source_title_index: int,
 	source_details_open: bool,
 	source_details_index: int,
 	clip_rename_open: bool,
@@ -505,11 +508,14 @@ UI_Action_Kind :: enum {
 	Workflow_Toggle,
 	Mode_Toggle,
 	Open_Source_Modal,
+	Browse_Source_Files,
 	Cancel_Source_Modal,
 	Close_Source_Details,
 	Refetch_Source_Details,
 	Open_Source_Details,
 	URL,
+	Local_Source_Title,
+	Remove_Local_Source,
 	Import,
 	Source_Quality,
 	Retry_Source_With_Browser,
@@ -654,6 +660,7 @@ ui := UI_State{
 	vocal_playback_rate = 1,
 	source_details_index = -1,
 	source_modal_refetch_index = -1,
+	local_source_title_index = -1,
 	clip_rename_index = -1,
 	clip_metadata_index = -1,
 	transcript_active_match = -1,
@@ -1119,6 +1126,11 @@ focused_text :: proc() -> ^string {
 		return &ui.settings_query
 	case .URL:
 		return &ui.url_input
+	case .Local_Source_Title:
+		if ui.local_source_title_index >= 0 &&
+		   ui.local_source_title_index < len(source_local_titles) {
+			return &source_local_titles[ui.local_source_title_index]
+		}
 	case .Source_Search:
 		return &ui.source_search
 	case .Transcript_Search:
@@ -1860,12 +1872,27 @@ source_probe_row_height :: proc(index: int) -> f64 {
 
 source_probe_row_rect :: proc(modal: UI_Rect, index: int) -> UI_Rect {
 	input := source_modal_input_rect(modal)
-	top := input.y - 8
+	top := input.y - 8 - f64(min(len(source_local_paths), 4))*32
 	for previous_index in 0 ..< index {
 		top -= source_probe_row_height(previous_index) + 6
 	}
 	height := source_probe_row_height(index)
 	return UI_Rect{modal.x + 24, top - height, modal.w - 48, height}
+}
+
+source_local_row_rect :: proc(modal: UI_Rect, index: int) -> UI_Rect {
+	input := source_modal_input_rect(modal)
+	return UI_Rect{input.x, input.y - 30 - f64(index)*32, input.w, 28}
+}
+
+source_local_title_rect :: proc(modal: UI_Rect, index: int) -> UI_Rect {
+	row := source_local_row_rect(modal, index)
+	return UI_Rect{row.x + row.w*0.42, row.y, row.w*0.58-34, row.h}
+}
+
+source_local_remove_rect :: proc(modal: UI_Rect, index: int) -> UI_Rect {
+	row := source_local_row_rect(modal, index)
+	return UI_Rect{row.x + row.w - 30, row.y, 30, row.h}
 }
 
 source_probe_quality_rect :: proc(row: UI_Rect, option_index: int) -> UI_Rect {
@@ -1902,6 +1929,10 @@ source_modal_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + modal.w - 180, modal.y + 24, 156, 34}
 }
 
+source_modal_browse_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + modal.w - 204, modal.y + modal.h - 142, 180, 30}
+}
+
 source_details_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
 	width := min(max(560, view_width * 0.52), 720)
 	height := min(max(470, view_height * 0.68), 550)
@@ -1918,6 +1949,21 @@ source_details_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
 
 source_details_refetch_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + modal.w - 286, modal.y + 22, 262, 34}
+}
+
+active_player_has_audio :: proc() -> bool {
+	if ui.source_playback_active && state.active_source >= 0 &&
+	   state.active_source < len(state.sources) {
+		return state.sources[state.active_source].has_audio
+	}
+	if ui.active_clip >= 0 && ui.active_clip < len(state.clips) {
+		source_index := source_index_for_id(
+			state.sources[:],
+			state.clips[ui.active_clip].source_id,
+		)
+		if source_index >= 0 {return state.sources[source_index].has_audio}
+	}
+	return true
 }
 
 source_details_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
@@ -2422,6 +2468,7 @@ open_source_modal :: proc() {
 	cancel_ui_flash()
 	if ui.source_details_open {close_source_details()}
 	ui.source_modal_refetch_index = -1
+	ui.local_source_title_index = -1
 	ui.source_modal_open = true
 	ui.save_source_browser_choice = false
 	ui.source_modal_initial_hash = hash.fnv64a(transmute([]byte)ui.url_input)
@@ -2568,11 +2615,13 @@ close_source_modal :: proc() {
 	cancel_ui_flash()
 	ui.source_modal_open = false
 	ui.source_modal_refetch_index = -1
+	ui.local_source_title_index = -1
 	ui.save_source_browser_choice = false
 	ui.focus = .None
 	text_input.end_pointer_selection(&ui.input_state)
 	clear_marked_text()
 	ui.source_modal_initial_hash = 0
+	source_local_paths_clear()
 	ui.needs_redraw = true
 }
 
@@ -2583,7 +2632,8 @@ modal_discard_target_dirty :: proc(target: Modal_Discard_Target) -> bool {
 	case .Source:
 		return hash.fnv64a(transmute([]byte)ui.url_input) !=
 		         ui.source_modal_initial_hash ||
-		       ui.save_source_browser_choice
+		       ui.save_source_browser_choice ||
+		       len(source_local_paths) > 0
 	case .Clip_Rename:
 		return hash.fnv64a(transmute([]byte)ui.clip_rename) !=
 		       ui.clip_rename_initial_hash
@@ -2701,7 +2751,9 @@ restore_clip_selection :: proc() {
 		clamp_playback_rate(clip.dance_playback_rate)
 	)
 	ui.active_clip = index
-	if !os.exists(clip.clip_path) || !metal_player_load(clip.clip_path) {return}
+	source_index := source_index_for_id(state.sources[:], clip.source_id)
+	has_audio := source_index < 0 || state.sources[source_index].has_audio
+	if !os.exists(clip.clip_path) || !metal_player_load(clip.clip_path, has_audio) {return}
 	ui.player_duration = clip.end_seconds - clip.start_seconds
 	set_source_playback_active(false)
 	stop_player_playback()
@@ -2849,6 +2901,7 @@ layout_rects :: proc(
 	body_top := h - APP_HEADER_HEIGHT - 12
 	if ui.source_modal_open {
 		modal := source_modal_rect()
+		browse := ui_control_rect(.Browse_Source_Files)
 		import_field = source_modal_input_rect(modal)
 		import_button = source_modal_confirm_rect(modal)
 	}
@@ -6541,7 +6594,7 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	fill_overlay_rect(ctx, modal, theme.modal)
 	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
 	fill_overlay_rect(ctx, header, theme.panel_alt)
-	draw_styled_text_in_rect(ctx, TEXT_STYLE_HEADING, "SOURCE DETAILS / DOWNLOADED MEDIA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
+	draw_styled_text_in_rect(ctx, TEXT_STYLE_HEADING, "SOURCE DETAILS / MANAGED MEDIA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
 	title_color := cyan
 	if !source.media_available {title_color = [4]f64{0.95, 0.16, 0.10, 1}}
 	draw_text_in_rect(ctx, font, source.title, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - (source.media_available ? 48 : 164), 28}, .Start, .Center, title_color)
@@ -6556,16 +6609,15 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	if metadata.fps > 0 {frame_rate = format_frame_rate(metadata.fps)}
 	file_size := pending_value
 	if metadata.filesize_approx > 0 {file_size = format_file_size(metadata.filesize_approx)}
-	labels := [9]string{"VIDEO ID", "DURATION", "RESOLUTION", "FRAME RATE", "VIDEO CODEC", "AUDIO CODEC", "CONTAINER", "FORMAT ID", "FILE SIZE"}
+	labels := [10]string{"SOURCE ID", "SOURCE TYPE", source.kind == .Local ? "ORIGINAL FILE" : "SOURCE URL", "DURATION", "RESOLUTION", "FRAME RATE", "VIDEO CODEC", "AUDIO CODEC", "CONTAINER", "FILE SIZE"}
 	video_codec := metadata.vcodec
 	if len(video_codec) == 0 {video_codec = pending_value}
 	audio_codec := metadata.acodec
 	if len(audio_codec) == 0 {audio_codec = pending_value}
 	container := metadata.ext
 	if len(container) == 0 {container = pending_value}
-	format_id := metadata.format_id
-	if len(format_id) == 0 {format_id = pending_value}
-	values := [9]string{source.video_id, format_timestamp(source.duration), resolution, frame_rate, video_codec, audio_codec, container, format_id, file_size}
+	origin := source.kind == .Local ? source.original_filename : source.url
+	values := [10]string{source.video_id, source.kind == .Local ? "LOCAL FILE" : "YOUTUBE", origin, format_timestamp(source.duration), resolution, frame_rate, video_codec, source.has_audio ? audio_codec : "NO AUDIO TRACK", container, file_size}
 	for label, row_index in labels {
 		row := source_details_row_rect(modal, row_index)
 		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, theme.row)}
@@ -6573,7 +6625,7 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 		value := values[row_index]
 		if len(value) == 0 {value = "UNAVAILABLE"}
 		value_rect := UI_Rect{row.x + 160, row.y, row.w - 170, row.h}
-		if row_index == 1 {
+		if row_index == 3 {
 			draw_timestamp_text_in_rect(ctx, font, value, value_rect, .Start, .Center, bright)
 		} else {
 			draw_text_in_rect(ctx, font, value, value_rect, .Start, .Center, bright)
@@ -6594,7 +6646,8 @@ draw_source_details :: proc(ctx, font: rawptr, bright, muted, cyan: [4]f64) {
 	}
 	fill_overlay_rect(ctx, refetch_button, refetch_color)
 	if refetch_enabled {fill_overlay_border(ctx, refetch_button, UI_COLOR_COFFEE_64)}
-	draw_text_in_rect(ctx, font, "REFETCH / SELECT QUALITY", refetch_button, .Center, .Center, refetch_text_color)
+	action_label := source.kind == .Local ? (source.media_available ? "MANAGED COPY AVAILABLE" : "LOCATE ORIGINAL…") : "REFETCH / SELECT QUALITY"
+	draw_text_in_rect(ctx, font, action_label, refetch_button, .Center, .Center, refetch_text_color)
 }
 
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
@@ -7007,6 +7060,13 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	#partial switch ui.focus {
 	case .URL:
 		focus_rect = ui_control_rect(.URL)
+	case .Local_Source_Title:
+		if control := find_ui_control_by_action_and_index(
+			.Local_Source_Title,
+			ui.local_source_title_index,
+		); control != nil {
+			focus_rect = control.rect
+		}
 	case .Source_Search:
 		focus_rect = ui_control_rect(.Source_Search)
 	case .Transcript_Search:
@@ -7425,6 +7485,18 @@ draw_playback_fullscreen_transport :: proc(
 			cyan,
 		)
 	}
+	if !active_player_has_audio() {
+		warning := ui_theme_is_dark(ui.theme) ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
+		draw_text_in_rect(
+			ctx,
+			font,
+			"NO AUDIO TRACK",
+			transport.ready_status,
+			.Start,
+			.Center,
+			warning,
+		)
+	}
 	icon_control := player_fullscreen_toggle_control()
 	if icon_control != nil {
 		if contains(icon_control.rect, ui.mouse) {
@@ -7823,11 +7895,11 @@ build_overlay_commands :: proc(modal_only := false) {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			ui.source_playback_active ? "MEDIA READY" : "CLIP READY",
+			!active_player_has_audio() ? "NO AUDIO TRACK" : (ui.source_playback_active ? "MEDIA READY" : "CLIP READY"),
 			transport.ready_status,
 			.Start,
 			.Center,
-			cyan,
+			!active_player_has_audio() ? warning : cyan,
 		)
 		if ui.source_playback_active && ui.source_hint_menu_open && hint_control == .Menu {
 			values := source_hint_values(state.active_source, context.temp_allocator)
@@ -8438,7 +8510,7 @@ build_overlay_commands :: proc(modal_only := false) {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			ui.source_modal_refetch_index >= 0 ? "REFETCH SOURCE / SELECT QUALITY" : "ADD SOURCE / YOUTUBE INGEST",
+			ui.source_modal_refetch_index >= 0 ? "REFETCH SOURCE / SELECT QUALITY" : "ADD SOURCE / URL OR LOCAL VIDEO",
 			UI_Rect{modal.x + 20, modal.y + modal.h - 50, modal.w - 40, 50},
 			.Start,
 			.Center,
@@ -8447,7 +8519,7 @@ build_overlay_commands :: proc(modal_only := false) {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"Paste one YouTube URL per line. Standard youtube.com and youtu.be links are accepted.",
+			"Paste YouTube URLs, browse for local videos, or drop video files into the app.",
 			UI_Rect{modal.x + 24, modal.y + modal.h - 92, modal.w - 48, 22},
 			.Start,
 			.Center,
@@ -8456,7 +8528,7 @@ build_overlay_commands :: proc(modal_only := false) {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"Timestamps in t or start are parsed as the initial playhead position after import.",
+			"Local files are copied into the managed library and normalized only when required.",
 			UI_Rect{modal.x + 24, modal.y + modal.h - 116, modal.w - 48, 22},
 			.Start,
 			.Center,
@@ -8633,6 +8705,32 @@ build_overlay_commands :: proc(modal_only := false) {
 					if selected {fill_overlay_border(ctx, quality, cyan)}
 					draw_text_in_rect(ctx, small_font, fmt.tprintf("%dp", height), quality, .Center, .Center, selected ? cyan : muted)
 				}
+			}
+		}
+		if len(source_local_paths) > 0 {
+			for path, index in source_local_paths {
+				if index >= 4 {break}
+				row := source_local_row_rect(modal, index)
+				title_rect := source_local_title_rect(modal, index)
+				fill_overlay_rect(ctx, row, theme.row)
+				draw_text_in_rect(
+					ctx,
+					small_font,
+					fmt.tprintf("LOCAL / %s", filepath.base(path)),
+					UI_Rect{row.x + 8, row.y, row.w*0.40, row.h},
+					.Start,
+					.Center,
+					muted,
+				)
+				fill_overlay_rect(ctx, title_rect, theme.field)
+				if ui.focus == .Local_Source_Title && ui.local_source_title_index == index {
+					draw_editable_text_field(ctx, small_font, source_local_titles[index], "", title_rect, .Local_Source_Title, ink, dim, accent)
+				} else {
+					draw_text_in_rect(ctx, small_font, source_local_titles[index], UI_Rect{title_rect.x+8, title_rect.y, title_rect.w-16, title_rect.h}, .Start, .Center, ink)
+				}
+				remove := ui_control_rect_by_value(.Remove_Local_Source, index, 0)
+				fill_overlay_rect(ctx, remove, contains(remove, ui.mouse) ? theme.row_hover : theme.field)
+				draw_text_in_rect(ctx, small_font, "×", remove, .Center, .Center, muted)
 			}
 		}
 		cancel_color := theme.panel_alt
@@ -9936,6 +10034,30 @@ build_ui_controls_for_scope :: proc(
 			add_ax_element(array, element_class, "YouTube URLs", "AXTextField", import_field, .URL, flash_label = "youtube urls")
 		}
 		modal := source_modal_rect()
+		if !refetching {
+			add_ax_element(
+				array,
+				element_class,
+				"Browse for local video files",
+				"AXButton",
+				source_modal_browse_rect(modal),
+				.Browse_Source_Files,
+				flash_label = "browse source files",
+			)
+			for _, index in source_local_paths {
+				if index >= 4 {break}
+				add_ax_element(
+					array,
+					element_class,
+					fmt.tprintf("Title for local source %d", index+1),
+					"AXTextField",
+					source_local_title_rect(modal, index),
+					.Local_Source_Title,
+					index,
+					flash_label = "local source title",
+				)
+			}
+		}
 		for result, result_index in source_probe_results {
 			if result_index >= 5 {break}
 			row := source_probe_row_rect(modal, result_index)
@@ -10016,8 +10138,11 @@ build_ui_controls_for_scope :: proc(
 	}
 	if scope == .Active && ui.source_details_open {
 		modal := source_details_rect()
+		source := &state.sources[ui.source_details_index]
 		add_ax_element(array, element_class, "Close source details", "AXButton", source_details_close_rect(modal), .Close_Source_Details, flash_label = "close source details")
-		add_ax_element(array, element_class, "Refetch and select quality", "AXButton", source_details_refetch_rect(modal), .Refetch_Source_Details, flash_label = "refetch quality")
+		if source.kind == .YouTube || !source.media_available {
+			add_ax_element(array, element_class, source.kind == .Local ? "Locate original local video" : "Refetch and select quality", "AXButton", source_details_refetch_rect(modal), .Refetch_Source_Details, flash_label = source.kind == .Local ? "locate original" : "refetch quality")
+		}
 		validate_ui_controls()
 		return
 	}
@@ -10567,16 +10692,29 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 	case .Open_Source_Modal:
 		open_source_modal()
+	case .Browse_Source_Files:
+		on_browse_source_files(nil, nil, nil)
 	case .Cancel_Source_Modal:
 		request_modal_discard(.Source)
 	case .Close_Source_Details:
 		close_source_details()
 	case .Refetch_Source_Details:
-		open_refetch_source_modal(ui.source_details_index)
+		if ui.source_details_index >= 0 &&
+		   ui.source_details_index < len(state.sources) &&
+		   state.sources[ui.source_details_index].kind == .Local {
+			relink_local_source(ui.source_details_index)
+		} else {
+			open_refetch_source_modal(ui.source_details_index)
+		}
 	case .Open_Source_Details:
 		open_source_details(action.index)
 	case .URL:
 		focus_text_input(.URL)
+	case .Local_Source_Title:
+		ui.local_source_title_index = action.index
+		focus_text_input(.Local_Source_Title)
+	case .Remove_Local_Source:
+		return source_local_path_remove(action.index)
 	case .Import:
 		on_import(nil, nil, nil)
 	case .Source_Quality:
@@ -11482,6 +11620,7 @@ editable_action_for_focus :: proc(
 	case .Command_Palette: return .Command_Palette_Search, true
 	case .Settings_Search: return .Settings_Search, true
 	case .URL:              return .URL, true
+	case .Local_Source_Title:return .Local_Source_Title, true
 	case .Source_Search:    return .Source_Search, true
 	case .Transcript_Search:return .Transcript_Search, true
 	case .Clip_Search:  return .Clip_Search, true
@@ -11578,6 +11717,12 @@ update_text_pointer_selection :: proc(point: Point) -> bool {
 	kind, valid_kind := editable_action_for_focus(focus)
 	if !valid_kind {return false}
 	control := find_ui_control_by_action(kind)
+	if focus == .Local_Source_Title {
+		control = find_ui_control_by_action_and_index(
+			.Local_Source_Title,
+			ui.local_source_title_index,
+		)
+	}
 	target := focused_text()
 	if control == nil || target == nil {return false}
 	offset := editable_offset_at_point(control, focus, point)
@@ -11605,6 +11750,9 @@ activate_registered_target_at_point :: proc(
 	case .URL:
 		if ui.source_modal_refetch_index >= 0 {return true}
 		begin_text_pointer_selection(control, .URL, point, click_count)
+	case .Local_Source_Title:
+		ui.local_source_title_index = control.action.index
+		begin_text_pointer_selection(control, .Local_Source_Title, point, click_count)
 	case .Source_Search:
 		begin_text_pointer_selection(control, .Source_Search, point, click_count)
 	case .Transcript_Search:
@@ -12862,11 +13010,59 @@ register_delegate :: proc(app: Id) {
 	msg_void_id(app, sel_registerName("setDelegate:"), state.delegate_target)
 }
 
+NS_DRAG_OPERATION_NONE :: uint(0)
+NS_DRAG_OPERATION_COPY :: uint(1)
+
+source_file_drop_allowed :: proc() -> bool {
+	if ui.source_modal_open {return ui.source_modal_refetch_index < 0}
+	return !global_modal_blocks_commands() && !ui.library_import_confirm_open
+}
+
+on_metal_dragging_entered :: proc "c" (self: Id, command: Sel, sender: Id) -> uint {
+	context = runtime.default_context()
+	return source_file_drop_allowed() ? NS_DRAG_OPERATION_COPY : NS_DRAG_OPERATION_NONE
+}
+
+on_metal_perform_drag :: proc "c" (self: Id, command: Sel, sender: Id) -> bool {
+	context = runtime.default_context()
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if !source_file_drop_allowed() {
+		set_error_status("Close the active dialog before adding local source files")
+		return false
+	}
+	pasteboard := msg_id(sender, sel_registerName("draggingPasteboard"))
+	paths := msg_id_id(
+		pasteboard,
+		sel_registerName("propertyListForType:"),
+		nsstring("NSFilenamesPboardType"),
+	)
+	count := int(msg_uint(paths, sel_registerName("count")))
+	added := 0
+	for index in 0 ..< count {
+		path_value := msg_id_uint(paths, sel_registerName("objectAtIndex:"), uint(index))
+		utf8 := msg_id(path_value, sel_registerName("UTF8String"))
+		if utf8 != nil && source_local_path_append(string(cstring(utf8))) {added += 1}
+	}
+	if added == 0 {return false}
+	if !ui.source_modal_open {
+		if ui.mode != .Create {set_ui_mode(.Create)}
+		open_source_modal()
+	}
+	set_text(state.status, fmt.tprintf("Added %d dropped local source file(s)", added))
+	ui.needs_redraw = true
+	return true
+}
+
 register_metal_view_class :: proc() -> Id {
 	class := objc_allocateClassPair(objc_getClass("NSView"), "HWVideoClipsMetalView", 0)
 	if protocol := objc_getProtocol("NSTextInputClient"); protocol != nil {
 		class_addProtocol(class, protocol)
 	}
+	if protocol := objc_getProtocol("NSDraggingDestination"); protocol != nil {
+		class_addProtocol(class, protocol)
+	}
+	class_addMethod(class, sel_registerName("draggingEntered:"), rawptr(on_metal_dragging_entered), "Q@:@")
+	class_addMethod(class, sel_registerName("performDragOperation:"), rawptr(on_metal_perform_drag), "B@:@")
 	class_addMethod(
 		class,
 		sel_registerName("acceptsFirstResponder"),
@@ -13089,6 +13285,12 @@ video_clips_gui_initialize :: proc() -> bool {
 		sel_registerName("initWithFrame:"),
 		Rect{Point{0, 0}, frame.size},
 	)
+	drag_types := msg_id_id(
+		objc_getClass("NSArray"),
+		sel_registerName("arrayWithObject:"),
+		nsstring("NSFilenamesPboardType"),
+	)
+	msg_void_id(ui.view, sel_registerName("registerForDraggedTypes:"), drag_types)
 	msg_void_id(state.window, sel_registerName("setContentView:"), ui.view)
 
 	ui.device = MTLCreateSystemDefaultDevice()

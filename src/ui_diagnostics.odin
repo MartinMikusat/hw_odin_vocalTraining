@@ -2,7 +2,7 @@ package main
 
 import "core:encoding/json"
 import "core:fmt"
-import "core:os"
+import os "core:os/old"
 import "core:path/filepath"
 import "core:slice"
 import "core:strings"
@@ -497,7 +497,7 @@ ui_diagnostic_write_artifact :: proc(
 	)
 	if encode_error != nil {return false}
 	if !os.write_entire_file(path, encoded) {return false}
-	directory := filepath.dir(path, allocator)
+	directory := filepath.dir(path)
 	_ = ui_diagnostic_prune_artifacts(
 		directory,
 		UI_DIAGNOSTIC_ARTIFACT_RETENTION,
