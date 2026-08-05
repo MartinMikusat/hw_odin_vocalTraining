@@ -2060,8 +2060,8 @@ randomize_help_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 }
 
 data_modal_rect :: proc() -> UI_Rect {
-	width := min(max(560, ui.width * 0.5), 680)
-	height := min(max(430, ui.height * 0.52), 500)
+	width := min(max(620, ui.width * 0.48), 760)
+	height := min(max(450, ui.height * 0.5), 500)
 	return UI_Rect{(ui.width - width) / 2, (ui.height - height) / 2, width, height}
 }
 
@@ -2078,11 +2078,14 @@ discard_confirm_action_rect :: proc(index: int) -> UI_Rect {
 }
 
 data_modal_action_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
-	return UI_Rect{
-		modal.x + 24,
-		modal.y + modal.h - 116 - f64(row) * 52,
-		modal.w - 48,
-		40,
+	gap := 10.0
+	half_width := (modal.w - 48 - gap) / 2
+	switch row {
+	case 0: return {modal.x+24, modal.y+modal.h-194, half_width, 72}
+	case 1: return {modal.x+24+half_width+gap, modal.y+modal.h-194, half_width, 72}
+	case 2: return {modal.x+24, modal.y+modal.h-266, modal.w-48, 56}
+	case 3: return {modal.x+24, modal.y+modal.h-360, modal.w-48, 52}
+	case: return data_modal_close_rect(modal)
 	}
 }
 
@@ -6095,26 +6098,32 @@ draw_data_modal :: proc(
 		return
 	}
 
-	actions := [5]UI_Action_Kind{
+	draw_text_in_rect(
+		ctx,
+		font,
+		"PORTABLE LIBRARY",
+		UI_Rect{modal.x+24, modal.y+modal.h-108, modal.w-48, 24},
+		.Start,
+		.Center,
+		muted,
+	)
+	actions := [4]UI_Action_Kind{
 		.Export_Library,
 		.Export_Current_Workflow,
 		.Import_Library,
 		.Open_Data_Folder,
-		.Close_Data_Modal,
 	}
-	labels := [5]string{
-		"01  EXPORT ALL",
-		fmt.tprintf("02  EXPORT %s", ui.workflow == .Vocal ? "VOCAL" : "DANCING"),
-		"03  IMPORT",
-		"04  OPEN DATA FOLDER",
-		"05  CLOSE",
+	labels := [4]string{
+		"EXPORT ALL",
+		fmt.tprintf("EXPORT %s", ui.workflow == .Vocal ? "VOCAL" : "DANCING"),
+		"IMPORT AND REPLACE…",
+		"OPEN DATA FOLDER",
 	}
-	details := [5]string{
-		"Save both workflows as portable metadata",
-		"Save only the current workflow as portable metadata",
-		"Replace the scope stored by a portable metadata file",
-		"Show the active application-support directory in Finder",
-		"Return to the application",
+	details := [4]string{
+		"Both workflows / metadata only",
+		"Current workflow / metadata only",
+		"Choose a portable file, review its scope, then replace that scope",
+		"Reveal the managed library and media in Finder",
 	}
 	for kind, index in actions {
 		rect := ui_control_rect(kind)
@@ -6123,25 +6132,40 @@ draw_data_modal :: proc(
 		color := theme.panel_alt
 		if enabled && contains(rect, ui.mouse) {color = theme.row_hover}
 		fill_overlay_rect(ctx, rect, color)
+		if kind == .Import_Library {fill_overlay_border(ctx, rect, warning)}
 		draw_text_in_rect(
 			ctx,
 			font,
 			labels[index],
-			UI_Rect{rect.x + 12, rect.y + 14, rect.w - 24, 22},
+			UI_Rect{rect.x + 14, rect.y + rect.h - 31, rect.w - 28, 22},
 			.Start,
 			.Center,
-			enabled ? bright : dim,
+			enabled ? (kind == .Import_Library ? warning : bright) : dim,
 		)
 		draw_text_in_rect(
 			ctx,
 			font,
 			details[index],
-			UI_Rect{rect.x + 12, rect.y - 3, rect.w - 24, 20},
+			UI_Rect{rect.x + 14, rect.y + 7, rect.w - 28, 20},
 			.Start,
 			.Center,
 			enabled ? muted : dim,
 		)
 	}
+	draw_text_in_rect(
+		ctx,
+		font,
+		"STORAGE",
+		UI_Rect{modal.x+24, modal.y+modal.h-302, modal.w-48, 24},
+		.Start,
+		.Center,
+		muted,
+	)
+	close := ui_control_rect(.Close_Data_Modal)
+	close_color := theme.panel_alt
+	if contains(close, ui.mouse) {close_color = theme.row_hover}
+	fill_overlay_rect(ctx, close, close_color)
+	draw_text_in_rect(ctx, font, "CLOSE", close, .Center, .Center, muted)
 }
 
 draw_library_recovery :: proc(
@@ -10003,7 +10027,7 @@ build_ui_controls_for_scope :: proc(
 				element_class,
 				"Close library data",
 				"AXButton",
-				data_modal_action_rect(modal, 4),
+				data_modal_close_rect(modal),
 				.Close_Data_Modal,
 				flash_label = "close data",
 			)
