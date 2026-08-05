@@ -137,6 +137,11 @@ Source_Paste_Result :: enum {
 	Opened,
 }
 
+Source_Add_Mode :: enum {
+	URL,
+	Local_Files,
+}
+
 WORKFLOW_COUNT :: 2
 VIDEO_FRAME_RETRY_TICKS :: uint(120)
 
@@ -231,6 +236,7 @@ UI_State :: struct {
 	clip_rename_initial_hash: u64,
 	source_modal_open:  bool,
 	source_modal_refetch_index: int,
+	source_add_mode: Source_Add_Mode,
 	local_source_title_index: int,
 	source_details_open: bool,
 	source_details_index: int,
@@ -508,6 +514,8 @@ UI_Action_Kind :: enum {
 	Workflow_Toggle,
 	Mode_Toggle,
 	Open_Source_Modal,
+	Source_Mode_URL,
+	Source_Mode_Local_Files,
 	Browse_Source_Files,
 	Cancel_Source_Modal,
 	Close_Source_Details,
@@ -1854,7 +1862,7 @@ source_modal_input_line_count :: proc(input: string) -> int {
 
 source_modal_input_rect_for_text :: proc(modal: UI_Rect, input: string) -> UI_Rect {
 	height := 32.0 + f64(source_modal_input_line_count(input) - 1) * 23
-	return UI_Rect{modal.x + 24, modal.y + modal.h - 180 - height, modal.w - 48, height}
+	return UI_Rect{modal.x + 24, modal.y + modal.h - 218 - height, modal.w - 48, height}
 }
 
 source_modal_input_rect :: proc(modal: UI_Rect) -> UI_Rect {
@@ -1881,8 +1889,8 @@ source_probe_row_rect :: proc(modal: UI_Rect, index: int) -> UI_Rect {
 }
 
 source_local_row_rect :: proc(modal: UI_Rect, index: int) -> UI_Rect {
-	input := source_modal_input_rect(modal)
-	return UI_Rect{input.x, input.y - 30 - f64(index)*32, input.w, 28}
+	drop := source_local_drop_rect(modal)
+	return UI_Rect{drop.x, drop.y - 36 - f64(index)*36, drop.w, 32}
 }
 
 source_local_title_rect :: proc(modal: UI_Rect, index: int) -> UI_Rect {
@@ -1930,7 +1938,19 @@ source_modal_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
 }
 
 source_modal_browse_rect :: proc(modal: UI_Rect) -> UI_Rect {
-	return UI_Rect{modal.x + modal.w - 204, modal.y + modal.h - 142, 180, 30}
+	drop := source_local_drop_rect(modal)
+	return UI_Rect{drop.x + drop.w - 196, drop.y + 28, 172, 36}
+}
+
+source_local_drop_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + modal.h - 310, modal.w - 48, 104}
+}
+
+source_modal_mode_rect :: proc(modal: UI_Rect, mode: Source_Add_Mode) -> UI_Rect {
+	width := (modal.w - 54) / 2
+	x := modal.x + 24
+	if mode == .Local_Files {x += width + 6}
+	return UI_Rect{x, modal.y + modal.h - 108, width, 30}
 }
 
 source_details_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
@@ -2468,6 +2488,7 @@ open_source_modal :: proc() {
 	cancel_ui_flash()
 	if ui.source_details_open {close_source_details()}
 	ui.source_modal_refetch_index = -1
+	ui.source_add_mode = .URL
 	ui.local_source_title_index = -1
 	ui.source_modal_open = true
 	ui.save_source_browser_choice = false
@@ -2589,6 +2610,7 @@ handle_global_source_paste :: proc(text: string) -> Source_Paste_Result {
 		schedule_source_probe(1)
 	}
 	if !ui.source_modal_open {open_source_modal()} else {focus_text_input(.URL)}
+	ui.source_add_mode = .URL
 	collapse_text_selection(len(ui.url_input))
 	ui.needs_redraw = true
 	return .Opened
@@ -2600,6 +2622,7 @@ open_refetch_source_modal :: proc(source_index: int) {
 	if source_index < 0 || source_index >= len(state.sources) {return}
 	if ui.source_details_open {close_source_details()}
 	ui.source_modal_refetch_index = source_index
+	ui.source_add_mode = .URL
 	ui.source_modal_open = true
 	ui.save_source_browser_choice = false
 	ui.focus = .None
@@ -8492,6 +8515,8 @@ build_overlay_commands :: proc(modal_only := false) {
 
 	if ui.source_modal_open {
 		modal := source_modal_rect()
+		refetching := ui.source_modal_refetch_index >= 0
+		show_url := refetching || ui.source_add_mode == .URL
 		input := ui_control_rect(.URL)
 		if input.w == 0 {input = source_modal_input_rect(modal)}
 		cancel := ui_control_rect(.Cancel_Source_Modal)
@@ -8510,26 +8535,27 @@ build_overlay_commands :: proc(modal_only := false) {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			ui.source_modal_refetch_index >= 0 ? "REFETCH SOURCE / SELECT QUALITY" : "ADD SOURCE / URL OR LOCAL VIDEO",
+			refetching ? "REFETCH SOURCE / SELECT QUALITY" : (show_url ? "ADD SOURCE / YOUTUBE URL" : "ADD SOURCE / LOCAL FILES"),
 			UI_Rect{modal.x + 20, modal.y + modal.h - 50, modal.w - 40, 50},
 			.Start,
 			.Center,
 			bright,
 		)
+		if !refetching {
+			modes := [2]Source_Add_Mode{.URL, .Local_Files}
+			for mode in modes {
+				tab := source_modal_mode_rect(modal, mode)
+				selected := mode == ui.source_add_mode
+				fill_overlay_rect(ctx, tab, selected ? theme.row_hover : theme.field)
+				if selected {fill_overlay_border(ctx, tab, accent)}
+			draw_text_in_rect(ctx, small_font, mode == .URL ? "YOUTUBE URL" : "LOCAL FILES", tab, .Center, .Center, selected ? accent : muted)
+			}
+		}
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"Paste YouTube URLs, browse for local videos, or drop video files into the app.",
-			UI_Rect{modal.x + 24, modal.y + modal.h - 92, modal.w - 48, 22},
-			.Start,
-			.Center,
-			ink,
-		)
-		draw_text_in_rect(
-			ctx,
-			small_font,
-			"Local files are copied into the managed library and normalized only when required.",
-			UI_Rect{modal.x + 24, modal.y + modal.h - 116, modal.w - 48, 22},
+			show_url ? "Paste one or more YouTube URLs, with one URL per line." : "Choose local videos or drop video files into the app.",
+			UI_Rect{modal.x + 24, modal.y + modal.h - 150, modal.w - 48, 22},
 			.Start,
 			.Center,
 			muted,
@@ -8537,12 +8563,13 @@ build_overlay_commands :: proc(modal_only := false) {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			"Examples: ?t=1m30s  /  ?start=90  /  youtu.be/VIDEO?t=45",
-			UI_Rect{modal.x + 24, modal.y + modal.h - 140, modal.w - 48, 22},
+			show_url ? "Examples: ?t=1m30s  /  ?start=90  /  youtu.be/VIDEO?t=45" : "Files are copied into the managed library and normalized only when required.",
+			UI_Rect{modal.x + 24, modal.y + modal.h - 174, modal.w - 48, 22},
 			.Start,
 			.Center,
 			cyan,
 		)
+		if show_url {
 		fill_overlay_rect(ctx, input, theme.field)
 		if ui.focus == .URL && ui.source_modal_refetch_index < 0 {
 			fill_overlay_border(ctx, input, accent)
@@ -8707,6 +8734,16 @@ build_overlay_commands :: proc(modal_only := false) {
 				}
 			}
 		}
+		} else {
+			drop := source_local_drop_rect(modal)
+			browse := ui_control_rect(.Browse_Source_Files)
+			fill_overlay_rect(ctx, drop, theme.field)
+			fill_overlay_border(ctx, drop, contains(drop, ui.mouse) ? accent : theme.row_hover)
+			draw_text_in_rect(ctx, small_font, "DROP VIDEO FILES", UI_Rect{drop.x+24, drop.y+48, drop.w-244, 28}, .Start, .Center, bright)
+			draw_text_in_rect(ctx, small_font, "MP4, MOV, M4V, and other FFmpeg-readable video", UI_Rect{drop.x+24, drop.y+22, drop.w-244, 24}, .Start, .Center, muted)
+			fill_overlay_rect(ctx, browse, contains(browse, ui.mouse) ? theme.row_hover : theme.field)
+			fill_overlay_border(ctx, browse, accent)
+			draw_text_in_rect(ctx, small_font, "BROWSE FILES…", browse, .Center, .Center, accent)
 		if len(source_local_paths) > 0 {
 			for path, index in source_local_paths {
 				if index >= 4 {break}
@@ -8733,11 +8770,12 @@ build_overlay_commands :: proc(modal_only := false) {
 				draw_text_in_rect(ctx, small_font, "×", remove, .Center, .Center, muted)
 			}
 		}
+		}
 		cancel_color := theme.panel_alt
 		if contains(cancel, ui.mouse) {cancel_color = theme.row_hover}
 		fill_overlay_rect(ctx, cancel, cancel_color)
 		draw_text_in_rect(ctx, small_font, "CANCEL", cancel, .Center, .Center, muted)
-		refetch := ui.source_modal_refetch_index >= 0
+		refetch := refetching
 		confirm_color := theme.panel_alt
 		confirm_border := refetch ? UI_COLOR_COFFEE_64 : accent
 		confirm_text := confirm_border
@@ -8747,7 +8785,7 @@ build_overlay_commands :: proc(modal_only := false) {
 		draw_text_in_rect(
 			ctx,
 			small_font,
-			ui.source_modal_refetch_index >= 0 ? "REFETCH" : "ADD SOURCE",
+			refetching ? "REFETCH" : (show_url ? "ADD URL" : "ADD FILES"),
 			confirm,
 			.Center,
 			.Center,
@@ -10030,11 +10068,16 @@ build_ui_controls_for_scope :: proc(
 	}
 	if scope == .Active && ui.source_modal_open {
 		refetching := ui.source_modal_refetch_index >= 0
-		if ui.source_modal_refetch_index < 0 {
+		local_mode := !refetching && ui.source_add_mode == .Local_Files
+		if !refetching {
+			add_ax_element(array, element_class, "Use YouTube URL source input", "AXButton", source_modal_mode_rect(source_modal_rect(), .URL), .Source_Mode_URL, flash_label="youtube source mode")
+			add_ax_element(array, element_class, "Use local file source input", "AXButton", source_modal_mode_rect(source_modal_rect(), .Local_Files), .Source_Mode_Local_Files, flash_label="local file source mode")
+		}
+		if !local_mode {
 			add_ax_element(array, element_class, "YouTube URLs", "AXTextField", import_field, .URL, flash_label = "youtube urls")
 		}
 		modal := source_modal_rect()
-		if !refetching {
+		if local_mode {
 			add_ax_element(
 				array,
 				element_class,
@@ -10058,6 +10101,7 @@ build_ui_controls_for_scope :: proc(
 				)
 			}
 		}
+		if !local_mode {
 		for result, result_index in source_probe_results {
 			if result_index >= 5 {break}
 			row := source_probe_row_rect(modal, result_index)
@@ -10122,6 +10166,7 @@ build_ui_controls_for_scope :: proc(
 					functional_name = fmt.tprintf("quality %dp %s", height, result.video_id),
 				)
 			}
+		}
 		}
 		add_ax_element(
 			array,
@@ -10692,6 +10737,16 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		set_ui_mode(ui.mode == .Create ? .Play : .Create)
 	case .Open_Source_Modal:
 		open_source_modal()
+	case .Source_Mode_URL:
+		ui.source_add_mode = .URL
+		ui.local_source_title_index = -1
+		focus_text_input(.URL)
+		ui.needs_redraw = true
+	case .Source_Mode_Local_Files:
+		ui.source_add_mode = .Local_Files
+		ui.focus = .None
+		text_input.end_pointer_selection(&ui.input_state)
+		ui.needs_redraw = true
 	case .Browse_Source_Files:
 		on_browse_source_files(nil, nil, nil)
 	case .Cancel_Source_Modal:
@@ -13048,6 +13103,8 @@ on_metal_perform_drag :: proc "c" (self: Id, command: Sel, sender: Id) -> bool {
 		if ui.mode != .Create {set_ui_mode(.Create)}
 		open_source_modal()
 	}
+	ui.source_add_mode = .Local_Files
+	ui.focus = .None
 	set_text(state.status, fmt.tprintf("Added %d dropped local source file(s)", added))
 	ui.needs_redraw = true
 	return true

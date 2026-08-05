@@ -160,6 +160,7 @@ local_source_stage :: proc(job: ^Import_Job, path, staged_path: string, probe: L
 
 import_job_process_local :: proc(job: ^Import_Job) -> bool {
 	allocator := mem_virtual.arena_allocator(job.arena)
+	import_job_set_phase(job, .Inspecting_Local_Media)
 	hash, hashed := local_source_sha256(job.local_path, allocator)
 	if !hashed {return false}
 	job.last_video_id = fmt.aprintf("local-%s", hash, allocator=allocator)
@@ -196,9 +197,9 @@ import_job_process_local :: proc(job: ^Import_Job) -> bool {
 	)
 	_ = os.remove(staged_path)
 	defer _ = os.remove(staged_path)
-	import_job_set_phase(job, .Downloading)
+	import_job_set_phase(job, .Processing_Local_Media)
 	if !local_source_stage(job, job.local_path, staged_path, probe) {return false}
-	import_job_set_phase(job, .Validating_Downloaded_Media)
+	import_job_set_phase(job, .Validating_Local_Media)
 	if !media_file_validate_tracks(staged_path, probe.has_audio) {return false}
 	media_path := fmt.aprintf("%s/%s.mp4", directory, job.last_video_id, allocator=allocator)
 	if !os.rename(staged_path, media_path) {return false}

@@ -192,6 +192,9 @@ ffprobe_helper_status: Helper_Status
 
 Import_Phase :: enum {
 	Preparing,
+	Inspecting_Local_Media,
+	Processing_Local_Media,
+	Validating_Local_Media,
 	Validating_Existing_Media,
 	Downloading,
 	Validating_Downloaded_Media,
@@ -733,6 +736,12 @@ import_progress_status :: proc(job: ^Import_Job, contents: string) -> string {
 	switch import_job_phase(job) {
 	case .Preparing:
 		return fmt.tprintf("%spreparing media", prefix)
+	case .Inspecting_Local_Media:
+		return fmt.tprintf("%sinspecting local media", prefix)
+	case .Processing_Local_Media:
+		return fmt.tprintf("%scopying or normalizing local media", prefix)
+	case .Validating_Local_Media:
+		return fmt.tprintf("%svalidating local media", prefix)
 	case .Validating_Existing_Media:
 		return fmt.tprintf("%svalidating existing media", prefix)
 	case .Downloading:
@@ -772,8 +781,10 @@ refresh_import_progress :: proc() {
 				job.recovery_total,
 			)
 		}
+		operation := job.library_recovery_source ? "Library recovery" : (len(job.local_path) > 0 ? "Local file import" : "Media download")
+		detail := len(job.local_path) > 0 ? "The application inspects, copies or normalizes, validates, and registers the local media." : "The application downloads, validates, and registers the source media."
 		fields := [3]Notification_Field{
-			{label="Operation", value=job.library_recovery_source ? "Library recovery" : "Media import"},
+			{label="Operation", value=operation},
 			{label="Source", value=source_progress},
 			{label="Phase", value=fmt.tprintf("%v", phase)},
 		}
@@ -784,7 +795,7 @@ refresh_import_progress :: proc() {
 		_ = notification_update(
 			job.notification_id,
 			status,
-			"The application validates local media, downloads missing media, and rebuilds saved clips.",
+			detail,
 			fields[:],
 			persist_now = phase_changed,
 		)
@@ -2965,11 +2976,14 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 		set_text(state.status, "Wait for the queued library replacement")
 		return
 	}
-	has_local := len(source_local_paths) > 0
+	local_mode := ui.source_modal_refetch_index < 0 && ui.source_add_mode == .Local_Files
+	has_local := local_mode && len(source_local_paths) > 0
 	if !require_helper("ffmpeg") {return}
 	if has_local && !require_helper("ffprobe") {return}
-	input := strings.trim_space(field_text(state.url_input))
-	if len(input) == 0 && !has_local { set_text(state.status, "Paste a YouTube URL or choose a local video file"); return }
+	input := ""
+	if !local_mode {input = strings.trim_space(field_text(state.url_input))}
+	if local_mode && !has_local {set_text(state.status, "Choose or drop at least one local video file"); return}
+	if !local_mode && len(input) == 0 {set_text(state.status, "Paste at least one YouTube URL"); return}
 	if len(input) > 0 && !require_helper("yt-dlp") {return}
 	if len(input) > 0 && source_probe_job != nil {set_text(state.status, "Wait for the metadata check to finish"); return}
 	if len(input) > 0 && !source_probe_ready(input) {
@@ -3038,6 +3052,7 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 		}
 		queued += 1
 	}
+	if local_mode {
 	for path, index in source_local_paths {
 		title := index < len(source_local_titles) ? source_local_titles[index] : ""
 		job := import_job_create_local(path, title)
@@ -3056,6 +3071,7 @@ on_import :: proc "c" (self: Id, command: Sel, sender: Id) {
 			continue
 		}
 		queued += 1
+	}
 	}
 	if queued == 0 {
 		set_text(state.status, "Unable to queue the source download")

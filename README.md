@@ -143,11 +143,12 @@ already open, it appends new URL lines and skips exact duplicates. Other
 clipboard text keeps its normal focused-field paste behavior.
 
 Press **Add** in the Source Register to open the ingest dialog manually, then
-paste one or more YouTube URLs with one URL per line, select **Browse Files…**,
-or drop local video files into the application. A drop preserves the active
-workflow, switches to Sources, and opens Add Source. The dialog combines URLs
-and local files in one batch. Local titles default to filenames without their
-extensions and remain editable until import.
+select either **YouTube URL** or **Local Files**. URL mode accepts one YouTube
+URL per line. Local Files mode accepts **Browse Files…** selections and file
+drops. A drop preserves the active workflow, switches to Sources, opens Add
+Source directly in Local Files mode, and stages only the dropped files. Local
+titles default to filenames without their extensions and remain editable until
+import.
 
 The application calculates each local file's SHA-256 and reuses an existing
 source when the same content already exists in the active workflow. It copies
