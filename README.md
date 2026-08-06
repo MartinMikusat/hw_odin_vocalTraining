@@ -133,8 +133,9 @@ Dancing **Mirror** flips only the decoded video texture horizontally. Text and
 controls retain their normal direction. **Count-in** cycles through Off, 4,
 and 8. The app draws the count over the video at the saved BPM and does not
 produce count audio. **Count Each Loop** repeats the visual count before each
-loop. Pause and resume do not start another count. **Loop** restarts the active
-clip and takes priority over Autoplay.
+loop. Selecting a clip or pressing Play from the beginning starts the count.
+Pause and resume from a later timestamp do not start another count. **Loop**
+restarts the active clip and takes priority over Autoplay.
 
 The app analyzes each Dancing clip's audio in the background and shows the
 result below the count-in BPM controls. A suitable unambiguous result can

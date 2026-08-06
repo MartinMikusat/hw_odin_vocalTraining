@@ -3715,6 +3715,12 @@ paused_scrub_does_not_start_audio_during_frame_warmup_test :: proc(t: ^testing.T
 	complete_video_frame_refresh()
 	testing.expect(t, !ui.video_frame_warmup_active)
 	testing.expect_value(t, msg_f32(state.player, sel_registerName("rate")), f32(0))
+
+	stop_player_playback()
+	testing.expect(t, !ui.video_frame_warmup_pending)
+	testing.expect(t, !ui.video_frame_warmup_active)
+	testing.expect_value(t, ui.video_frame_warmup_due_tick, uint(0))
+	testing.expect_value(t, msg_f32(state.player, sel_registerName("rate")), f32(0))
 }
 
 @(test)
@@ -4772,6 +4778,21 @@ dancing_count_in_interval_uses_saved_bpm_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, dance_count_in_interval_ms(40), i64(1500))
 	testing.expect_value(t, dance_count_in_interval_ms(120), i64(500))
 	testing.expect_value(t, dance_count_in_interval_ms(240), i64(250))
+}
+
+@(test)
+dancing_count_in_starts_when_play_resumes_from_beginning_test :: proc(
+	t: ^testing.T,
+) {
+	clip := Clip{workflow=.Dancing, dance_count_in_beats=4}
+	testing.expect(t, dance_count_in_should_start_on_resume(&clip, 0, false))
+	testing.expect(t, dance_count_in_should_start_on_resume(&clip, 0.04, false))
+	testing.expect(t, !dance_count_in_should_start_on_resume(&clip, 0.06, false))
+	testing.expect(t, !dance_count_in_should_start_on_resume(&clip, 0, true))
+	clip.dance_count_in_beats = 0
+	testing.expect(t, !dance_count_in_should_start_on_resume(&clip, 0, false))
+	clip = Clip{workflow=.Vocal, dance_count_in_beats=4}
+	testing.expect(t, !dance_count_in_should_start_on_resume(&clip, 0, false))
 }
 
 @(test)

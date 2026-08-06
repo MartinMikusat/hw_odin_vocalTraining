@@ -1127,10 +1127,15 @@ rename_clip :: proc(index: int, name: string) -> bool {
 	return true
 }
 
-seek_video_seconds :: proc(seconds: f64) {
+seek_video_seconds :: proc(
+	seconds: f64,
+	warm_paused_frame := true,
+	exact := false,
+) {
 	if state.player == nil { return }
 	t := CMTime{value=i64(seconds*600), timescale=600, flags=1}
 	tolerance := CMTime{value=10, timescale=600, flags=1}
+	if exact {tolerance = CMTime{value=0, timescale=1, flags=1}}
 	msg_void_time_time_time(
 		state.player,
 		sel_registerName("seekToTime:toleranceBefore:toleranceAfter:"),
@@ -1139,18 +1144,23 @@ seek_video_seconds :: proc(seconds: f64) {
 		tolerance,
 	)
 	request_video_frame_refresh()
-	if msg_f32(state.player, sel_registerName("rate")) == 0 {
+	if warm_paused_frame &&
+	   msg_f32(state.player, sel_registerName("rate")) == 0 {
 		request_paused_video_frame_warmup()
 	}
 }
 
-seek_seconds :: proc(seconds: f64) {
+seek_seconds :: proc(
+	seconds: f64,
+	warm_paused_frame := true,
+	exact := false,
+) {
 	if state.player == nil { return }
 	cancel_dance_count_in()
 	ui.playback_completion_pending = false
 	request_transcript_follow_to(seconds)
 	resume := playback_actively_playing()
-	seek_video_seconds(seconds)
+	seek_video_seconds(seconds, warm_paused_frame, exact)
 	metal_audio_seek(seconds, resume)
 }
 
@@ -1162,19 +1172,24 @@ scrub_player_by :: proc(delta: f64) {
 	ui.needs_redraw = true
 }
 
-start_loaded_playback_at :: proc(seconds: f64) {
+start_prepared_playback :: proc() {
 	if state.player == nil {return}
 	cancel_paused_video_frame_warmup()
 	cancel_dance_count_in()
 	ui.playback_completion_pending = false
-	request_transcript_follow_to(seconds)
-	seek_video_seconds(seconds)
-	metal_audio_seek(seconds, false)
 	if metal_audio_play() {
 		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
 	} else {
 		set_error_status("Unable to start audio playback")
 	}
+}
+
+start_loaded_playback_at :: proc(seconds: f64) {
+	if state.player == nil {return}
+	request_transcript_follow_to(seconds)
+	seek_video_seconds(seconds)
+	metal_audio_seek(seconds, false)
+	start_prepared_playback()
 }
 
 cancel_dance_count_in :: proc() {
@@ -1189,6 +1204,18 @@ dance_count_in_interval_ms :: proc(bpm: int) -> i64 {
 	return max(i64(1), i64(60_000 / max(1, bpm)))
 }
 
+dance_count_in_should_start_on_resume :: proc(
+	clip: ^Clip,
+	seconds: f64,
+	already_active: bool,
+) -> bool {
+	return !already_active &&
+	       clip != nil &&
+	       clip.workflow == .Dancing &&
+	       clip.dance_count_in_beats > 0 &&
+	       seconds <= 0.05
+}
+
 begin_dance_count_in :: proc(for_loop: bool) -> bool {
 	clip := active_dance_clip()
 	if state.player == nil ||
@@ -1198,9 +1225,10 @@ begin_dance_count_in :: proc(for_loop: bool) -> bool {
 		return false
 	}
 	cancel_dance_count_in()
+	cancel_paused_video_frame_warmup()
 	msg_void(state.player, sel_registerName("pause"))
 	metal_audio_pause()
-	seek_video_seconds(0)
+	seek_video_seconds(0, false, true)
 	metal_audio_seek(0, false)
 	request_transcript_follow_to(0)
 	ui.playback_completion_pending = false
@@ -1242,7 +1270,7 @@ advance_dance_count_in :: proc(now_ms: i64) -> bool {
 		changed = true
 		if ui.count_in_remaining <= 0 {
 			cancel_dance_count_in()
-			start_loaded_playback_at(0)
+			start_prepared_playback()
 			break
 		}
 		ui.count_in_value += 1
@@ -1319,11 +1347,12 @@ select_source_hint :: proc(source_index: int, seconds: f64) -> bool {
 
 stop_player_playback :: proc() {
 	if state.player == nil {return}
+	cancel_paused_video_frame_warmup()
 	cancel_dance_count_in()
 	ui.playback_completion_pending = false
 	msg_void(state.player, sel_registerName("pause"))
 	metal_audio_pause()
-	seek_seconds(0)
+	seek_seconds(0, false, true)
 	ui.needs_redraw = true
 }
 
@@ -1338,9 +1367,18 @@ pause_player_playback :: proc() {
 
 resume_player_playback :: proc() -> bool {
 	if state.player == nil {return false}
+	if ui.count_in_active {return true}
 	cancel_paused_video_frame_warmup()
 	seconds, ok := current_seconds()
 	if !ok {return false}
+	if dance_count_in_should_start_on_resume(
+		active_dance_clip(),
+		seconds,
+		ui.count_in_active,
+	) {
+		start_active_clip_from_beginning(false)
+		return ui.count_in_active
+	}
 	if playback_position_finished(seconds, ui.player_duration) {
 		start_active_clip_from_beginning(false)
 		return ui.count_in_active ||
