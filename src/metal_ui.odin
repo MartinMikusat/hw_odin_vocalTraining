@@ -354,6 +354,7 @@ Player_Transport_Layout :: struct {
 	ready_status: UI_Rect,
 	fullscreen:   UI_Rect,
 	timeline:     UI_Rect,
+	waveform:     UI_Rect,
 	row_count:    int,
 	footer_height: f64,
 }
@@ -3767,6 +3768,8 @@ PLAYER_TRANSPORT_ONE_ROW_WIDTH :: 902.0
 PLAYER_TRANSPORT_TWO_ROW_WIDTH :: 610.0
 PLAYER_TRANSPORT_THREE_ROW_WIDTH :: 410.0
 PLAYER_TRANSPORT_MINIMUM_WIDTH :: 284.0
+PLAYER_WAVEFORM_HEIGHT :: 64.0
+PLAYER_WAVEFORM_GAP :: 6.0
 
 player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_Layout) {
 	inner_x := player.x + PLAYER_TRANSPORT_INSET_X
@@ -3846,11 +3849,19 @@ player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_La
 	result.fullscreen = {inner_x+inner_w-24, status_y+3, 24, 24}
 	result.timeline = {
 		inner_x,
-		player.y+f64(result.row_count)*PLAYER_TRANSPORT_ROW_PITCH+6,
+		player.y+f64(result.row_count)*PLAYER_TRANSPORT_ROW_PITCH+PLAYER_WAVEFORM_GAP,
 		inner_w,
 		18,
 	}
-	result.footer_height = f64(result.row_count+1)*PLAYER_TRANSPORT_ROW_PITCH
+	result.waveform = {
+		inner_x,
+		player.y+f64(result.row_count)*PLAYER_TRANSPORT_ROW_PITCH+PLAYER_WAVEFORM_GAP,
+		inner_w,
+		PLAYER_WAVEFORM_HEIGHT,
+	}
+	result.footer_height = f64(result.row_count)*PLAYER_TRANSPORT_ROW_PITCH+
+	                       PLAYER_WAVEFORM_GAP+PLAYER_WAVEFORM_HEIGHT+
+	                       PLAYER_WAVEFORM_GAP
 	return
 }
 
@@ -3900,12 +3911,12 @@ source_speed_up_rect :: proc(player: UI_Rect) -> UI_Rect {
 }
 
 source_timeline_rect :: proc(player: UI_Rect) -> UI_Rect {
-	return player_transport_layout(player).timeline
+	return player_transport_layout(player).waveform
 }
 
 player_timeline_seconds :: proc(point: Point, player: UI_Rect) -> f64 {
-	timeline := player_transport_layout(player).timeline
-	return timeline_seconds_at_point(point, timeline, ui.player_duration)
+	waveform := player_transport_layout(player).waveform
+	return waveform_seconds_at_point(point, waveform, ui.player_duration)
 }
 
 timeline_seconds_at_point :: proc(point: Point, timeline: UI_Rect, duration: f64) -> f64 {
@@ -3949,7 +3960,11 @@ seek_player_timeline :: proc(point: Point, player: UI_Rect) {
 
 seek_player_timeline_rect :: proc(point: Point, timeline: UI_Rect) {
 	if state.player == nil {return}
-	seek_seconds(timeline_seconds_at_point(point, timeline, ui.player_duration))
+	seconds := timeline_seconds_at_point(point, timeline, ui.player_duration)
+	if !ui.playback_fullscreen_active {
+		seconds = waveform_seconds_at_point(point, timeline, ui.player_duration)
+	}
+	seek_seconds(seconds)
 	ui.needs_redraw = true
 }
 
@@ -4046,10 +4061,11 @@ dance_clip_adjust_bpm :: proc(clip: ^Clip, delta: int) -> bool {
 	if clip == nil || delta == 0 {return false}
 	adjusted := clamp(clip.dance_count_in_bpm + delta, 40, 240)
 	if adjusted == clip.dance_count_in_bpm {return false}
+	had_beat_grid := dance_beat_grid_available(clip)
 	clip.dance_count_in_bpm = adjusted
 	clip.dance_bpm_user_set = true
 	clip.dance_beat_period_seconds = 60.0 / f64(adjusted)
-	if clip.dance_beat_phase_user_set {
+	if had_beat_grid {
 		clip.dance_beat_grid_offset_seconds = bpm_normalize_grid_offset(
 			clip.dance_beat_grid_offset_seconds,
 			clip.dance_beat_period_seconds,
@@ -7113,6 +7129,81 @@ draw_source_delete_confirmation :: proc(ctx, font: rawptr, bright, muted, danger
 	draw_text_in_rect(ctx, font, "DELETE SOURCE", confirm, .Center, .Center, danger)
 }
 
+build_player_waveform_geometry :: proc(
+	vertices: ^[dynamic]Solid_Vertex,
+	rect: UI_Rect,
+	field, rule, future, accent: [4]f32,
+) {
+	if rect.w <= 0 || rect.h <= 0 {return}
+	push_rect(vertices, rect, field, "waveform")
+	center_y := rect.y+rect.h/2
+	push_rect(vertices, {rect.x, center_y, rect.w, 1}, rule, "waveform")
+	start, end := waveform_view_range(ui.player_duration)
+	entry := waveform_cache_active()
+	if entry != nil && len(entry.peaks) > 0 && entry.rate_hz > 0 && end > start {
+		first := clamp(int(math.floor(start*entry.rate_hz)), 0, len(entry.peaks)-1)
+		last := clamp(int(math.ceil(end*entry.rate_hz)), first+1, len(entry.peaks))
+		largest := f64(0.05)
+		for peak in entry.peaks[first:last] {
+			largest = max(largest, abs(f64(peak.minimum)), abs(f64(peak.maximum)))
+		}
+		columns := max(1, int(math.ceil(rect.w)))
+		seconds, has_seconds := current_seconds()
+		for column in 0 ..< columns {
+			column_start := start+(end-start)*f64(column)/f64(columns)
+			column_end := start+(end-start)*f64(column+1)/f64(columns)
+			peak_start := clamp(int(math.floor(column_start*entry.rate_hz)), first, last-1)
+			peak_end := clamp(int(math.ceil(column_end*entry.rate_hz)), peak_start+1, last)
+			minimum, maximum := f64(0), f64(0)
+			for peak in entry.peaks[peak_start:peak_end] {
+				minimum = min(minimum, f64(peak.minimum))
+				maximum = max(maximum, f64(peak.maximum))
+			}
+			half_height := rect.h/2-3
+			y0 := center_y+minimum/largest*half_height
+			y1 := center_y+maximum/largest*half_height
+			color := future
+			if !has_seconds || column_end <= seconds {color = accent}
+			push_rect(
+				vertices,
+				{rect.x+f64(column), y0, 1, max(1, y1-y0)},
+				color,
+				"waveform",
+			)
+		}
+	}
+
+	clip := active_dance_clip()
+	if dance_beat_grid_available(clip) && end > start {
+		period := dance_beat_period(clip)
+		offset := dance_grid_offset_normalized(clip)
+		beat_index := waveform_first_beat_index(start, offset, period)
+		for {
+			beat_seconds := offset+f64(beat_index)*period
+			if beat_seconds > end {break}
+			if beat_seconds >= start {
+				ratio := (beat_seconds-start)/(end-start)
+				x := rect.x+ratio*rect.w
+				color := UI_COLOR_GUM_32
+				color[3] = 0.72
+				width := 1.0
+				if waveform_beat_is_downbeat(beat_index) {
+					color = accent
+					width = 2
+				}
+				push_rect(vertices, {x-width/2, rect.y, width, rect.h}, color, "waveform-beat")
+			}
+			beat_index += 1
+		}
+	}
+	if seconds, ok := current_seconds(); ok && end > start &&
+	   seconds >= start && seconds <= end {
+		x := rect.x+(seconds-start)/(end-start)*rect.w
+		push_rect(vertices, {x-1, rect.y, 2, rect.h}, UI_COLOR_SAND_32, "waveform-playhead")
+	}
+	push_border(vertices, rect, rule)
+}
+
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	previous_lookup := ui_base_control_lookup
 	ui_base_control_lookup = true
@@ -7346,20 +7437,14 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			if contains(rect, ui.mouse) {button_color = panel_alt}
 			push_rect(vertices, rect, button_color)
 		}
-		timeline := ui_control_rect(.Source_Timeline)
-		if ui.player_duration > 0 {
-			seconds, has_seconds := current_seconds()
-			progress := 0.0
-			if has_seconds {
-				progress = playback_timeline_progress(
-					seconds,
-					ui.player_duration,
-				)
-			}
-			completed, thumb := playback_timeline_geometry(timeline, progress)
-			push_rect(vertices, completed, accent)
-			push_rect(vertices, thumb, accent)
-		}
+		build_player_waveform_geometry(
+			vertices,
+			ui_control_rect(.Source_Timeline),
+			field,
+			rule,
+			ui_color_32(theme.muted),
+			accent,
+		)
 		if fullscreen_control := player_fullscreen_toggle_control();
 		   fullscreen_control != nil {
 			button_color := field
@@ -8384,6 +8469,40 @@ build_overlay_commands :: proc(modal_only := false) {
 			.Center,
 			!active_player_has_audio() ? warning : cyan,
 		)
+		waveform_status := ""
+		waveform_status_color := dim
+		#partial switch waveform_runtime.state {
+		case .Loading: waveform_status = "BUILDING WAVEFORM"
+		case .No_Audio: waveform_status = "NO AUDIO WAVEFORM"
+		case .Unavailable:
+			waveform_status = "WAVEFORM UNAVAILABLE"
+			waveform_status_color = warning
+		}
+		if len(waveform_status) > 0 {
+			draw_text_in_rect(
+				ctx,
+				small_font,
+				waveform_status,
+				transport.waveform,
+				.Center,
+				.Center,
+				waveform_status_color,
+				9,
+			)
+		}
+		view_start, view_end := waveform_view_range(ui.player_duration)
+		if view_end > view_start && ui.player_duration > view_end-view_start+0.001 {
+			draw_text_in_rect(
+				ctx,
+				small_font,
+				fmt.tprintf("%.1fx", ui.player_duration/(view_end-view_start)),
+				{transport.waveform.x+transport.waveform.w-52, transport.waveform.y+transport.waveform.h-18, 46, 14},
+				.End,
+				.Center,
+				dim,
+				8,
+			)
+		}
 		if ui.source_playback_active && ui.source_hint_menu_open && hint_control == .Menu {
 			values := source_hint_values(state.active_source, context.temp_allocator)
 			selected := source_initial_seconds(state.active_source)
@@ -9708,9 +9827,11 @@ add_player_controls :: proc(
 		{.Primary_Press},
 	)
 	if !controls_visible {return}
+	scrub_rect := transport.waveform
+	if ui.playback_fullscreen_active {scrub_rect = transport.timeline}
 	add_pointer_control(
 		fmt.tprintf("scrub %s timeline", media_name),
-		transport.timeline,
+		scrub_rect,
 		.Source_Timeline,
 		{.Primary_Press, .Drag},
 	)
@@ -12608,6 +12729,11 @@ activate_registered_target_at_point :: proc(
 		begin_text_pointer_selection(control, .Clip_Rename, point, click_count)
 	case .Source_Timeline:
 		cancel_player_surface_click()
+		if click_count >= 2 && !ui.playback_fullscreen_active {
+			waveform_view_reset(ui.player_duration)
+			ui.needs_redraw = true
+			return true
+		}
 		ui.source_scrubbing = true
 		seek_player_timeline_rect(point, control.rect)
 	case .Player_Surface:
@@ -12951,6 +13077,24 @@ on_metal_scroll :: proc "c" (self: Id, command: Sel, event: Id) {
 		window_point,
 		nil,
 	)
+	if !ui.playback_fullscreen_active {
+		if timeline := find_ui_control_by_action(.Source_Timeline);
+		   timeline != nil && contains(timeline.rect, point) {
+			delta_x := msg_f64(event, sel_registerName("scrollingDeltaX"))
+			if abs(delta) >= abs(delta_x) && delta != 0 {
+				ratio := clamp((point.x-timeline.rect.x)/timeline.rect.w, 0, 1)
+				waveform_view_zoom(
+					ratio,
+					math.exp(-delta*0.02),
+					ui.player_duration,
+				)
+			} else if delta_x != 0 {
+				waveform_view_pan(-delta_x/timeline.rect.w, ui.player_duration)
+			}
+			ui.needs_redraw = true
+			return
+		}
+	}
 	_, _, source_search, source_panel, _, transcript, clip_search, clip_panel, clip_name, _, _ :=
 		layout_rects()
 	source_content := source_content_rect(source_search, source_panel)
@@ -13813,6 +13957,12 @@ register_delegate :: proc(app: Id) {
 		delegate_class,
 		sel_registerName("bpmAnalysisFinished:"),
 		rawptr(on_bpm_analysis_finished),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
+		sel_registerName("waveformFinished:"),
+		rawptr(on_waveform_finished),
 		"v@:@",
 	)
 	class_addMethod(

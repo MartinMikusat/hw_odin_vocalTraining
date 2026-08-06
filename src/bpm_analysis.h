@@ -42,4 +42,14 @@ HWBPMAnalysisStatus hw_bpm_copy_onset_envelope(
 
 void hw_bpm_free_onset_envelope(float *values);
 
+HWBPMAnalysisStatus hw_waveform_copy_peaks(
+    const char *path,
+    const HWBPMCancellationToken *cancellation_token,
+    float **values,
+    size_t *count,
+    double *rate_hz
+);
+
+void hw_waveform_free_peaks(float *values);
+
 #endif

@@ -152,6 +152,9 @@ Automatic analysis also estimates the beat grid. **Set 1** stores the current
 playhead as the four-beat downbeat. **Earlier** and **Later** move that grid in
 10 ms steps, and **Reset Auto** restores the detected phase. Synchronized
 clicks remain disabled when phase is unavailable until Set 1 calibrates it.
+The Practice Monitor draws the grid as vertical lines over the audio waveform,
+with a stronger line on each four-beat downbeat. BPM and grid changes reposition
+the lines immediately.
 
 With the app focused, press **Command-V** after copying one or more supported
 YouTube URL lines. The application preserves the active workflow, switches to
@@ -236,11 +239,14 @@ clips when selected. The Source Monitor and Practice Monitor use the same
 playback controls. The volume controls adjust playback in 10% steps and retain
 that level when another source or clip is loaded during the session. The
 transport can play, pause, stop at zero, change speed, change volume, and scrub
-across the loaded media. Source reset seeks to the imported URL timestamp.
+across the loaded media waveform. Scroll vertically over the waveform to zoom
+around the pointer, scroll horizontally to pan, and double-click to restore the
+full-duration view. Waveform peaks are generated from decoded audio and retained
+only in a bounded runtime cache. Source reset seeks to the imported URL timestamp.
 Clip reset seeks to the start of the clip.
 The transport wraps complete control groups when the monitor becomes narrow.
 It keeps transport, speed, volume, status, and fullscreen controls together in
-their defined groups. The timeline stays in a separate full-width lane above
+their defined groups. The waveform stays in a separate full-width lane above
 the rows. Each added row reduces the video region and cannot enter an adjacent
 panel.
 The application stores each source's mark-in, mark-out, and optional clip name

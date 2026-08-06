@@ -378,6 +378,7 @@ metal_player_clear :: proc() {
 	cancel_dance_count_in()
 	ui.source_scrubbing = false
 	ui.source_hint_menu_open = false
+	waveform_clear_active()
 	metal_player_clear_texture()
 	player := state.player
 	item := ui.player_item
@@ -478,6 +479,7 @@ metal_player_load :: proc(path: string, has_audio := true) -> bool {
 	}
 	hw_metronome_destroy(old_metronome, old_audio_engine)
 	metal_audio_release(old_audio_engine, old_audio_player, old_audio_pitch, old_audio_file)
+	waveform_request(path, has_audio)
 	request_video_frame_refresh()
 	return true
 }

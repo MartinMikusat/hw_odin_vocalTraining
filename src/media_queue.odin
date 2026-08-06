@@ -429,6 +429,34 @@ media_queue_bpm_finalize :: proc(data: rawptr) {
 	}
 }
 
+media_queue_waveform_task :: proc(
+	task_context: ^task_queue.Task_Context,
+) -> task_queue.Task_Outcome {
+	job := (^Waveform_Job)(task_context.data)
+	waveform_job_execute(job)
+	if media_queue_is_shutting_down() {return {}}
+	msg_void_sel_id_b(
+		job.completion_target,
+		sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"),
+		sel_registerName("waveformFinished:"),
+		nil,
+		false,
+	)
+	_ = media_task_completion_wait(&job.completion)
+	return {}
+}
+
+media_queue_waveform_cancel :: proc(data: rawptr) {
+	waveform_job_cancel((^Waveform_Job)(data))
+}
+
+media_queue_waveform_finalize :: proc(data: rawptr) {
+	job := (^Waveform_Job)(data)
+	if media_task_completion_processed(&job.completion) {
+		waveform_job_destroy(job)
+	}
+}
+
 media_queue_library_replacement_finalize :: proc(data: rawptr) {
 	job := (^Library_Replacement_Job)(data)
 	if media_task_completion_processed(&job.completion) {
@@ -591,6 +619,28 @@ media_queue_schedule_bpm :: proc(job: ^BPM_Job) -> bool {
 	return true
 }
 
+media_queue_schedule_waveform :: proc(job: ^Waveform_Job) -> bool {
+	if job == nil || !media_queue_initialized {return false}
+	id, add_error := task_queue.add(
+		&media_queue,
+		{
+			procedure = media_queue_waveform_task,
+			data = job,
+			cancel_procedure = media_queue_waveform_cancel,
+			finalize_procedure = media_queue_waveform_finalize,
+			policy_data = media_queue_policy_encode(
+				.Export,
+				resource_key = media_queue_resource_key(.Vocal, job.path),
+			),
+			release_on_finish = true,
+			label = "Build audio waveform",
+		},
+	)
+	if add_error != .None {return false}
+	job.task_id = id
+	return true
+}
+
 media_queue_cancel_bpm :: proc(job: ^BPM_Job) -> bool {
 	if job == nil || !media_queue_initialized {return false}
 	previous_state, changed := task_queue.cancel_with_state(
@@ -604,6 +654,22 @@ media_queue_cancel_bpm :: proc(job: ^BPM_Job) -> bool {
 		_ = bpm_runtime_result_set(job.clip_id, job.clip_path, .Cancelled)
 		media_task_completion_finish(&job.completion)
 		bpm_job_destroy(job)
+	}
+	return true
+}
+
+media_queue_cancel_waveform :: proc(job: ^Waveform_Job) -> bool {
+	if job == nil || !media_queue_initialized {return false}
+	previous_state, changed := task_queue.cancel_with_state(
+		&media_queue,
+		job.task_id,
+	)
+	if !changed {return false}
+	if previous_state == .Waiting {
+		waveform_job_cancel(job)
+		if waveform_job == job {waveform_job = nil}
+		media_task_completion_finish(&job.completion)
+		waveform_job_destroy(job)
 	}
 	return true
 }

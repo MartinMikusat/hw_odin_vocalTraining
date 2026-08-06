@@ -4801,11 +4801,16 @@ dancing_bpm_adjustment_marks_manual_override_test :: proc(t: ^testing.T) {
 		workflow=.Dancing,
 		dance_count_in_bpm=120,
 		dance_bpm_user_set=false,
+		dance_beat_period_seconds=0.5,
+		dance_beat_grid_offset_seconds=0.2,
+		dance_beat_phase_confidence=0.8,
 	}
 	testing.expect(t, dance_clip_adjust_bpm(&clip, 1))
 	testing.expect_value(t, clip.dance_count_in_bpm, 121)
 	testing.expect(t, clip.dance_bpm_user_set)
 	testing.expect(t, math.abs(clip.dance_beat_period_seconds-60.0/121.0) < 0.000001)
+	testing.expect(t, dance_beat_grid_available(&clip))
+	testing.expect(t, math.abs(clip.dance_beat_grid_offset_seconds-0.2) < 0.000001)
 
 	clip.dance_bpm_user_set = false
 	testing.expect(t, dance_clip_adjust_bpm(&clip, -1))
@@ -7180,6 +7185,41 @@ source_timeline_maps_and_clamps_pointer_position_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+waveform_view_maps_zooms_pans_and_resets_test :: proc(t: ^testing.T) {
+	old_runtime := waveform_runtime
+	defer {waveform_runtime = old_runtime}
+	waveform_runtime = {}
+	rect := UI_Rect{100, 20, 400, 64}
+	testing.expect_value(t, waveform_seconds_at_point(Point{300, 25}, rect, 200), 100.0)
+	waveform_view_zoom(0.5, 0.5, 200)
+	start, end := waveform_view_range(200)
+	testing.expect_value(t, start, 50.0)
+	testing.expect_value(t, end, 150.0)
+	testing.expect_value(t, waveform_seconds_at_point(Point{300, 25}, rect, 200), 100.0)
+	waveform_view_pan(0.25, 200)
+	start, end = waveform_view_range(200)
+	testing.expect_value(t, start, 75.0)
+	testing.expect_value(t, end, 175.0)
+	waveform_view_zoom(0.5, 0.0001, 200)
+	start, end = waveform_view_range(200)
+	testing.expect_value(t, end-start, WAVEFORM_MIN_VIEW_SECONDS)
+	waveform_view_reset(200)
+	start, end = waveform_view_range(200)
+	testing.expect_value(t, start, 0.0)
+	testing.expect_value(t, end, 200.0)
+}
+
+@(test)
+waveform_beat_grid_finds_visible_beats_and_downbeats_test :: proc(t: ^testing.T) {
+	testing.expect_value(t, waveform_first_beat_index(2.1, 0.25, 0.5), 4)
+	testing.expect_value(t, waveform_first_beat_index(0, 0.25, 0.5), 0)
+	testing.expect(t, waveform_beat_is_downbeat(0))
+	testing.expect(t, waveform_beat_is_downbeat(4))
+	testing.expect(t, waveform_beat_is_downbeat(-4))
+	testing.expect(t, !waveform_beat_is_downbeat(3))
+}
+
+@(test)
 playback_timeline_geometry_tracks_current_playback_time_test :: proc(
 	t: ^testing.T,
 ) {
@@ -7330,7 +7370,7 @@ player_transport_rects_for_test :: proc(
 		layout.timestamp,
 		layout.ready_status,
 		layout.fullscreen,
-		layout.timeline,
+		layout.waveform,
 	}
 }
 
@@ -7349,7 +7389,8 @@ expect_player_transport_layout_for_test :: proc(
 	testing.expect_value(
 		t,
 		layout.footer_height,
-		f64(expected_rows+1)*PLAYER_TRANSPORT_ROW_PITCH,
+		f64(expected_rows)*PLAYER_TRANSPORT_ROW_PITCH+
+		PLAYER_WAVEFORM_GAP+PLAYER_WAVEFORM_HEIGHT+PLAYER_WAVEFORM_GAP,
 	)
 	rects := player_transport_rects_for_test(layout)
 	for rect in rects {
@@ -7367,7 +7408,10 @@ expect_player_transport_layout_for_test :: proc(
 	}
 	content := player_content_rect(player)
 	testing.expect_value(t, content.y, player.y+layout.footer_height)
-	testing.expect(t, layout.timeline.y+layout.timeline.h < content.y)
+	testing.expect(t, layout.waveform.y+layout.waveform.h < content.y)
+	testing.expect_value(t, layout.timeline.x, layout.waveform.x)
+	testing.expect_value(t, layout.timeline.y, layout.waveform.y)
+	testing.expect_value(t, layout.timeline.w, layout.waveform.w)
 	testing.expect(t, layout.ready_status.x+layout.ready_status.w+8 <= layout.fullscreen.x)
 }
 

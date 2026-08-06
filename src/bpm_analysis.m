@@ -494,3 +494,197 @@ HWBPMAnalysisStatus hw_bpm_copy_onset_envelope(
 void hw_bpm_free_onset_envelope(float *values) {
     free(values);
 }
+
+HWBPMAnalysisStatus hw_waveform_copy_peaks(
+    const char *path,
+    const HWBPMCancellationToken *cancellationToken,
+    float **values,
+    size_t *count,
+    double *rateHz
+) {
+    if (values != NULL) {
+        *values = NULL;
+    }
+    if (count != NULL) {
+        *count = 0;
+    }
+    if (rateHz != NULL) {
+        *rateHz = 0.0;
+    }
+    if (path == NULL || path[0] == '\0' || values == NULL || count == NULL ||
+        rateHz == NULL) {
+        return HWBPMAnalysisUnreadable;
+    }
+    if (hw_bpm_cancellation_token_is_cancelled(cancellationToken)) {
+        return HWBPMAnalysisCancelled;
+    }
+
+    @autoreleasepool {
+        NSString *filePath = [NSString stringWithUTF8String:path];
+        if (filePath == nil ||
+            ![[NSFileManager defaultManager] isReadableFileAtPath:filePath]) {
+            return HWBPMAnalysisUnreadable;
+        }
+        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:
+            [NSURL fileURLWithPath:filePath isDirectory:NO] options:nil];
+        NSArray<AVAssetTrack *> *audioTracks = nil;
+        HWBPMAnalysisStatus trackStatus = hw_bpm_wait_for_audio_tracks(
+            asset,
+            cancellationToken,
+            &audioTracks);
+        if (trackStatus != HWBPMAnalysisOK) {
+            return trackStatus;
+        }
+
+        NSError *readerError = nil;
+        AVAssetReader *reader = [[AVAssetReader alloc]
+            initWithAsset:asset error:&readerError];
+        if (reader == nil || readerError != nil) {
+            return HWBPMAnalysisUnreadable;
+        }
+        NSDictionary *settings = @{
+            AVFormatIDKey: @(kAudioFormatLinearPCM),
+            AVSampleRateKey: @(HW_BPM_SAMPLE_RATE),
+            AVNumberOfChannelsKey: @1,
+            AVLinearPCMBitDepthKey: @32,
+            AVLinearPCMIsFloatKey: @YES,
+            AVLinearPCMIsBigEndianKey: @NO,
+            AVLinearPCMIsNonInterleavedKey: @NO,
+        };
+        AVAssetReaderTrackOutput *output = [[AVAssetReaderTrackOutput alloc]
+            initWithTrack:audioTracks.firstObject outputSettings:settings];
+        output.alwaysCopiesSampleData = NO;
+        if (![reader canAddOutput:output]) {
+            return HWBPMAnalysisUnreadable;
+        }
+        [reader addOutput:output];
+        if (![reader startReading]) {
+            return HWBPMAnalysisUnreadable;
+        }
+
+        const size_t samplesPerPeak = 220;
+        float *result = NULL;
+        size_t resultCount = 0;
+        size_t resultCapacity = 0;
+        size_t binFill = 0;
+        float minimum = 1.0f;
+        float maximum = -1.0f;
+        HWBPMAnalysisStatus status = HWBPMAnalysisOK;
+
+        while (reader.status == AVAssetReaderStatusReading) {
+            if (hw_bpm_cancellation_token_is_cancelled(cancellationToken)) {
+                status = HWBPMAnalysisCancelled;
+                [reader cancelReading];
+                break;
+            }
+            CMSampleBufferRef sampleBuffer = [output copyNextSampleBuffer];
+            if (sampleBuffer == NULL) {
+                break;
+            }
+            CMBlockBufferRef retainedBlock = NULL;
+            AudioBufferList bufferList;
+            OSStatus bufferStatus =
+                CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                    sampleBuffer,
+                    NULL,
+                    &bufferList,
+                    sizeof(bufferList),
+                    NULL,
+                    NULL,
+                    kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+                    &retainedBlock);
+            if (bufferStatus != noErr ||
+                !hw_bpm_sample_buffer_is_expected_pcm(sampleBuffer, &bufferList)) {
+                status = HWBPMAnalysisUnreadable;
+            } else {
+                size_t sampleCount =
+                    bufferList.mBuffers[0].mDataByteSize / sizeof(float);
+                const float *samples = bufferList.mBuffers[0].mData;
+                for (size_t index = 0; index < sampleCount; index += 1) {
+                    float sample = samples[index];
+                    if (!isfinite(sample)) {
+                        status = HWBPMAnalysisUnreadable;
+                        break;
+                    }
+                    minimum = fminf(minimum, sample);
+                    maximum = fmaxf(maximum, sample);
+                    binFill += 1;
+                    if (binFill != samplesPerPeak) {
+                        continue;
+                    }
+                    if (resultCount == resultCapacity) {
+                        size_t capacity = resultCapacity == 0 ? 1024 :
+                            resultCapacity * 2;
+                        if (capacity < resultCapacity ||
+                            capacity > SIZE_MAX / (2 * sizeof(float))) {
+                            status = HWBPMAnalysisUnreadable;
+                            break;
+                        }
+                        float *resized = realloc(
+                            result,
+                            capacity * 2 * sizeof(float));
+                        if (resized == NULL) {
+                            status = HWBPMAnalysisUnreadable;
+                            break;
+                        }
+                        result = resized;
+                        resultCapacity = capacity;
+                    }
+                    result[resultCount * 2] = minimum;
+                    result[resultCount * 2 + 1] = maximum;
+                    resultCount += 1;
+                    binFill = 0;
+                    minimum = 1.0f;
+                    maximum = -1.0f;
+                }
+            }
+            if (retainedBlock != NULL) {
+                CFRelease(retainedBlock);
+            }
+            CFRelease(sampleBuffer);
+            if (status != HWBPMAnalysisOK) {
+                [reader cancelReading];
+                break;
+            }
+        }
+        if (status == HWBPMAnalysisOK &&
+            reader.status != AVAssetReaderStatusCompleted) {
+            status = hw_bpm_cancellation_token_is_cancelled(cancellationToken) ?
+                HWBPMAnalysisCancelled : HWBPMAnalysisUnreadable;
+        }
+        if (status == HWBPMAnalysisOK && binFill > 0) {
+            if (resultCount == resultCapacity) {
+                size_t capacity = resultCapacity == 0 ? 1 : resultCapacity + 1;
+                float *resized = realloc(
+                    result,
+                    capacity * 2 * sizeof(float));
+                if (resized == NULL) {
+                    status = HWBPMAnalysisUnreadable;
+                } else {
+                    result = resized;
+                    resultCapacity = capacity;
+                }
+            }
+            if (status == HWBPMAnalysisOK) {
+                result[resultCount * 2] = minimum;
+                result[resultCount * 2 + 1] = maximum;
+                resultCount += 1;
+            }
+        }
+        if (status == HWBPMAnalysisOK && resultCount == 0) {
+            status = HWBPMAnalysisUnreadable;
+        }
+        if (status == HWBPMAnalysisOK) {
+            *values = result;
+            *count = resultCount;
+            *rateHz = HW_BPM_SAMPLE_RATE / (double)samplesPerPeak;
+            result = NULL;
+        }
+        free(result);
+        return status;
+    }
+}
+
+void hw_waveform_free_peaks(float *values) {
+    free(values);
+}

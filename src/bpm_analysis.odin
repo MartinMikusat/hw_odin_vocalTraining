@@ -15,6 +15,14 @@ foreign bpm_analysis_bridge {
 		rate_hz: ^f64,
 	) -> BPM_Analysis_Status ---
 	hw_bpm_free_onset_envelope :: proc "c" (values: [^]f32) ---
+	hw_waveform_copy_peaks :: proc "c" (
+		path: cstring,
+		cancellation_token: ^BPM_Cancellation_Token,
+		values: ^[^]f32,
+		count: ^uint,
+		rate_hz: ^f64,
+	) -> BPM_Analysis_Status ---
+	hw_waveform_free_peaks :: proc "c" (values: [^]f32) ---
 }
 
 BPM_Cancellation_Token :: struct {

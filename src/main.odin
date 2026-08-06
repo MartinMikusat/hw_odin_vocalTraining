@@ -4705,6 +4705,14 @@ jobs_shutdown :: proc() {
 		bpm_job_destroy(job)
 	}
 	bpm_runtime_result_clear()
+	if waveform_job != nil {
+		job := waveform_job
+		waveform_job = nil
+		waveform_job_destroy(job)
+	}
+	waveform_cache_destroy()
+	delete(waveform_runtime.path)
+	waveform_runtime = {}
 	if source_probe_job != nil {
 		source_probe_job_destroy(source_probe_job)
 		source_probe_job = nil
