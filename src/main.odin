@@ -4846,6 +4846,7 @@ video_clips_process_main :: proc(args := os.args) {
 	}
 	load_result := load_library()
 	ui.theme = database_interface_theme_load(library_database)
+	waveform_runtime.band_view = database_waveform_band_view_load(library_database)
 	ui.metronome_volume = database_metronome_volume_load(library_database)
 	ui.vocal_playback_rate = database_vocal_playback_rate_load(
 		library_database,

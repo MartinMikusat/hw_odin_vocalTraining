@@ -355,6 +355,8 @@ Player_Transport_Layout :: struct {
 	fullscreen:   UI_Rect,
 	timeline:     UI_Rect,
 	waveform:     UI_Rect,
+	waveform_plot: UI_Rect,
+	waveform_selectors: [4]UI_Rect,
 	row_count:    int,
 	footer_height: f64,
 }
@@ -609,6 +611,10 @@ UI_Action_Kind :: enum {
 	Source_Play_Pause,
 	Player_Surface,
 	Source_Stop,
+	Waveform_All,
+	Waveform_Low,
+	Waveform_Mid,
+	Waveform_High,
 	Source_Timeline,
 	Source_Reset,
 	Source_Hint_Menu,
@@ -3768,8 +3774,10 @@ PLAYER_TRANSPORT_ONE_ROW_WIDTH :: 902.0
 PLAYER_TRANSPORT_TWO_ROW_WIDTH :: 610.0
 PLAYER_TRANSPORT_THREE_ROW_WIDTH :: 410.0
 PLAYER_TRANSPORT_MINIMUM_WIDTH :: 284.0
-PLAYER_WAVEFORM_HEIGHT :: 64.0
+PLAYER_WAVEFORM_HEIGHT :: 96.0
 PLAYER_WAVEFORM_GAP :: 6.0
+PLAYER_WAVEFORM_SELECTOR_HEIGHT :: 20.0
+PLAYER_WAVEFORM_SELECTOR_GAP :: 4.0
 
 player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_Layout) {
 	inner_x := player.x + PLAYER_TRANSPORT_INSET_X
@@ -3859,6 +3867,22 @@ player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_La
 		inner_w,
 		PLAYER_WAVEFORM_HEIGHT,
 	}
+	result.waveform_plot = {
+		result.waveform.x,
+		result.waveform.y,
+		result.waveform.w,
+		PLAYER_WAVEFORM_HEIGHT-PLAYER_WAVEFORM_SELECTOR_HEIGHT-
+		PLAYER_WAVEFORM_SELECTOR_GAP,
+	}
+	selector_width := 42.0
+	for index in 0..<len(result.waveform_selectors) {
+		result.waveform_selectors[index] = {
+			result.waveform.x+f64(index)*(selector_width+4),
+			result.waveform.y+result.waveform.h-PLAYER_WAVEFORM_SELECTOR_HEIGHT,
+			selector_width,
+			PLAYER_WAVEFORM_SELECTOR_HEIGHT,
+		}
+	}
 	result.footer_height = f64(result.row_count)*PLAYER_TRANSPORT_ROW_PITCH+
 	                       PLAYER_WAVEFORM_GAP+PLAYER_WAVEFORM_HEIGHT+
 	                       PLAYER_WAVEFORM_GAP
@@ -3911,11 +3935,11 @@ source_speed_up_rect :: proc(player: UI_Rect) -> UI_Rect {
 }
 
 source_timeline_rect :: proc(player: UI_Rect) -> UI_Rect {
-	return player_transport_layout(player).waveform
+	return player_transport_layout(player).waveform_plot
 }
 
 player_timeline_seconds :: proc(point: Point, player: UI_Rect) -> f64 {
-	waveform := player_transport_layout(player).waveform
+	waveform := player_transport_layout(player).waveform_plot
 	return waveform_seconds_at_point(point, waveform, ui.player_duration)
 }
 
@@ -7129,10 +7153,76 @@ draw_source_delete_confirmation :: proc(ctx, font: rawptr, bright, muted, danger
 	draw_text_in_rect(ctx, font, "DELETE SOURCE", confirm, .Center, .Center, danger)
 }
 
+waveform_band_color :: proc(band: Waveform_Band) -> [4]f32 {
+	dark := ui_theme_is_dark(ui.theme)
+	switch band {
+	case .Low: return dark ? UI_COLOR_COFFEE_32 : UI_COLOR_OCHRE_32
+	case .Mid: return dark ? UI_COLOR_GUM_32 : UI_COLOR_FOREST_32
+	case .High:
+		return ui_color_32(dark ? UI_COLOR_DANCING_DARK_64 : UI_COLOR_DANCING_LIGHT_64)
+	}
+	return UI_COLOR_SAND_32
+}
+
+waveform_future_color :: proc(color, field: [4]f32) -> [4]f32 {
+	result := color
+	for index in 0..<3 {result[index] = color[index]*0.56+field[index]*0.44}
+	result[3] = color[3]*0.58
+	return result
+}
+
+build_player_waveform_band_geometry :: proc(
+	vertices: ^[dynamic]Solid_Vertex,
+	entry: ^Waveform_Cache_Entry,
+	band: Waveform_Band,
+	rect: UI_Rect,
+	first, last: int,
+	start, end, largest: f64,
+	field: [4]f32,
+) {
+	if !waveform_band_visible(waveform_runtime.band_view, band) {return}
+	pixel_scale := max(1, ui.scale)
+	columns := max(1, int(math.ceil(rect.w*pixel_scale)))
+	column_width := rect.w/f64(columns)
+	center_y := rect.y+rect.h/2
+	half_height := rect.h/2-3
+	played_color := waveform_band_color(band)
+	if waveform_runtime.band_view == .All {played_color[3] = 0.58}
+	future_color := waveform_future_color(played_color, field)
+	seconds, has_seconds := current_seconds()
+	for column in 0..<columns {
+		column_start := start+(end-start)*f64(column)/f64(columns)
+		column_end := start+(end-start)*f64(column+1)/f64(columns)
+		peak_start := clamp(int(math.floor(column_start*entry.rate_hz)), first, last-1)
+		peak_end := clamp(int(math.ceil(column_end*entry.rate_hz)), peak_start+1, last)
+		minimum, maximum := f64(0), f64(0)
+		for band_peak in entry.peaks[peak_start:peak_end] {
+			peak := waveform_peak_for_band(band_peak, band)
+			minimum = min(minimum, f64(peak.minimum))
+			maximum = max(maximum, f64(peak.maximum))
+		}
+		y0 := center_y+minimum/largest*half_height
+		y1 := center_y+maximum/largest*half_height
+		color := future_color
+		if !has_seconds || column_end <= seconds {color = played_color}
+		push_rect(
+			vertices,
+			{
+				rect.x+f64(column)*column_width,
+				y0,
+				column_width,
+				max(1/pixel_scale, y1-y0),
+			},
+			color,
+			"waveform",
+		)
+	}
+}
+
 build_player_waveform_geometry :: proc(
 	vertices: ^[dynamic]Solid_Vertex,
 	rect: UI_Rect,
-	field, rule, future, accent: [4]f32,
+	field, rule, beat: [4]f32,
 ) {
 	if rect.w <= 0 || rect.h <= 0 {return}
 	push_rect(vertices, rect, field, "waveform")
@@ -7143,39 +7233,11 @@ build_player_waveform_geometry :: proc(
 	if entry != nil && len(entry.peaks) > 0 && entry.rate_hz > 0 && end > start {
 		first := clamp(int(math.floor(start*entry.rate_hz)), 0, len(entry.peaks)-1)
 		last := clamp(int(math.ceil(end*entry.rate_hz)), first+1, len(entry.peaks))
-		largest := f64(0.05)
-		for peak in entry.peaks[first:last] {
-			largest = max(largest, abs(f64(peak.minimum)), abs(f64(peak.maximum)))
-		}
-		pixel_scale := max(1, ui.scale)
-		columns := max(1, int(math.ceil(rect.w*pixel_scale)))
-		column_width := rect.w/f64(columns)
-		seconds, has_seconds := current_seconds()
-		for column in 0 ..< columns {
-			column_start := start+(end-start)*f64(column)/f64(columns)
-			column_end := start+(end-start)*f64(column+1)/f64(columns)
-			peak_start := clamp(int(math.floor(column_start*entry.rate_hz)), first, last-1)
-			peak_end := clamp(int(math.ceil(column_end*entry.rate_hz)), peak_start+1, last)
-			minimum, maximum := f64(0), f64(0)
-			for peak in entry.peaks[peak_start:peak_end] {
-				minimum = min(minimum, f64(peak.minimum))
-				maximum = max(maximum, f64(peak.maximum))
-			}
-			half_height := rect.h/2-3
-			y0 := center_y+minimum/largest*half_height
-			y1 := center_y+maximum/largest*half_height
-			color := future
-			if !has_seconds || column_end <= seconds {color = accent}
-			push_rect(
-				vertices,
-				{
-					rect.x+f64(column)*column_width,
-					y0,
-					column_width,
-					max(1/pixel_scale, y1-y0),
-				},
-				color,
-				"waveform",
+		largest := waveform_shared_peak_magnitude(entry.peaks[first:last])
+		for band in Waveform_Band {
+			build_player_waveform_band_geometry(
+				vertices, entry, band, rect, first, last,
+				start, end, largest, field,
 			)
 		}
 	}
@@ -7191,11 +7253,11 @@ build_player_waveform_geometry :: proc(
 			if beat_seconds >= start {
 				ratio := (beat_seconds-start)/(end-start)
 				x := rect.x+ratio*rect.w
-				color := UI_COLOR_GUM_32
-				color[3] = 0.72
+				color := beat
+				color[3] = 0.34
 				width := 1.0
 				if waveform_beat_is_downbeat(beat_index) {
-					color = accent
+					color = beat
 					width = 2
 				}
 				push_rect(vertices, {x-width/2, rect.y, width, rect.h}, color, "waveform-beat")
@@ -7449,9 +7511,26 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			ui_control_rect(.Source_Timeline),
 			field,
 			rule,
-			ui_color_32(theme.muted),
-			accent,
+			ui_color_32(theme.ink),
 		)
+		waveform_selector_kinds := [4]UI_Action_Kind{
+			.Waveform_All,
+			.Waveform_Low,
+			.Waveform_Mid,
+			.Waveform_High,
+		}
+		for kind, index in waveform_selector_kinds {
+			rect := ui_control_rect(kind)
+			color := field
+			if contains(rect, ui.mouse) {color = panel_alt}
+			push_rect(vertices, rect, color)
+			selected := int(waveform_runtime.band_view) == index
+			if selected {
+				border_color := accent
+				if index > 0 {border_color = waveform_band_color(Waveform_Band(index-1))}
+				push_border(vertices, rect, border_color)
+			}
+		}
 		if fullscreen_control := player_fullscreen_toggle_control();
 		   fullscreen_control != nil {
 			button_color := field
@@ -8476,6 +8555,33 @@ build_overlay_commands :: proc(modal_only := false) {
 			.Center,
 			!active_player_has_audio() ? warning : cyan,
 		)
+		waveform_selector_kinds := [4]UI_Action_Kind{
+			.Waveform_All,
+			.Waveform_Low,
+			.Waveform_Mid,
+			.Waveform_High,
+		}
+		waveform_selector_labels := [4]string{"ALL", "LOW", "MID", "HIGH"}
+		for kind, index in waveform_selector_kinds {
+			color := muted
+			if int(waveform_runtime.band_view) == index {
+				color = accent
+				if index > 0 {
+					band_color := waveform_band_color(Waveform_Band(index-1))
+					color = {f64(band_color[0]), f64(band_color[1]), f64(band_color[2]), 1}
+				}
+			}
+			draw_text_in_rect(
+				ctx,
+				small_font,
+				waveform_selector_labels[index],
+				ui_control_rect(kind),
+				.Center,
+				.Center,
+				color,
+				8,
+			)
+		}
 		waveform_status := ""
 		waveform_status_color := dim
 		#partial switch waveform_runtime.state {
@@ -8490,7 +8596,7 @@ build_overlay_commands :: proc(modal_only := false) {
 				ctx,
 				small_font,
 				waveform_status,
-				transport.waveform,
+				transport.waveform_plot,
 				.Center,
 				.Center,
 				waveform_status_color,
@@ -9834,7 +9940,7 @@ add_player_controls :: proc(
 		{.Primary_Press},
 	)
 	if !controls_visible {return}
-	scrub_rect := transport.waveform
+	scrub_rect := transport.waveform_plot
 	if ui.playback_fullscreen_active {scrub_rect = transport.timeline}
 	add_pointer_control(
 		fmt.tprintf("scrub %s timeline", media_name),
@@ -9842,6 +9948,30 @@ add_player_controls :: proc(
 		.Source_Timeline,
 		{.Primary_Press, .Drag},
 	)
+	if !ui.playback_fullscreen_active {
+		selector_kinds := [4]UI_Action_Kind{
+			.Waveform_All,
+			.Waveform_Low,
+			.Waveform_Mid,
+			.Waveform_High,
+		}
+		selector_names := [4]string{
+			"Show all waveform frequency bands",
+			"Show only the waveform below 200 hertz",
+			"Show only the waveform from 200 hertz to 2 kilohertz",
+			"Show only the waveform above 2 kilohertz",
+		}
+		for kind, index in selector_kinds {
+			add_ax_element(
+				array,
+				element_class,
+				selector_names[index],
+				"AXRadioButton",
+				transport.waveform_selectors[index],
+				kind,
+			)
+		}
+	}
 	add_ax_element(
 		array,
 		element_class,
@@ -11836,6 +11966,14 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		on_toggle_playback(nil, nil, nil)
 	case .Source_Stop:
 		stop_player_playback()
+	case .Waveform_All:
+		return waveform_set_band_view(.All)
+	case .Waveform_Low:
+		return waveform_set_band_view(.Low)
+	case .Waveform_Mid:
+		return waveform_set_band_view(.Mid)
+	case .Waveform_High:
+		return waveform_set_band_view(.High)
 	case .Source_Timeline:
 		return false
 	case .Source_Reset:

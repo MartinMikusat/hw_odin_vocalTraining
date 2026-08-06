@@ -86,6 +86,15 @@ append_ax_element_for_control :: proc(
 			uint(index == int(ui.settings_category)),
 		)
 		msg_void_id(element, sel_registerName("setAccessibilityValue:"), value)
+	} else if kind == .Waveform_All || kind == .Waveform_Low ||
+	          kind == .Waveform_Mid || kind == .Waveform_High {
+		view := Waveform_Band_View(int(kind)-int(UI_Action_Kind.Waveform_All))
+		value := msg_id_uint(
+			objc_getClass("NSNumber"),
+			sel_registerName("numberWithUnsignedInt:"),
+			uint(view == waveform_runtime.band_view),
+		)
+		msg_void_id(element, sel_registerName("setAccessibilityValue:"), value)
 	} else if kind == .Settings_Search {
 		msg_void_id(
 			element,
@@ -183,6 +192,15 @@ on_ax_value :: proc "c" (self: Id, command: Sel) -> Id {
 			objc_getClass("NSNumber"),
 			sel_registerName("numberWithUnsignedInt:"),
 			checked,
+		)
+	case .Waveform_All, .Waveform_Low, .Waveform_Mid, .Waveform_High:
+		view := Waveform_Band_View(
+			int(control.action.kind)-int(UI_Action_Kind.Waveform_All),
+		)
+		return msg_id_uint(
+			objc_getClass("NSNumber"),
+			sel_registerName("numberWithUnsignedInt:"),
+			uint(view == waveform_runtime.band_view),
 		)
 	case .Configure_Flash:
 		return nsstring(video_clips_shortcut_display(ui.flash_leader))
@@ -284,4 +302,3 @@ register_accessibility_class :: proc() {
 	)
 	objc_registerClassPair(class)
 }
-

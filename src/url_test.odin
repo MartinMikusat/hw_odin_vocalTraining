@@ -5108,6 +5108,9 @@ BPM_Bridge_Wav_Kind :: enum {
 	Steady_Tone,
 	Burst_Transitions,
 	Stereo_Identical,
+	Low_Tone,
+	Mid_Tone,
+	High_Tone,
 }
 
 bpm_bridge_wav_create :: proc(
@@ -5161,6 +5164,13 @@ bpm_bridge_wav_create :: proc(
 				phase := index % 50
 				if phase < 25 {sample = 12_000} else {sample = -12_000}
 			}
+		case .Low_Tone, .Mid_Tone, .High_Tone:
+			frequency := 80.0
+			if kind == .Mid_Tone {frequency = 800}
+			if kind == .High_Tone {frequency = 6000}
+			sample = i16(
+				math.sin(2*math.PI*frequency*f64(index)/f64(sample_rate))*12_000,
+			)
 		}
 		bpm_bridge_append_u16_le(&bytes, transmute(u16)sample)
 		if channels == 2 {
@@ -5189,6 +5199,56 @@ bpm_bridge_call :: proc(
 	path_c := strings.clone_to_cstring(path)
 	defer delete(path_c)
 	return hw_bpm_copy_onset_envelope(path_c, cancellation_token, values, count, rate_hz)
+}
+
+waveform_bridge_call :: proc(
+	path: string,
+	peaks: ^[^]Waveform_Band_Peak,
+	count: ^uint,
+	rate_hz: ^f64,
+) -> BPM_Analysis_Status {
+	path_c := strings.clone_to_cstring(path)
+	defer delete(path_c)
+	return hw_waveform_copy_peaks(path_c, nil, peaks, count, rate_hz)
+}
+
+@(test)
+waveform_bridge_separates_low_mid_and_high_tones_test :: proc(t: ^testing.T) {
+	kinds := [3]BPM_Bridge_Wav_Kind{.Low_Tone, .Mid_Tone, .High_Tone}
+	for kind, expected_band in kinds {
+		path, created := bpm_bridge_wav_create(kind, 22_050)
+		testing.expect(t, created)
+		if !created {continue}
+		peaks: [^]Waveform_Band_Peak
+		count: uint
+		rate_hz: f64
+		status := waveform_bridge_call(path, &peaks, &count, &rate_hz)
+		_ = os.remove(path)
+		delete(path)
+		testing.expect_value(t, status, BPM_Analysis_Status.OK)
+		testing.expect(t, peaks != nil && count > 0)
+		if peaks == nil || count == 0 {continue}
+		magnitudes: [3]f64
+		for peak in peaks[count/10:count] {
+			for band in Waveform_Band {
+				value := waveform_peak_for_band(peak, band)
+				magnitudes[int(band)] = max(
+					magnitudes[int(band)],
+					abs(f64(value.minimum)),
+					abs(f64(value.maximum)),
+				)
+			}
+		}
+		hw_waveform_free_peaks(peaks)
+		for magnitude, band in magnitudes {
+			if band == expected_band {continue}
+			testing.expect(
+				t,
+				magnitudes[expected_band] > magnitude*1.5,
+			)
+		}
+		testing.expect(t, math.abs(rate_hz-(22_050.0/16.0)) < 1.0e-9)
+	}
 }
 
 @(test)
@@ -6597,6 +6657,36 @@ interface_theme_round_trips_through_application_preferences_test :: proc(
 }
 
 @(test)
+waveform_band_view_round_trips_through_application_preferences_test :: proc(
+	t: ^testing.T,
+) {
+	database: ^SQLite_DB
+	path := strings.clone_to_cstring(":memory:")
+	defer delete(path)
+	opened := sqlite3_open_v2(
+		path,
+		&database,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		nil,
+	) == SQLITE_OK
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+	testing.expect_value(
+		t,
+		database_waveform_band_view_load(database),
+		Waveform_Band_View.All,
+	)
+	for view in Waveform_Band_View {
+		testing.expect(t, database_waveform_band_view_save(database, view))
+		testing.expect_value(t, database_waveform_band_view_load(database), view)
+	}
+	_, valid := waveform_band_view_decode("unknown")
+	testing.expect(t, !valid)
+}
+
+@(test)
 metronome_volume_round_trips_through_application_preferences_test :: proc(
 	t: ^testing.T,
 ) {
@@ -7210,6 +7300,21 @@ waveform_view_maps_zooms_pans_and_resets_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+waveform_band_visibility_and_shared_scale_test :: proc(t: ^testing.T) {
+	for band in Waveform_Band {
+		testing.expect(t, waveform_band_visible(.All, band))
+	}
+	testing.expect(t, waveform_band_visible(.Low, .Low))
+	testing.expect(t, !waveform_band_visible(.Low, .Mid))
+	testing.expect(t, waveform_band_visible(.Mid, .Mid))
+	testing.expect(t, waveform_band_visible(.High, .High))
+	peaks := []Waveform_Band_Peak{
+		{low={-0.25, 0.4}, mid={-0.8, 0.5}, high={-0.1, 0.2}},
+	}
+	testing.expect_value(t, waveform_shared_peak_magnitude(peaks), 0.8)
+}
+
+@(test)
 waveform_beat_grid_finds_visible_beats_and_downbeats_test :: proc(t: ^testing.T) {
 	testing.expect_value(t, waveform_first_beat_index(2.1, 0.25, 0.5), 4)
 	testing.expect_value(t, waveform_first_beat_index(0, 0.25, 0.5), 0)
@@ -7412,6 +7517,29 @@ expect_player_transport_layout_for_test :: proc(
 	testing.expect_value(t, layout.timeline.x, layout.waveform.x)
 	testing.expect_value(t, layout.timeline.y, layout.waveform.y)
 	testing.expect_value(t, layout.timeline.w, layout.waveform.w)
+	testing.expect_value(t, layout.waveform_plot, UI_Rect{
+		layout.waveform.x,
+		layout.waveform.y,
+		layout.waveform.w,
+		PLAYER_WAVEFORM_HEIGHT-PLAYER_WAVEFORM_SELECTOR_HEIGHT-
+		PLAYER_WAVEFORM_SELECTOR_GAP,
+	})
+	for selector, index in layout.waveform_selectors {
+		testing.expect(t, selector.x >= layout.waveform.x)
+		testing.expect(t, selector.x+selector.w <= layout.waveform.x+layout.waveform.w)
+		testing.expect(t, selector.y >= layout.waveform.y)
+		testing.expect(t, selector.y+selector.h <= layout.waveform.y+layout.waveform.h)
+		testing.expect(t, !player_transport_rects_overlap_for_test(
+			selector,
+			layout.waveform_plot,
+		))
+		if index > 0 {
+			testing.expect(t, !player_transport_rects_overlap_for_test(
+				selector,
+				layout.waveform_selectors[index-1],
+			))
+		}
+	}
 	testing.expect(t, layout.ready_status.x+layout.ready_status.w+8 <= layout.fullscreen.x)
 }
 
@@ -8105,10 +8233,20 @@ ui_control_hit_test_uses_visual_stack_and_capabilities_test :: proc(t: ^testing.
 			flags = {.Primary_Press, .Drag, .Enabled},
 			action = {kind = .Source_Timeline},
 		},
+		{
+			id = ui_control_id("waveform low"),
+			functional_name = "waveform low",
+			rect = {0, 20, 100, 20},
+			flags = {.Primary_Press, .Enabled},
+			action = {kind = .Waveform_Low},
+		},
 	}
 	hit := find_ui_control_at_point(controls, Point{50, 10}, .Primary_Press)
 	testing.expect(t, hit != nil)
 	if hit != nil {testing.expect_value(t, hit.action.kind, UI_Action_Kind.Source_Timeline)}
+	hit = find_ui_control_at_point(controls, Point{50, 30}, .Primary_Press)
+	testing.expect(t, hit != nil)
+	if hit != nil {testing.expect_value(t, hit.action.kind, UI_Action_Kind.Waveform_Low)}
 	testing.expect(t, find_ui_control_at_point(controls, Point{50, 50}, .Drag) == nil)
 }
 

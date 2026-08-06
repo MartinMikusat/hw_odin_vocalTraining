@@ -154,7 +154,10 @@ playhead as the four-beat downbeat. **Earlier** and **Later** move that grid in
 clicks remain disabled when phase is unavailable until Set 1 calibrates it.
 The Practice Monitor draws the grid as vertical lines over the audio waveform,
 with a stronger line on each four-beat downbeat. BPM and grid changes reposition
-the lines immediately.
+the lines immediately. The waveform separates the decoded audio into LOW below
+200 Hz, MID from 200 Hz to 2 kHz, and HIGH above 2 kHz. **All** overlays the
+three color-coded bands; selecting a band hides the other two. The application
+uses one shared amplitude scale and saves the selected view globally.
 
 With the app focused, press **Command-V** after copying one or more supported
 YouTube URL lines. The application preserves the active workflow, switches to
@@ -242,7 +245,8 @@ transport can play, pause, stop at zero, change speed, change volume, and scrub
 across the loaded media waveform. Scroll vertically over the waveform to zoom
 around the pointer, scroll horizontally to pan, and double-click to restore the
 full-duration view. Waveform peaks are generated from decoded audio and retained
-only in a bounded runtime cache. Source reset seeks to the imported URL timestamp.
+only in a bounded runtime cache. Frequency selection changes only the display;
+it does not filter playback audio. Source reset seeks to the imported URL timestamp.
 Clip reset seeks to the start of the clip.
 The transport wraps complete control groups when the monitor becomes narrow.
 It keeps transport, speed, volume, status, and fullscreen controls together in

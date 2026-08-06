@@ -18,11 +18,11 @@ foreign bpm_analysis_bridge {
 	hw_waveform_copy_peaks :: proc "c" (
 		path: cstring,
 		cancellation_token: ^BPM_Cancellation_Token,
-		values: ^[^]f32,
+		peaks: ^[^]Waveform_Band_Peak,
 		count: ^uint,
 		rate_hz: ^f64,
 	) -> BPM_Analysis_Status ---
-	hw_waveform_free_peaks :: proc "c" (values: [^]f32) ---
+	hw_waveform_free_peaks :: proc "c" (peaks: [^]Waveform_Band_Peak) ---
 }
 
 BPM_Cancellation_Token :: struct {

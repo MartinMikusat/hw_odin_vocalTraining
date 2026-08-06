@@ -5,10 +5,13 @@
 #import <CoreMedia/CoreMedia.h>
 
 #include <math.h>
+#include <float.h>
 #include <stdlib.h>
 #include <string.h>
 
 static const double HW_BPM_SAMPLE_RATE = 22050.0;
+static const double HW_WAVEFORM_LOW_CUTOFF_HZ = 200.0;
+static const double HW_WAVEFORM_HIGH_CUTOFF_HZ = 2000.0;
 enum {
     HW_BPM_FRAME_LENGTH = 2048,
     HW_BPM_HOP_LENGTH = 512,
@@ -33,6 +36,86 @@ typedef struct {
     size_t fluxCount;
     size_t fluxCapacity;
 } HWBPMAnalyzer;
+
+typedef struct {
+    float b0;
+    float b1;
+    float b2;
+    float a1;
+    float a2;
+    float z1;
+    float z2;
+} HWWaveformBiquad;
+
+static void hw_waveform_biquad_configure(
+    HWWaveformBiquad *filter,
+    double cutoffHz,
+    bool highPass
+) {
+    const double omega = 2.0 * M_PI * cutoffHz / HW_BPM_SAMPLE_RATE;
+    const double cosine = cos(omega);
+    const double sine = sin(omega);
+    const double alpha = sine / (2.0 * M_SQRT1_2);
+    const double a0 = 1.0 + alpha;
+    if (highPass) {
+        filter->b0 = (float)((1.0 + cosine) / (2.0 * a0));
+        filter->b1 = (float)(-(1.0 + cosine) / a0);
+        filter->b2 = filter->b0;
+    } else {
+        filter->b0 = (float)((1.0 - cosine) / (2.0 * a0));
+        filter->b1 = (float)((1.0 - cosine) / a0);
+        filter->b2 = filter->b0;
+    }
+    filter->a1 = (float)(-2.0 * cosine / a0);
+    filter->a2 = (float)((1.0 - alpha) / a0);
+    filter->z1 = 0.0f;
+    filter->z2 = 0.0f;
+}
+
+static float hw_waveform_biquad_process(
+    HWWaveformBiquad *filter,
+    float sample
+) {
+    const float output = filter->b0 * sample + filter->z1;
+    filter->z1 = filter->b1 * sample - filter->a1 * output + filter->z2;
+    filter->z2 = filter->b2 * sample - filter->a2 * output;
+    return output;
+}
+
+static HWWaveformPeak hw_waveform_empty_peak(void) {
+    return (HWWaveformPeak){
+        .low_minimum = FLT_MAX,
+        .low_maximum = -FLT_MAX,
+        .mid_minimum = FLT_MAX,
+        .mid_maximum = -FLT_MAX,
+        .high_minimum = FLT_MAX,
+        .high_maximum = -FLT_MAX,
+    };
+}
+
+static bool hw_waveform_reserve_peak(
+    HWWaveformPeak **peaks,
+    size_t count,
+    size_t *capacity
+) {
+    if (count < *capacity) {
+        return true;
+    }
+    size_t nextCapacity = *capacity == 0 ? 1024 : *capacity * 2;
+    if (nextCapacity < *capacity ||
+        nextCapacity > SIZE_MAX / sizeof(HWWaveformPeak)) {
+        return false;
+    }
+    HWWaveformPeak *resized = realloc(
+        *peaks,
+        nextCapacity * sizeof(HWWaveformPeak));
+    if (resized == NULL) {
+        return false;
+    }
+    *peaks = resized;
+    *capacity = nextCapacity;
+    return true;
+}
 
 void hw_bpm_cancellation_token_init(HWBPMCancellationToken *token) {
     if (token != NULL) {
@@ -499,12 +582,12 @@ void hw_bpm_free_onset_envelope(float *values) {
 HWBPMAnalysisStatus hw_waveform_copy_peaks(
     const char *path,
     const HWBPMCancellationToken *cancellationToken,
-    float **values,
+    HWWaveformPeak **peaks,
     size_t *count,
     double *rateHz
 ) {
-    if (values != NULL) {
-        *values = NULL;
+    if (peaks != NULL) {
+        *peaks = NULL;
     }
     if (count != NULL) {
         *count = 0;
@@ -512,7 +595,7 @@ HWBPMAnalysisStatus hw_waveform_copy_peaks(
     if (rateHz != NULL) {
         *rateHz = 0.0;
     }
-    if (path == NULL || path[0] == '\0' || values == NULL || count == NULL ||
+    if (path == NULL || path[0] == '\0' || peaks == NULL || count == NULL ||
         rateHz == NULL) {
         return HWBPMAnalysisUnreadable;
     }
@@ -564,12 +647,31 @@ HWBPMAnalysisStatus hw_waveform_copy_peaks(
         }
 
         const size_t samplesPerPeak = HW_WAVEFORM_SAMPLES_PER_PEAK;
-        float *result = NULL;
+        HWWaveformPeak *result = NULL;
         size_t resultCount = 0;
         size_t resultCapacity = 0;
         size_t binFill = 0;
-        float minimum = 1.0f;
-        float maximum = -1.0f;
+        HWWaveformPeak peak = hw_waveform_empty_peak();
+        HWWaveformBiquad lowPass;
+        HWWaveformBiquad midHighPass;
+        HWWaveformBiquad midLowPass;
+        HWWaveformBiquad highPass;
+        hw_waveform_biquad_configure(
+            &lowPass,
+            HW_WAVEFORM_LOW_CUTOFF_HZ,
+            false);
+        hw_waveform_biquad_configure(
+            &midHighPass,
+            HW_WAVEFORM_LOW_CUTOFF_HZ,
+            true);
+        hw_waveform_biquad_configure(
+            &midLowPass,
+            HW_WAVEFORM_HIGH_CUTOFF_HZ,
+            false);
+        hw_waveform_biquad_configure(
+            &highPass,
+            HW_WAVEFORM_HIGH_CUTOFF_HZ,
+            true);
         HWBPMAnalysisStatus status = HWBPMAnalysisOK;
 
         while (reader.status == AVAssetReaderStatusReading) {
@@ -607,36 +709,40 @@ HWBPMAnalysisStatus hw_waveform_copy_peaks(
                         status = HWBPMAnalysisUnreadable;
                         break;
                     }
-                    minimum = fminf(minimum, sample);
-                    maximum = fmaxf(maximum, sample);
+                    const float low = hw_waveform_biquad_process(
+                        &lowPass,
+                        sample);
+                    const float mid = hw_waveform_biquad_process(
+                        &midLowPass,
+                        hw_waveform_biquad_process(&midHighPass, sample));
+                    const float high = hw_waveform_biquad_process(
+                        &highPass,
+                        sample);
+                    if (!isfinite(low) || !isfinite(mid) || !isfinite(high)) {
+                        status = HWBPMAnalysisUnreadable;
+                        break;
+                    }
+                    peak.low_minimum = fminf(peak.low_minimum, low);
+                    peak.low_maximum = fmaxf(peak.low_maximum, low);
+                    peak.mid_minimum = fminf(peak.mid_minimum, mid);
+                    peak.mid_maximum = fmaxf(peak.mid_maximum, mid);
+                    peak.high_minimum = fminf(peak.high_minimum, high);
+                    peak.high_maximum = fmaxf(peak.high_maximum, high);
                     binFill += 1;
                     if (binFill != samplesPerPeak) {
                         continue;
                     }
-                    if (resultCount == resultCapacity) {
-                        size_t capacity = resultCapacity == 0 ? 1024 :
-                            resultCapacity * 2;
-                        if (capacity < resultCapacity ||
-                            capacity > SIZE_MAX / (2 * sizeof(float))) {
-                            status = HWBPMAnalysisUnreadable;
-                            break;
-                        }
-                        float *resized = realloc(
-                            result,
-                            capacity * 2 * sizeof(float));
-                        if (resized == NULL) {
-                            status = HWBPMAnalysisUnreadable;
-                            break;
-                        }
-                        result = resized;
-                        resultCapacity = capacity;
+                    if (!hw_waveform_reserve_peak(
+                            &result,
+                            resultCount,
+                            &resultCapacity)) {
+                        status = HWBPMAnalysisUnreadable;
+                        break;
                     }
-                    result[resultCount * 2] = minimum;
-                    result[resultCount * 2 + 1] = maximum;
+                    result[resultCount] = peak;
                     resultCount += 1;
                     binFill = 0;
-                    minimum = 1.0f;
-                    maximum = -1.0f;
+                    peak = hw_waveform_empty_peak();
                 }
             }
             if (retainedBlock != NULL) {
@@ -654,21 +760,13 @@ HWBPMAnalysisStatus hw_waveform_copy_peaks(
                 HWBPMAnalysisCancelled : HWBPMAnalysisUnreadable;
         }
         if (status == HWBPMAnalysisOK && binFill > 0) {
-            if (resultCount == resultCapacity) {
-                size_t capacity = resultCapacity == 0 ? 1 : resultCapacity + 1;
-                float *resized = realloc(
-                    result,
-                    capacity * 2 * sizeof(float));
-                if (resized == NULL) {
-                    status = HWBPMAnalysisUnreadable;
-                } else {
-                    result = resized;
-                    resultCapacity = capacity;
-                }
-            }
-            if (status == HWBPMAnalysisOK) {
-                result[resultCount * 2] = minimum;
-                result[resultCount * 2 + 1] = maximum;
+            if (!hw_waveform_reserve_peak(
+                    &result,
+                    resultCount,
+                    &resultCapacity)) {
+                status = HWBPMAnalysisUnreadable;
+            } else {
+                result[resultCount] = peak;
                 resultCount += 1;
             }
         }
@@ -676,7 +774,7 @@ HWBPMAnalysisStatus hw_waveform_copy_peaks(
             status = HWBPMAnalysisUnreadable;
         }
         if (status == HWBPMAnalysisOK) {
-            *values = result;
+            *peaks = result;
             *count = resultCount;
             *rateHz = HW_BPM_SAMPLE_RATE / (double)samplesPerPeak;
             result = NULL;
@@ -686,6 +784,6 @@ HWBPMAnalysisStatus hw_waveform_copy_peaks(
     }
 }
 
-void hw_waveform_free_peaks(float *values) {
-    free(values);
+void hw_waveform_free_peaks(HWWaveformPeak *peaks) {
+    free(peaks);
 }

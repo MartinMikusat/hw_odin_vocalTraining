@@ -269,6 +269,7 @@ ui_automation_action_effect :: proc(
 		     .Pitch_Reference_Down, .Pitch_Reference_Up,
 	     .Pitch_Octaves_Down, .Pitch_Octaves_Up, .Pitch_Labels, .Pitch_Transpose,
 	     .Pitch_Highlight, .Speed_Down, .Speed_Up, .Source_Hint,
+	     .Waveform_All, .Waveform_Low, .Waveform_Mid, .Waveform_High,
 	     .Start, .End, .Captions, .Confirm_Clip_Rename:
 		return .Persistent
 	case .Window_Close, .Window_Minimize, .Window_Zoom, .Import,

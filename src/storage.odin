@@ -1442,6 +1442,63 @@ database_interface_theme_save :: proc(
 		) && sqlite3_step(statement) == SQLITE_DONE
 }
 
+waveform_band_view_decode :: proc(value: string) -> (Waveform_Band_View, bool) {
+	switch value {
+	case "all": return .All, true
+	case "low": return .Low, true
+	case "mid": return .Mid, true
+	case "high": return .High, true
+	}
+	return .All, false
+}
+
+waveform_band_view_encode :: proc(view: Waveform_Band_View) -> string {
+	switch view {
+	case .All: return "all"
+	case .Low: return "low"
+	case .Mid: return "mid"
+	case .High: return "high"
+	}
+	return "all"
+}
+
+database_waveform_band_view_load :: proc(
+	database: ^SQLite_DB,
+) -> Waveform_Band_View {
+	if database == nil {return .All}
+	statement, ok := sqlite_prepare(
+		database,
+		"SELECT value FROM app_preferences WHERE key = 'waveform_band_view'",
+	)
+	if !ok {return .All}
+	defer sqlite3_finalize(statement)
+	if sqlite3_step(statement) != SQLITE_ROW {return .All}
+	value := sqlite3_column_text(statement, 0)
+	if value == nil {return .All}
+	view, valid := waveform_band_view_decode(string(value))
+	return valid ? view : .All
+}
+
+database_waveform_band_view_save :: proc(
+	database: ^SQLite_DB,
+	view: Waveform_Band_View,
+) -> bool {
+	if database == nil {return false}
+	statement, ok := sqlite_prepare(
+		database,
+		`INSERT INTO app_preferences (key, value)
+		 VALUES ('waveform_band_view', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	)
+	if !ok {return false}
+	defer sqlite3_finalize(statement)
+	return sqlite_bind_text_value(
+			statement,
+			1,
+			waveform_band_view_encode(view),
+		) && sqlite3_step(statement) == SQLITE_DONE
+}
+
 Active_View_Preference :: struct {
 	workflow: Workflow_Kind,
 	mode: UI_Mode,

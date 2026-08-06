@@ -22,9 +22,31 @@ Waveform_Peak :: struct {
 	maximum: f32,
 }
 
+Waveform_Band :: enum {
+	Low,
+	Mid,
+	High,
+}
+
+Waveform_Band_View :: enum {
+	All,
+	Low,
+	Mid,
+	High,
+}
+
+Waveform_Band_Peak :: struct {
+	low: Waveform_Peak,
+	mid: Waveform_Peak,
+	high: Waveform_Peak,
+}
+
+#assert(size_of(Waveform_Band_Peak) == size_of(f32)*6)
+#assert(align_of(Waveform_Band_Peak) == align_of(f32))
+
 Waveform_Cache_Entry :: struct {
 	path: string,
-	peaks: []Waveform_Peak,
+	peaks: []Waveform_Band_Peak,
 	rate_hz: f64,
 	last_used: u64,
 }
@@ -36,6 +58,7 @@ Waveform_Runtime :: struct {
 	view_end_seconds: f64,
 	view_initialized: bool,
 	use_counter: u64,
+	band_view: Waveform_Band_View,
 }
 
 Waveform_Job :: struct {
@@ -44,7 +67,7 @@ Waveform_Job :: struct {
 	path: string,
 	cancellation: BPM_Cancellation_Token,
 	status: BPM_Analysis_Status,
-	values: [^]f32,
+	peaks: [^]Waveform_Band_Peak,
 	count: uint,
 	rate_hz: f64,
 	completion: Media_Task_Completion,
@@ -89,20 +112,17 @@ waveform_cache_active :: proc() -> ^Waveform_Cache_Entry {
 
 waveform_cache_store :: proc(
 	path: string,
-	values: [^]f32,
+	values: [^]Waveform_Band_Peak,
 	count: uint,
 	rate_hz: f64,
 ) -> bool {
 	if len(path) == 0 || values == nil || count == 0 || rate_hz <= 0 {
 		return false
 	}
-	peaks, allocation_error := make([]Waveform_Peak, int(count))
+	peaks, allocation_error := make([]Waveform_Band_Peak, int(count))
 	if allocation_error != nil {return false}
 	for index in 0 ..< int(count) {
-		peaks[index] = {
-			minimum = values[index*2],
-			maximum = values[index*2+1],
-		}
+		peaks[index] = values[index]
 	}
 	path_copy, path_error := strings.clone(path)
 	if path_error != nil {delete(peaks); return false}
@@ -131,7 +151,7 @@ waveform_cache_store :: proc(
 waveform_job_destroy :: proc(job: ^Waveform_Job) {
 	if job == nil {return}
 	delete(job.path)
-	if job.values != nil {hw_waveform_free_peaks(job.values)}
+	if job.peaks != nil {hw_waveform_free_peaks(job.peaks)}
 	free(job)
 }
 
@@ -156,7 +176,7 @@ waveform_job_execute :: proc(job: ^Waveform_Job) {
 	job.status = hw_waveform_copy_peaks(
 		path,
 		&job.cancellation,
-		&job.values,
+		&job.peaks,
 		&job.count,
 		&job.rate_hz,
 	)
@@ -229,6 +249,54 @@ waveform_beat_is_downbeat :: proc(index: int) -> bool {
 	return ((index % 4) + 4) % 4 == 0
 }
 
+waveform_peak_for_band :: proc(
+	peak: Waveform_Band_Peak,
+	band: Waveform_Band,
+) -> Waveform_Peak {
+	switch band {
+	case .Low: return peak.low
+	case .Mid: return peak.mid
+	case .High: return peak.high
+	}
+	return {}
+}
+
+waveform_shared_peak_magnitude :: proc(peaks: []Waveform_Band_Peak) -> f64 {
+	largest := f64(0.05)
+	for band_peak in peaks {
+		for band in Waveform_Band {
+			peak := waveform_peak_for_band(band_peak, band)
+			largest = max(
+				largest,
+				abs(f64(peak.minimum)),
+				abs(f64(peak.maximum)),
+			)
+		}
+	}
+	return largest
+}
+
+waveform_band_visible :: proc(
+	view: Waveform_Band_View,
+	band: Waveform_Band,
+) -> bool {
+	if view == .All {return true}
+	return (view == .Low && band == .Low) ||
+	       (view == .Mid && band == .Mid) ||
+	       (view == .High && band == .High)
+}
+
+waveform_set_band_view :: proc(view: Waveform_Band_View) -> bool {
+	if waveform_runtime.band_view == view {return true}
+	if !database_waveform_band_view_save(library_database, view) {
+		set_error_status("Unable to save the waveform frequency view")
+		return false
+	}
+	waveform_runtime.band_view = view
+	ui.needs_redraw = true
+	return true
+}
+
 waveform_runtime_set_path :: proc(path: string, state_value: Waveform_State) -> bool {
 	copy, error := strings.clone(path)
 	if error != nil {return false}
@@ -288,7 +356,7 @@ on_waveform_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 	if matches {
 		switch job.status {
 		case .OK:
-			if waveform_cache_store(job.path, job.values, job.count, job.rate_hz) {
+			if waveform_cache_store(job.path, job.peaks, job.count, job.rate_hz) {
 				waveform_runtime.state = .Ready
 			} else {
 				waveform_runtime.state = .Unavailable
