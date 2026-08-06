@@ -246,8 +246,9 @@ to remove the clip record and its managed video file after confirmation; the
 source remains unchanged. Select a clip, then select **Rename** to edit its saved name. The rename
 dialog keeps the original name visible above the new name field.
 Select **Metadata** to inspect the clip identifier, source, range, duration,
-source URL, clip path, and clip availability. Select **View Source** in that
-dialog to switch to Sources and load the clip source.
+source URL, clip path, and clip availability. Select the source URL to open it
+in the default browser. Select the clip filename to reveal it in Finder. Select
+**View Source** in that dialog to switch to Sources and load the clip source.
 If a source has multiple imported timestamps, the Reset control becomes a
 timestamp selector. Selecting a value seeks there and saves it as the source's
 active timestamp.

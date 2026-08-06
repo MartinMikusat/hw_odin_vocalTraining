@@ -577,6 +577,8 @@ UI_Action_Kind :: enum {
 	Clip_Rename,
 	Close_Clip_Metadata,
 	View_Clip_Source,
+	Open_Clip_Source_URL,
+	Reveal_Clip_File,
 	Request_Delete_Clip,
 	Cancel_Delete_Clip,
 	Confirm_Delete_Clip,
@@ -2056,6 +2058,11 @@ clip_metadata_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + modal.h - 128 - f64(row) * 28, modal.w - 48, 27}
 }
 
+clip_metadata_value_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
+	metadata_row := clip_metadata_row_rect(modal, row)
+	return UI_Rect{metadata_row.x + 122, metadata_row.y, metadata_row.w - 132, metadata_row.h}
+}
+
 clip_metadata_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
 }
@@ -2474,6 +2481,28 @@ close_clip_metadata :: proc() {
 	ui.clip_metadata_open = false
 	ui.clip_metadata_index = -1
 	ui.needs_redraw = true
+}
+
+open_clip_source_url :: proc() -> bool {
+	if ui.clip_metadata_index < 0 || ui.clip_metadata_index >= len(state.clips) {return false}
+	source_index := source_index_for_clip(state.sources[:], state.clips[:], ui.clip_metadata_index)
+	if source_index < 0 || len(state.sources[source_index].url) == 0 {return false}
+	url := msg_id_id(objc_getClass("NSURL"), sel_registerName("URLWithString:"), nsstring(state.sources[source_index].url))
+	if url == nil {return false}
+	workspace := msg_id(objc_getClass("NSWorkspace"), sel_registerName("sharedWorkspace"))
+	msg_void_id(workspace, sel_registerName("openURL:"), url)
+	return true
+}
+
+reveal_clip_file :: proc() -> bool {
+	if ui.clip_metadata_index < 0 || ui.clip_metadata_index >= len(state.clips) {return false}
+	path := state.clips[ui.clip_metadata_index].clip_path
+	if len(path) == 0 || !os.exists(path) {return false}
+	url := msg_id_id(objc_getClass("NSURL"), sel_registerName("fileURLWithPath:"), nsstring(path))
+	urls := msg_id_id(objc_getClass("NSArray"), sel_registerName("arrayWithObject:"), url)
+	workspace := msg_id(objc_getClass("NSWorkspace"), sel_registerName("sharedWorkspace"))
+	msg_void_id(workspace, sel_registerName("activateFileViewerSelectingURLs:"), urls)
+	return true
 }
 
 request_clip_delete :: proc() -> bool {
@@ -5577,13 +5606,21 @@ draw_clip_metadata :: proc(
 		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, theme.row)}
 		draw_text_in_rect(ctx, font, label, UI_Rect{row.x + 10, row.y, 106, row.h}, .Start, .Center, bright)
 		value_color := bright
+		value_rect := clip_metadata_value_rect(modal, row_index)
+		interactive := row_index == 7 || row_index == 8
+		if interactive {
+			kind := row_index == 7 ? UI_Action_Kind.Open_Clip_Source_URL : UI_Action_Kind.Reveal_Clip_File
+			if ui_action_enabled_for_current_job(kind) {
+				value_color = cyan
+				if contains(value_rect, ui.mouse) {fill_overlay_rect(ctx, value_rect, theme.row_hover)}
+			}
+		}
 		if (row_index == 1 && source_index < 0) ||
 		   (row_index == 9 && !clip_available) {
 			value_color = danger
 		} else if row_index == 9 {
 			value_color = cyan
 		}
-		value_rect := UI_Rect{row.x + 122, row.y, row.w - 132, row.h}
 		if row_index >= 4 && row_index <= 6 {
 			draw_timestamp_text_in_rect(ctx, font, values[row_index], value_rect, .Start, .Center, value_color)
 		} else {
@@ -9280,6 +9317,16 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 			ui.clip_metadata_index,
 		) >= 0
 	}
+	if kind == .Open_Clip_Source_URL {
+		if ui.clip_metadata_index < 0 || ui.clip_metadata_index >= len(state.clips) {return false}
+		source_index := source_index_for_clip(state.sources[:], state.clips[:], ui.clip_metadata_index)
+		return source_index >= 0 && len(state.sources[source_index].url) > 0
+	}
+	if kind == .Reveal_Clip_File {
+		return ui.clip_metadata_index >= 0 &&
+		       ui.clip_metadata_index < len(state.clips) &&
+		       os.exists(state.clips[ui.clip_metadata_index].clip_path)
+	}
 	if kind == .Confirm_Clip_Rename {
 		return ui.clip_rename_index >= 0 &&
 		       ui.clip_rename_index < len(state.clips) &&
@@ -10237,6 +10284,8 @@ build_ui_controls_for_scope :: proc(
 			.View_Clip_Source,
 			flash_label = "view clip source",
 		)
+		add_ax_element(array, element_class, "Open source URL in the default browser", "AXLink", clip_metadata_value_rect(modal, 7), .Open_Clip_Source_URL, flash_label="open source URL")
+		add_ax_element(array, element_class, "Reveal clip file in Finder", "AXButton", clip_metadata_value_rect(modal, 8), .Reveal_Clip_File, flash_label="reveal clip file")
 		add_ax_element(array, element_class, "Delete clip and managed media", "AXButton", clip_metadata_delete_rect(modal), .Request_Delete_Clip, flash_label="delete clip")
 		validate_ui_controls()
 		return
@@ -11175,6 +11224,10 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		close_clip_metadata()
 	case .View_Clip_Source:
 		view_clip_source()
+	case .Open_Clip_Source_URL:
+		return open_clip_source_url()
+	case .Reveal_Clip_File:
+		return reveal_clip_file()
 	case .Request_Delete_Clip:
 		return request_clip_delete()
 	case .Cancel_Delete_Clip:
