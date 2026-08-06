@@ -184,6 +184,7 @@ source_local_paths: [dynamic]string
 source_local_titles: [dynamic]string
 pending_local_relink_path: string
 pending_source_delete_id: string
+pending_clip_delete_id: string
 
 Helper_Status :: struct {
 	checked: bool,
@@ -3061,6 +3062,42 @@ delete_source_by_id :: proc(source_id: string) -> bool {
 	return true
 }
 
+delete_clip_by_id :: proc(clip_id: string) -> bool {
+	if len(clip_id) == 0 || library_transfer_busy() ||
+	   len(import_jobs) > 0 || len(export_jobs) > 0 {return false}
+	index := clip_index_for_id(state.clips[:], clip_id)
+	if index < 0 {return false}
+	clip_path := strings.clone(state.clips[index].clip_path, context.temp_allocator)
+	active_clip_deleted := ui.active_clip == index
+	candidate, copied := app_state_collections_clone(&state)
+	if !copied {return false}
+	defer app_state_collections_destroy(&candidate)
+	delete_clip(&candidate.clips[index])
+	ordered_remove(&candidate.clips, index)
+	if !commit_library_state(&candidate) {
+		set_error_status("Unable to delete the clip from the library")
+		return false
+	}
+	if active_clip_deleted {
+		metal_player_clear()
+		ui.active_clip = -1
+		ui.source_playback_active = false
+	} else if ui.active_clip > index {
+		ui.active_clip -= 1
+	}
+	close_clip_metadata()
+	ui.clip_delete_confirm_open = false
+	delete(pending_clip_delete_id)
+	pending_clip_delete_id = ""
+	refresh_clips()
+	if os.exists(clip_path) && os.remove(clip_path) != nil {
+		set_error_status("Clip deleted; its managed file could not be removed")
+	} else {
+		set_success_status("Clip and managed media deleted")
+	}
+	return true
+}
+
 refetch_source :: proc(
 	source_index: int,
 	maximum_height := 0,
@@ -4539,6 +4576,7 @@ video_clips_process_main :: proc(args := os.args) {
 	defer delete(major_change_pending.detail)
 	defer delete(pending_local_relink_path)
 	defer delete(pending_source_delete_id)
+	defer delete(pending_clip_delete_id)
 	defer source_local_paths_clear()
 	defer source_probe_results_clear()
 	defer source_probe_cache_clear()

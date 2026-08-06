@@ -241,7 +241,9 @@ Each footer task has its own Stop action.
 The Sources footer highlights each missing range endpoint. It enables and
 highlights **Commit** only after the range is at least one second long. The
 footer shows the calculated clip duration beside the range.
-Select a clip, then select **Rename** to edit its saved name. The rename
+Right-click a clip to open its Metadata dialog. Select **Delete Clip…** there
+to remove the clip record and its managed video file after confirmation; the
+source remains unchanged. Select a clip, then select **Rename** to edit its saved name. The rename
 dialog keeps the original name visible above the new name field.
 Select **Metadata** to inspect the clip identifier, source, range, duration,
 source URL, clip path, and clip availability. Select **View Source** in that

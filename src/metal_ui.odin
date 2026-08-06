@@ -248,6 +248,7 @@ UI_State :: struct {
 	clip_rename_index: int,
 	clip_metadata_open: bool,
 	clip_metadata_index: int,
+	clip_delete_confirm_open: bool,
 	randomize_help_open: bool,
 	data_modal_open: bool,
 	notification_modal_open: bool,
@@ -576,6 +577,9 @@ UI_Action_Kind :: enum {
 	Clip_Rename,
 	Close_Clip_Metadata,
 	View_Clip_Source,
+	Request_Delete_Clip,
+	Cancel_Delete_Clip,
+	Confirm_Delete_Clip,
 	Volume_Down,
 	Volume_Up,
 	Speed_Down,
@@ -2056,6 +2060,24 @@ clip_metadata_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
 	return UI_Rect{modal.x + 24, modal.y + 22, 112, 34}
 }
 
+clip_metadata_delete_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 152, modal.y + 22, 164, 34}
+}
+
+clip_delete_confirm_rect :: proc() -> UI_Rect {
+	width := min(max(560, ui.width * 0.5), 700)
+	height := 270.0
+	return UI_Rect{(ui.width-width)/2, (ui.height-height)/2, width, height}
+}
+
+clip_delete_cancel_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + 24, modal.y + 22, 124, 34}
+}
+
+clip_delete_confirm_action_rect :: proc(modal: UI_Rect) -> UI_Rect {
+	return UI_Rect{modal.x + modal.w - 188, modal.y + 22, 164, 34}
+}
+
 randomize_help_modal_rect :: proc() -> UI_Rect {
 	width := min(max(720, ui.width * 0.6), 920)
 	height := min(max(640, ui.height * 0.72), 700)
@@ -2435,10 +2457,12 @@ confirm_clip_rename :: proc() {
 	set_success_status(fmt.tprintf("Renamed clip to %s", renamed))
 }
 
-open_clip_metadata :: proc() {
+open_clip_metadata :: proc(clip_index := -1) {
 	cancel_ui_flash()
-	if ui.active_clip < 0 || ui.active_clip >= len(state.clips) {return}
-	ui.clip_metadata_index = ui.active_clip
+	index := clip_index
+	if index < 0 {index = ui.active_clip}
+	if index < 0 || index >= len(state.clips) {return}
+	ui.clip_metadata_index = index
 	ui.clip_metadata_open = true
 	ui.focus = .None
 	text_input.end_pointer_selection(&ui.input_state)
@@ -2449,6 +2473,27 @@ close_clip_metadata :: proc() {
 	cancel_ui_flash()
 	ui.clip_metadata_open = false
 	ui.clip_metadata_index = -1
+	ui.needs_redraw = true
+}
+
+request_clip_delete :: proc() -> bool {
+	if !ui.clip_metadata_open || ui.clip_metadata_index < 0 ||
+	   ui.clip_metadata_index >= len(state.clips) {return false}
+	if library_transfer_busy() || len(import_jobs) > 0 || len(export_jobs) > 0 {
+		set_error_status("Wait for active media operations before deleting a clip")
+		return false
+	}
+	delete(pending_clip_delete_id)
+	pending_clip_delete_id = strings.clone(state.clips[ui.clip_metadata_index].id)
+	ui.clip_delete_confirm_open = true
+	ui.needs_redraw = true
+	return true
+}
+
+cancel_clip_delete :: proc() {
+	ui.clip_delete_confirm_open = false
+	delete(pending_clip_delete_id)
+	pending_clip_delete_id = ""
 	ui.needs_redraw = true
 }
 
@@ -5471,6 +5516,7 @@ draw_clip_metadata :: proc(
 	modal := clip_metadata_modal_rect()
 	close_button := ui_control_rect(.Close_Clip_Metadata)
 	source_button := ui_control_rect(.View_Clip_Source)
+	delete_button := ui_control_rect(.Request_Delete_Clip)
 	clip := &state.clips[ui.clip_metadata_index]
 	source_index := source_index_for_clip(
 		state.sources[:],
@@ -5547,6 +5593,34 @@ draw_clip_metadata :: proc(
 	fill_overlay_rect(ctx, source_button, source_color)
 	if source_enabled {fill_overlay_border(ctx, source_button, cyan)}
 	draw_text_in_rect(ctx, font, "VIEW SOURCE", source_button, .Center, .Center, source_enabled ? cyan : dim)
+	delete_color := theme.panel_alt
+	if contains(delete_button, ui.mouse) {delete_color = theme.row_hover}
+	fill_overlay_rect(ctx, delete_button, delete_color)
+	fill_overlay_border(ctx, delete_button, danger)
+	draw_text_in_rect(ctx, font, "DELETE CLIP…", delete_button, .Center, .Center, danger)
+}
+
+draw_clip_delete_confirmation :: proc(ctx, font: rawptr, bright, muted, danger: [4]f64) {
+	if !ui.clip_delete_confirm_open {return}
+	index := clip_index_for_id(state.clips[:], pending_clip_delete_id)
+	if index < 0 {cancel_clip_delete(); return}
+	clip := &state.clips[index]
+	modal := clip_delete_confirm_rect()
+	theme := ui_theme_colors()
+	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, theme.backdrop)
+	fill_overlay_rect(ctx, modal, theme.modal)
+	header := UI_Rect{modal.x, modal.y+modal.h-54, modal.w, 54}
+	fill_overlay_rect(ctx, header, theme.panel_alt)
+	draw_text_in_rect(ctx, font, "DELETE CLIP?", UI_Rect{header.x+20, header.y, header.w-40, header.h}, .Start, .Center, danger)
+	draw_text_in_rect(ctx, font, clip.name, UI_Rect{modal.x+24, modal.y+modal.h-100, modal.w-48, 28}, .Start, .Center, bright)
+	draw_text_in_rect(ctx, font, "This permanently removes the clip record and its managed video file. The source is unchanged.", UI_Rect{modal.x+24, modal.y+modal.h-164, modal.w-48, 48}, .Start, .Center, muted, 10)
+	cancel := ui_control_rect(.Cancel_Delete_Clip)
+	confirm := ui_control_rect(.Confirm_Delete_Clip)
+	fill_overlay_rect(ctx, cancel, contains(cancel, ui.mouse) ? theme.row_hover : theme.panel_alt)
+	draw_text_in_rect(ctx, font, "CANCEL", cancel, .Center, .Center, muted)
+	fill_overlay_rect(ctx, confirm, contains(confirm, ui.mouse) ? theme.row_hover : theme.panel_alt)
+	fill_overlay_border(ctx, confirm, danger)
+	draw_text_in_rect(ctx, font, "DELETE CLIP", confirm, .Center, .Center, danger)
 }
 
 draw_randomize_help :: proc(
@@ -8608,6 +8682,7 @@ build_overlay_commands :: proc(modal_only := false) {
 	draw_source_delete_confirmation(ctx, small_font, bright, muted, danger)
 	draw_clip_rename(ctx, small_font, bright, muted, dim, accent)
 	draw_clip_metadata(ctx, small_font, bright, muted, dim, cyan, danger)
+	draw_clip_delete_confirmation(ctx, small_font, bright, muted, danger)
 	draw_randomize_help(ctx, small_font, bright, muted, dim, cyan)
 	draw_pitch_help(ctx, small_font, bright, muted, cyan)
 	draw_data_modal(ctx, small_font, bright, muted, dim, warning, cyan)
@@ -9250,6 +9325,7 @@ add_ax_element :: proc(
 		flags -= {.Primary_Press}
 		flags += {.Secondary_Press}
 	}
+	if kind == .Clip {flags += {.Secondary_Press}}
 	#partial switch kind {
 	case .Command_Palette_Search, .Settings_Search, .URL, .Source_Search, .Transcript_Search, .Clip_Search, .Clip_Name, .Clip_Rename:
 		flags += {.Editable, .Drag}
@@ -10124,6 +10200,13 @@ build_ui_controls_for_scope :: proc(
 		validate_ui_controls()
 		return
 	}
+	if scope == .Active && ui.clip_delete_confirm_open {
+		modal := clip_delete_confirm_rect()
+		add_ax_element(array, element_class, "Cancel clip deletion", "AXButton", clip_delete_cancel_rect(modal), .Cancel_Delete_Clip, flash_label="cancel clip deletion")
+		add_ax_element(array, element_class, "Permanently delete clip and managed media", "AXButton", clip_delete_confirm_action_rect(modal), .Confirm_Delete_Clip, flash_label="delete clip")
+		validate_ui_controls()
+		return
+	}
 	if scope == .Active && ui.clip_metadata_open {
 		modal := clip_metadata_modal_rect()
 		add_ax_element(
@@ -10144,6 +10227,7 @@ build_ui_controls_for_scope :: proc(
 			.View_Clip_Source,
 			flash_label = "view clip source",
 		)
+		add_ax_element(array, element_class, "Delete clip and managed media", "AXButton", clip_metadata_delete_rect(modal), .Request_Delete_Clip, flash_label="delete clip")
 		validate_ui_controls()
 		return
 	}
@@ -11081,6 +11165,13 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		close_clip_metadata()
 	case .View_Clip_Source:
 		view_clip_source()
+	case .Request_Delete_Clip:
+		return request_clip_delete()
+	case .Cancel_Delete_Clip:
+		cancel_clip_delete()
+	case .Confirm_Delete_Clip:
+		ui.clip_delete_confirm_open = false
+		return delete_clip_by_id(pending_clip_delete_id)
 	case .Volume_Down:
 		adjust_player_volume(-0.1)
 	case .Volume_Up:
@@ -12026,6 +12117,12 @@ dispatch_click :: proc(point: Point, click_count: uint = 1) {
 		_ = activate_registered_target_at_point(point, click_count)
 		return
 	}
+	if ui.clip_delete_confirm_open {
+		modal := clip_delete_confirm_rect()
+		if !contains(modal, point) {cancel_clip_delete(); return}
+		_ = activate_registered_target_at_point(point, click_count)
+		return
+	}
 	if ui.clip_metadata_open {
 		modal := clip_metadata_modal_rect()
 		if !contains(modal, point) {close_clip_metadata(); return}
@@ -12171,14 +12268,20 @@ on_metal_right_mouse_down :: proc "c" (self: Id, command: Sel, event: Id) {
 	   ui.clip_rename_open || ui.clip_metadata_open ||
 	   ui.randomize_help_open || ui.pitch.help_open ||
 	   ui.data_modal_open || ui.notification_modal_open ||
-	   ui.mode != .Create {
+	   (ui.mode != .Create && ui.mode != .Play) {
 		return
 	}
 	window_point := msg_point(event, sel_registerName("locationInWindow"))
 	point := msg_point_point_id(self, sel_registerName("convertPoint:fromView:"), window_point, nil)
 	ui.mouse = point
 	control := find_shared_ui_control_at_point(point, .Secondary_Press)
-	if control != nil {_ = activate_ui_action(control.action)}
+	if control != nil {
+		if control.action.kind == .Clip {
+			open_clip_metadata(control.action.index)
+		} else {
+			_ = activate_ui_action(control.action)
+		}
+	}
 	ui.needs_redraw = true
 }
 
@@ -12760,6 +12863,7 @@ on_metal_key_down :: proc "c" (self: Id, command: Sel, event: Id) {
 		_ = begin_ui_flash()
 		return
 	}
+	if ui.clip_delete_confirm_open && key == 53 {cancel_clip_delete(); return}
 	if ui.clip_metadata_open && key == 53 {close_clip_metadata(); return}
 	if ui.clip_rename_open && key == 53 {request_modal_discard(.Clip_Rename); return}
 	if ui.randomize_help_open {
