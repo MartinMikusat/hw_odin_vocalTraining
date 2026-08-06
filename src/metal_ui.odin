@@ -2043,8 +2043,8 @@ clip_rename_confirm_rect :: proc(modal: UI_Rect) -> UI_Rect {
 }
 
 clip_metadata_modal_rect_for_size :: proc(view_width, view_height: f64) -> UI_Rect {
-	width := min(max(620, view_width * 0.58), 780)
-	height := min(max(500, view_height * 0.68), 580)
+	width := min(max(600, view_width * 0.52), 680)
+	height := min(max(440, view_height * 0.56), 460)
 	return UI_Rect{(view_width - width) / 2, (view_height - height) / 2, width, height}
 }
 
@@ -2053,7 +2053,7 @@ clip_metadata_modal_rect :: proc() -> UI_Rect {
 }
 
 clip_metadata_row_rect :: proc(modal: UI_Rect, row: int) -> UI_Rect {
-	return UI_Rect{modal.x + 24, modal.y + modal.h - 142 - f64(row) * 32, modal.w - 48, 30}
+	return UI_Rect{modal.x + 24, modal.y + modal.h - 128 - f64(row) * 28, modal.w - 48, 27}
 }
 
 clip_metadata_close_rect :: proc(modal: UI_Rect) -> UI_Rect {
@@ -5537,10 +5537,11 @@ draw_clip_metadata :: proc(
 	theme := ui_theme_colors()
 	fill_overlay_rect(ctx, UI_Rect{0, 0, ui.width, ui.height}, theme.backdrop)
 	fill_overlay_rect(ctx, modal, theme.modal)
-	header := UI_Rect{modal.x, modal.y + modal.h - 54, modal.w, 54}
+	header := UI_Rect{modal.x, modal.y + modal.h - 50, modal.w, 50}
 	fill_overlay_rect(ctx, header, theme.panel_alt)
 	draw_styled_text_in_rect(ctx, TEXT_STYLE_HEADING, "CLIP METADATA", UI_Rect{header.x + 20, header.y, header.w - 40, header.h}, .Start, .Center, bright)
-	draw_text_in_rect(ctx, font, clip.name, UI_Rect{modal.x + 24, modal.y + modal.h - 100, modal.w - 48, 28}, .Start, .Center, cyan)
+	fill_overlay_rect(ctx, UI_Rect{modal.x + 24, modal.y + modal.h - 103, 3, 29}, cyan)
+	draw_text_in_rect(ctx, font, clip.name, UI_Rect{modal.x + 38, modal.y + modal.h - 103, modal.w - 62, 29}, .Start, .Center, cyan)
 	clip_available := os.exists(clip.clip_path)
 	labels := [10]string{
 		"CLIP ID",
@@ -5563,25 +5564,34 @@ draw_clip_metadata :: proc(
 		format_timestamp(clip.end_seconds),
 		format_timestamp(clip.end_seconds - clip.start_seconds),
 		source_url,
-		clip.clip_path,
+		filepath.base(clip.clip_path),
 		clip_available ? "AVAILABLE" : "MISSING",
 	}
+	table_top := clip_metadata_row_rect(modal, 0)
+	table_bottom := clip_metadata_row_rect(modal, len(labels) - 1)
+	table := UI_Rect{table_top.x, table_bottom.y, table_top.w, table_top.y + table_top.h - table_bottom.y}
+	fill_overlay_rect(ctx, table, theme.field)
+	fill_overlay_border(ctx, table, theme.rule)
 	for label, row_index in labels {
 		row := clip_metadata_row_rect(modal, row_index)
 		if row_index % 2 == 0 {fill_overlay_rect(ctx, row, theme.row)}
-		draw_styled_text_in_rect(ctx, TEXT_STYLE_LABEL, label, UI_Rect{row.x + 10, row.y, 128, row.h}, .Start, .Center, muted)
+		draw_text_in_rect(ctx, font, label, UI_Rect{row.x + 10, row.y, 106, row.h}, .Start, .Center, bright)
 		value_color := bright
 		if (row_index == 1 && source_index < 0) ||
 		   (row_index == 9 && !clip_available) {
 			value_color = danger
+		} else if row_index == 9 {
+			value_color = cyan
 		}
-		value_rect := UI_Rect{row.x + 146, row.y, row.w - 156, row.h}
+		value_rect := UI_Rect{row.x + 122, row.y, row.w - 132, row.h}
 		if row_index >= 4 && row_index <= 6 {
 			draw_timestamp_text_in_rect(ctx, font, values[row_index], value_rect, .Start, .Center, value_color)
 		} else {
 			draw_text_in_rect(ctx, font, values[row_index], value_rect, .Start, .Center, value_color)
 		}
 	}
+	footer := UI_Rect{modal.x, modal.y, modal.w, 78}
+	fill_overlay_rect(ctx, footer, theme.panel_alt)
 	close_color := theme.panel_alt
 	if contains(close_button, ui.mouse) {close_color = theme.row_hover}
 	fill_overlay_rect(ctx, close_button, close_color)
