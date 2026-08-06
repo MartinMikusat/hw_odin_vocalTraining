@@ -3031,6 +3031,11 @@ clip_command_uses_range_duration_test :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(command, "-t 7.750"))
 	testing.expect(t, strings.contains(command, "-vf 'setpts=PTS-STARTPTS'"))
 	testing.expect(t, strings.contains(command, "-af 'asetpts=PTS-STARTPTS'"))
+	testing.expect(t, strings.contains(command, "-c:v hevc_videotoolbox"))
+	testing.expect(t, strings.contains(command, "-profile:v main"))
+	testing.expect(t, strings.contains(command, "-pix_fmt yuv420p"))
+	testing.expect(t, strings.contains(command, "-q:v 60"))
+	testing.expect(t, strings.contains(command, "-tag:v hvc1"))
 	testing.expect(t, strings.contains(command, "'/tmp/source video.mp4'"))
 	testing.expect(t, strings.contains(command, ">> '/tmp/ffmpeg-source-1.log'"))
 	testing.expect(t, strings.has_suffix(
@@ -7433,7 +7438,26 @@ silent_clip_export_omits_audio_filters_test :: proc(t: ^testing.T) {
 		has_audio = false,
 	)
 	testing.expect(t, strings.contains(command, " -an "))
+	testing.expect(t, strings.contains(command, "-c:v hevc_videotoolbox"))
+	testing.expect(t, strings.contains(command, "-tag:v hvc1"))
 	testing.expect(t, !strings.contains(command, "-af 'asetpts"))
+}
+
+@(test)
+managed_hevc_probe_requires_hevc_hvc1_mp4_and_expected_audio_test :: proc(t: ^testing.T) {
+	probe := Local_Source_Probe{
+		metadata = Source_Context_Metadata{ext="mov,mp4,m4a,3gp,3g2,mj2"},
+		has_video = true,
+		has_audio = true,
+		compatible_video = true,
+		compatible_video_tag = true,
+		compatible_audio = true,
+	}
+	testing.expect(t, managed_hevc_probe_valid(probe, true))
+	probe.compatible_video_tag = false
+	testing.expect(t, !managed_hevc_probe_valid(probe, true))
+	probe.compatible_video_tag = true
+	testing.expect(t, !managed_hevc_probe_valid(probe, false))
 }
 
 @(test)

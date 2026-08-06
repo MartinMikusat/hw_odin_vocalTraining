@@ -16,6 +16,7 @@ import mem_virtual "core:mem/virtual"
 FFProbe_Stream :: struct {
 	codec_type: string,
 	codec_name: string,
+	codec_tag_string: string,
 	width: int,
 	height: int,
 	avg_frame_rate: string,
@@ -38,6 +39,7 @@ Local_Source_Probe :: struct {
 	has_video: bool,
 	has_audio: bool,
 	compatible_video: bool,
+	compatible_video_tag: bool,
 	compatible_audio: bool,
 }
 
@@ -102,7 +104,8 @@ local_source_probe :: proc(path: string, allocator := context.allocator) -> (Loc
 		case "video":
 			if result.has_video {continue}
 			result.has_video = true
-			result.compatible_video = stream.codec_name == "h264"
+			result.compatible_video = stream.codec_name == MANAGED_HEVC_CODEC
+			result.compatible_video_tag = stream.codec_tag_string == MANAGED_HEVC_TAG
 			result.metadata.width = stream.width
 			result.metadata.height = stream.height
 			result.metadata.fps = local_source_parse_rate(stream.avg_frame_rate)
@@ -136,9 +139,27 @@ local_source_run_ffmpeg :: proc(job: ^Import_Job, command: []string) -> bool {
 	return !cancelled && wait_error == nil && process_state.success
 }
 
+managed_hevc_probe_valid :: proc(probe: Local_Source_Probe, expect_audio: bool) -> bool {
+	return probe.has_video &&
+	       probe.compatible_video &&
+	       probe.compatible_video_tag &&
+	       strings.contains(probe.metadata.ext, "mp4") &&
+	       probe.has_audio == expect_audio &&
+	       (!expect_audio || probe.compatible_audio)
+}
+
+managed_hevc_file_validate :: proc(path: string, expect_audio: bool) -> bool {
+	probe, probed := local_source_probe(path, context.temp_allocator)
+	return probed &&
+	       managed_hevc_probe_valid(probe, expect_audio) &&
+	       media_file_validate_tracks(path, expect_audio)
+}
+
 local_source_stage :: proc(job: ^Import_Job, path, staged_path: string, probe: Local_Source_Probe) -> bool {
-	if probe.compatible_video && (!probe.has_audio || probe.compatible_audio) &&
-	   strings.contains(probe.metadata.ext, "mov,mp4") {
+	extension := strings.to_lower(filepath.ext(path), context.temp_allocator)
+	if probe.compatible_video && probe.compatible_video_tag &&
+	   (!probe.has_audio || probe.compatible_audio) &&
+	   extension == ".mp4" {
 		return os2.copy_file(staged_path, path) == nil
 	}
 	command := make([dynamic]string, context.temp_allocator)
@@ -147,8 +168,15 @@ local_source_stage :: proc(job: ^Import_Job, path, staged_path: string, probe: L
 	if probe.compatible_video {
 		append(&command, "-c:v", "copy")
 	} else {
-		append(&command, "-c:v", "h264_videotoolbox")
+		append(
+			&command,
+			"-c:v", "hevc_videotoolbox",
+			"-profile:v", "main",
+			"-pix_fmt", "yuv420p",
+			"-q:v", fmt.tprintf("%d", MANAGED_HEVC_QUALITY),
+		)
 	}
+	append(&command, "-tag:v", MANAGED_HEVC_TAG)
 	if probe.has_audio {
 		if probe.compatible_audio {append(&command, "-c:a", "copy")} else {append(&command, "-c:a", "aac")}
 	} else {
@@ -200,7 +228,15 @@ import_job_process_local :: proc(job: ^Import_Job) -> bool {
 	import_job_set_phase(job, .Processing_Local_Media)
 	if !local_source_stage(job, job.local_path, staged_path, probe) {return false}
 	import_job_set_phase(job, .Validating_Local_Media)
-	if !media_file_validate_tracks(staged_path, probe.has_audio) {return false}
+	managed_probe, managed_probed := local_source_probe(staged_path, allocator)
+	if !managed_probed ||
+	   !managed_hevc_probe_valid(managed_probe, probe.has_audio) ||
+	   !media_file_validate_tracks(staged_path, probe.has_audio) {
+		if managed_probed {delete_source_context_metadata(&managed_probe.metadata, allocator)}
+		return false
+	}
+	delete_source_context_metadata(&probe.metadata, allocator)
+	probe = managed_probe
 	media_path := fmt.aprintf("%s/%s.mp4", directory, job.last_video_id, allocator=allocator)
 	if !os.rename(staged_path, media_path) {return false}
 	metadata_path := fmt.aprintf("%s/%s.info.json", directory, job.last_video_id, allocator=allocator)

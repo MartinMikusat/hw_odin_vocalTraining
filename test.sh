@@ -38,13 +38,21 @@ ffmpeg \
   -t 0.5 \
   -vf 'setpts=PTS-STARTPTS' \
   -af 'asetpts=PTS-STARTPTS' \
-  -c:v libx264 \
+  -c:v hevc_videotoolbox \
+  -profile:v main \
+  -pix_fmt yuv420p \
+  -q:v 60 \
+  -tag:v hvc1 \
   -c:a aac \
   -movflags +faststart \
   "$NORMALIZED_CLIP"
 VIDEO_START=$(ffprobe -v error -select_streams v:0 -show_entries stream=start_time -of default=noprint_wrappers=1:nokey=1 "$NORMALIZED_CLIP")
 AUDIO_START=$(ffprobe -v error -select_streams a:0 -show_entries stream=start_time -of default=noprint_wrappers=1:nokey=1 "$NORMALIZED_CLIP")
 FIRST_VIDEO_PTS=$(ffprobe -v error -select_streams v:0 -read_intervals '%+#1' -show_entries frame=pts_time -of default=noprint_wrappers=1:nokey=1 "$NORMALIZED_CLIP")
+VIDEO_CODEC=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$NORMALIZED_CLIP")
+VIDEO_TAG=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_tag_string -of default=noprint_wrappers=1:nokey=1 "$NORMALIZED_CLIP")
+[ "$VIDEO_CODEC" = "hevc" ]
+[ "$VIDEO_TAG" = "hvc1" ]
 [ "$VIDEO_START" = "0.000000" ]
 [ "$AUDIO_START" = "0.000000" ]
 [ "$FIRST_VIDEO_PTS" = "0.000000" ]

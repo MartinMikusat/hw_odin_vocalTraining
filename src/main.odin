@@ -21,6 +21,9 @@ Sel :: rawptr
 
 SEARCH_RESERVE_SIZE :: uint(64 * mem.Megabyte)
 SEARCH_COMMIT_SIZE :: uint(64 * mem.Kilobyte)
+MANAGED_HEVC_QUALITY :: 60
+MANAGED_HEVC_CODEC :: "hevc"
+MANAGED_HEVC_TAG :: "hvc1"
 
 foreign import objc "system:objc"
 foreign objc {
@@ -199,6 +202,7 @@ Import_Phase :: enum {
 	Validating_Local_Media,
 	Validating_Existing_Media,
 	Downloading,
+	Encoding_Downloaded_Media,
 	Validating_Downloaded_Media,
 	Rebuilding_Clips,
 }
@@ -755,6 +759,8 @@ import_progress_status :: proc(job: ^Import_Job, contents: string) -> string {
 			return fmt.tprintf("%s%s", prefix, status)
 		}
 		return fmt.tprintf("%sstarting media download", prefix)
+	case .Encoding_Downloaded_Media:
+		return fmt.tprintf("%sencoding downloaded media as HEVC", prefix)
 	case .Validating_Downloaded_Media:
 		return fmt.tprintf("%svalidating downloaded media", prefix)
 	case .Rebuilding_Clips:
@@ -854,9 +860,9 @@ clip_export_command :: proc(
 	output_log := log_path
 	if len(output_log) == 0 {output_log = diagnostic_log_path("ffmpeg")}
 	if !has_audio {
-		return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -vf 'setpts=PTS-STARTPTS' -an -c:v h264_videotoolbox -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(output_log))
+		return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -vf 'setpts=PTS-STARTPTS' -an -c:v hevc_videotoolbox -profile:v main -pix_fmt yuv420p -q:v %d -tag:v hvc1 -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, MANAGED_HEVC_QUALITY, shell_quote(clip_path), shell_quote(output_log))
 	}
-	return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -vf 'setpts=PTS-STARTPTS' -af 'asetpts=PTS-STARTPTS' -c:v h264_videotoolbox -c:a aac -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, shell_quote(clip_path), shell_quote(output_log))
+	return fmt.tprintf("%s -y -loglevel error -ss %.3f -i %s -t %.3f -vf 'setpts=PTS-STARTPTS' -af 'asetpts=PTS-STARTPTS' -c:v hevc_videotoolbox -profile:v main -pix_fmt yuv420p -q:v %d -tag:v hvc1 -c:a aac -movflags +faststart %s >> %s 2>&1", shell_quote(ffmpeg_command), start_seconds, shell_quote(source_path), end_seconds-start_seconds, MANAGED_HEVC_QUALITY, shell_quote(clip_path), shell_quote(output_log))
 }
 
 workflow_source_directory :: proc(workflow: Workflow_Kind) -> string {
@@ -2003,6 +2009,33 @@ staged_source_validate :: proc(directory, staging_name: string) -> bool {
 	return media_file_validate(media_path)
 }
 
+staged_source_encode_hevc :: proc(job: ^Import_Job, directory, staging_name: string) -> bool {
+	media_path := fmt.tprintf("%s/%s.mp4", directory, staging_name)
+	encoded_path := fmt.tprintf("%s/%s.hevc.mp4", directory, staging_name)
+	_ = os.remove(encoded_path)
+	defer _ = os.remove(encoded_path)
+	command := make([dynamic]string, context.temp_allocator)
+	append(
+		&command,
+		helper_command("ffmpeg"), "-y", "-v", "error", "-i", media_path,
+		"-map", "0:v:0", "-map", "0:a:0",
+		"-c:v", "hevc_videotoolbox",
+		"-profile:v", "main",
+		"-pix_fmt", "yuv420p",
+		"-q:v", fmt.tprintf("%d", MANAGED_HEVC_QUALITY),
+		"-tag:v", MANAGED_HEVC_TAG,
+		"-c:a", "copy",
+		"-movflags", "+faststart",
+		encoded_path,
+	)
+	import_job_set_phase(job, .Encoding_Downloaded_Media)
+	if !local_source_run_ffmpeg(job, command[:]) ||
+	   !managed_hevc_file_validate(encoded_path, true) {
+		return false
+	}
+	return os.rename(encoded_path, media_path)
+}
+
 media_file_validate :: proc(media_path: string) -> bool {
 	return media_file_validate_tracks(media_path, true)
 }
@@ -2016,7 +2049,9 @@ media_file_validate_tracks :: proc(media_path: string, expect_audio: bool) -> bo
 	command := [14]string{helper_command("ffmpeg"), "-v", "info", "-i", media_path, "-map", "0:v:0", "-map", "0:a:0", "-t", "1", "-f", "null", "-"}
 	process_state, stdout, stderr, process_error := os2.process_exec({command=command[:]}, context.temp_allocator)
 	_ = stdout
-	streams_ok := strings.contains(string(stderr), "Video: h264") && strings.contains(string(stderr), "Audio: aac")
+	video_ok := strings.contains(string(stderr), "Video: h264") ||
+	            strings.contains(string(stderr), "Video: hevc")
+	streams_ok := video_ok && strings.contains(string(stderr), "Audio: aac")
 	return process_error == nil && process_state.success && streams_ok
 }
 
@@ -2198,7 +2233,16 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 	}
 	import_job_set_phase(job, .Validating_Downloaded_Media)
 	if !staged_source_validate(source_directory, staging_name) ||
-	   !staged_source_commit(source_directory, staging_name, video_id) {
+	   !staged_source_encode_hevc(job, source_directory, staging_name) {
+		job.invalid_merged_media += 1
+		staged_source_cleanup(source_directory, staging_name)
+		return false
+	}
+	import_job_set_phase(job, .Validating_Downloaded_Media)
+	if !managed_hevc_file_validate(
+		fmt.tprintf("%s/%s.mp4", source_directory, staging_name),
+		true,
+	) || !staged_source_commit(source_directory, staging_name, video_id) {
 		job.invalid_merged_media += 1
 		staged_source_cleanup(source_directory, staging_name)
 		return false
@@ -2231,13 +2275,16 @@ import_job_process_url :: proc(job: ^Import_Job, url: string) -> bool {
 		delete(source.title, allocator)
 		source.title = metadata.title
 		source.duration = metadata.duration
+		delete(metadata.vcodec, allocator)
+		delete(metadata.acodec, allocator)
+		delete(metadata.ext, allocator)
 		source.metadata = Source_Context_Metadata {
 			width = metadata.width,
 			height = metadata.height,
 			fps = metadata.fps,
-			vcodec = metadata.vcodec,
-			acodec = metadata.acodec,
-			ext = metadata.ext,
+			vcodec = strings.clone(MANAGED_HEVC_CODEC, allocator),
+			acodec = strings.clone("aac", allocator),
+			ext = strings.clone("mp4", allocator),
 			format_id = metadata.format_id,
 			filesize_approx = metadata.filesize_approx,
 		}
@@ -2472,7 +2519,7 @@ finish_import_job :: proc(job: ^Import_Job) {
 				job.notification_id,
 				.Error,
 				"Download failed media validation",
-				"The staged MP4 did not contain decodable H.264 video and AAC audio. The previous source file was preserved.",
+				"The staged MP4 could not be converted to validated HEVC video with AAC audio. The previous source file was preserved.",
 			)
 		} else if job.missing_merged_media > 0 {
 			_ = notification_finish(
@@ -2576,6 +2623,17 @@ source_metadata_worker :: proc(t: ^thread.Thread) {
 		job.video_id,
 		job.workflow,
 	)
+	if actual, probed := local_source_probe(job.media_path); probed {
+		if job.metadata_loaded {
+			delete(actual.metadata.format_id)
+			actual.metadata.format_id = job.metadata.format_id
+			job.metadata.format_id = ""
+		}
+		delete_source_context_metadata(&job.metadata)
+		job.metadata = actual.metadata
+		actual.metadata = {}
+		job.metadata_loaded = true
+	}
 	if file_info, stat_error := os.stat(job.media_path, context.temp_allocator); stat_error == nil {
 		job.metadata.filesize_approx = file_info.size
 	}
@@ -3671,7 +3729,7 @@ on_select_source :: proc "c" (self: Id, command: Sel, sender: Id) {
 				set_text(state.status, "MEDIA MISSING / The merged MP4 was not created. Right-click this source and refetch it.")
 			}
 		} else {
-			set_text(state.status, "VIDEO INVALID / The managed MP4 does not contain decodable H.264 video with its expected audio state.")
+			set_text(state.status, "VIDEO INVALID / The managed MP4 does not contain decodable H.264 or HEVC video with its expected audio state.")
 		}
 	}
 }

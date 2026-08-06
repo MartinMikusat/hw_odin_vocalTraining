@@ -152,11 +152,12 @@ import.
 
 The application calculates each local file's SHA-256 and reuses an existing
 source when the same content already exists in the active workflow. It copies
-new media into the managed library. Compatible H.264 MP4 files copy directly,
-compatible streams in other containers are remuxed, and incompatible streams
-are normalized to H.264/AAC MP4. The original file remains unchanged. Local
-video without audio is accepted; the Source and Clip players show **NO AUDIO
-TRACK** while that media is loaded.
+new media into the managed library. Compatible HEVC MP4 files with an `hvc1`
+sample entry copy directly. Compatible HEVC streams in other containers or
+with an `hev1` sample entry are remuxed and retagged. Other video streams are
+normalized to HEVC/AAC MP4 with an `hvc1` sample entry. The original file
+remains unchanged. Local video without audio is accepted; the Source and Clip
+players show **NO AUDIO TRACK** while that media is loaded.
 
 YouTube URLs are normalized by
 video ID, while timestamps supplied through `t`, `start`, or `youtu.be` URL
@@ -165,8 +166,9 @@ background and shows its title, duration, and available video resolutions.
 Select a resolution for each video before import. The default is the best
 available resolution at or below 1080p, or the lowest available resolution
 when all options are higher.
-Import fetches the selected MP4 video and M4A audio streams and
-merges them without transcoding. Import prefers an English
+Import fetches the selected H.264 MP4 video and M4A audio streams, merges them,
+and then encodes the managed video as HEVC in an MP4 `hvc1` sample entry. It
+copies the AAC audio without another audio encode. Import prefers an English
 caption track and otherwise accepts YouTube's original-language automatic
 captions. Right-click a source to open the Source Details dialog. It shows the
 duration, resolution, frame rate, codecs, container, format ID, and local file
@@ -188,8 +190,12 @@ new resolution.
 During a download, the footer shows its completion, current stream size,
 transfer speed, and remaining time. Select **Stop** to terminate yt-dlp and
 leave the source library unchanged.
-The app downloads into staging files. It verifies H.264 video and AAC audio,
-decodes one second of both tracks, and then replaces the active source files.
+The app downloads into staging files. It verifies the downloaded H.264 video
+and AAC audio, converts the video to HEVC, verifies the `hvc1` sample entry,
+decodes one second of both final tracks, and then replaces the active source
+files. New and rebuilt standalone clips use the same HEVC MP4 video contract.
+Existing H.264 sources and clips remain playable and are converted when a
+source is refetched or a clip is rebuilt.
 
 The Source Register marks a source as **MISSING** when its merged MP4 file is
 not available. Right-click a YouTube source and refetch it. For a local source,
@@ -370,7 +376,8 @@ verification fails, the command stops. Add `--allow-without-backup` to
 explicitly continue without a new restore point.
 
 `clip create` starts at the first segment start. It ends at the last segment
-start plus its duration. The command saves the MP4 as a clip.
+start plus its duration. The command saves an HEVC MP4 with an `hvc1` sample
+entry as a standalone clip.
 
 Debug builds also provide `clip normalize-timestamps`. The command requires the
 running development application. It rebuilds Vocal and Dancing clips through
@@ -626,9 +633,9 @@ distribution:
   new app releases; do not install Homebrew, mutate the user's global `PATH`, or
   download executables on first launch.
 - Build the bundled FFmpeg configuration without the current GPL `libx264`
-  dependency, switch clip encoding to `h264_videotoolbox`, and include the
-  required FFmpeg license notice, build configuration, and corresponding source
-  location with the release.
+  dependency, retain managed-media encoding through `hevc_videotoolbox`, and
+  include the required FFmpeg license notice, build configuration, and
+  corresponding source location with the release.
 - Add a packaging pipeline that signs each helper and then the app with a
   Developer ID Application certificate and hardened runtime, submits the
   archive for notarization, and staples the accepted ticket. No valid signing

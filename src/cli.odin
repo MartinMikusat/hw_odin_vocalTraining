@@ -657,7 +657,7 @@ cli_source_add :: proc(request: CLI_Request) -> CLI_Result {
 	if job.failed > 0 {
 		code := "download_failed"
 		message := "The YouTube download failed"
-		if job.invalid_merged_media > 0 {code, message = "media_validation_failed", "The staged MP4 did not contain compatible H.264 video and AAC audio"}
+		if job.invalid_merged_media > 0 {code, message = "media_validation_failed", "The staged MP4 could not be converted to validated HEVC video with AAC audio"}
 		return cli_error(request.command, .Media, code, message, job.log_path)
 	}
 	if !import_job_apply(job) {return cli_error(request.command, .Storage, "storage_failed", "The source was downloaded but the library update failed")}
@@ -890,7 +890,7 @@ cli_source_add_finish :: proc(job: ^Import_Job) {
 		message := len(job.local_path) > 0 ? "The local file could not be inspected, normalized, or validated" : "The YouTube download failed"
 		if job.invalid_merged_media > 0 {
 			code = "media_validation_failed"
-			message = "The staged MP4 did not contain compatible H.264 video and AAC audio"
+			message = "The staged MP4 could not be converted to validated HEVC video with AAC audio"
 		}
 		_ = notification_finish(
 			job.notification_id,
