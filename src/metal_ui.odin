@@ -307,6 +307,10 @@ UI_State :: struct {
 	player_duration:    f64,
 	source_playback_active: bool,
 	source_scrubbing:   bool,
+	waveform_navigator_drag: Waveform_Navigator_Drag,
+	waveform_navigator_drag_start_x: f64,
+	waveform_navigator_initial_start: f64,
+	waveform_navigator_initial_end: f64,
 	source_hint_menu_open: bool,
 	pitch:              Pitch_Monitor_State,
 	activity_tick:      uint,
@@ -356,6 +360,7 @@ Player_Transport_Layout :: struct {
 	timeline:     UI_Rect,
 	waveform:     UI_Rect,
 	waveform_plot: UI_Rect,
+	waveform_navigator: UI_Rect,
 	waveform_selectors: [4]UI_Rect,
 	row_count:    int,
 	footer_height: f64,
@@ -646,6 +651,7 @@ UI_Action_Kind :: enum {
 	Backup_Warning_Continue,
 	Discard_Keep_Editing,
 	Discard_Changes,
+	Waveform_Navigator,
 }
 
 Modal_Discard_Target :: enum {
@@ -1641,6 +1647,7 @@ set_playback_fullscreen :: proc(
 	}
 	cancel_ui_flash()
 	clear_number_prefix()
+	ui.waveform_navigator_drag = .None
 	ui.player_surface_click_pending = false
 	ui.player_surface_click_deadline_ms = 0
 	app := msg_id(objc_getClass("NSApplication"), sel_registerName("sharedApplication"))
@@ -2995,6 +3002,7 @@ set_ui_mode :: proc(mode: UI_Mode, persist := true) {
 	if ui.data_modal_open {close_data_modal()}
 	if ui.notification_modal_open {close_notification_history()}
 	ui.source_scrubbing = false
+	ui.waveform_navigator_drag = .None
 	ui.source_hint_menu_open = false
 	if mode == .Play {
 		metal_player_clear()
@@ -3774,10 +3782,12 @@ PLAYER_TRANSPORT_ONE_ROW_WIDTH :: 902.0
 PLAYER_TRANSPORT_TWO_ROW_WIDTH :: 610.0
 PLAYER_TRANSPORT_THREE_ROW_WIDTH :: 410.0
 PLAYER_TRANSPORT_MINIMUM_WIDTH :: 284.0
-PLAYER_WAVEFORM_HEIGHT :: 96.0
+PLAYER_WAVEFORM_HEIGHT :: 114.0
 PLAYER_WAVEFORM_GAP :: 6.0
 PLAYER_WAVEFORM_SELECTOR_HEIGHT :: 20.0
 PLAYER_WAVEFORM_SELECTOR_GAP :: 4.0
+PLAYER_WAVEFORM_NAVIGATOR_HEIGHT :: 14.0
+PLAYER_WAVEFORM_NAVIGATOR_GAP :: 4.0
 
 player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_Layout) {
 	inner_x := player.x + PLAYER_TRANSPORT_INSET_X
@@ -3869,10 +3879,18 @@ player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_La
 	}
 	result.waveform_plot = {
 		result.waveform.x,
-		result.waveform.y,
+		result.waveform.y+PLAYER_WAVEFORM_NAVIGATOR_HEIGHT+
+		PLAYER_WAVEFORM_NAVIGATOR_GAP,
 		result.waveform.w,
 		PLAYER_WAVEFORM_HEIGHT-PLAYER_WAVEFORM_SELECTOR_HEIGHT-
-		PLAYER_WAVEFORM_SELECTOR_GAP,
+		PLAYER_WAVEFORM_SELECTOR_GAP-PLAYER_WAVEFORM_NAVIGATOR_HEIGHT-
+		PLAYER_WAVEFORM_NAVIGATOR_GAP,
+	}
+	result.waveform_navigator = {
+		result.waveform.x,
+		result.waveform.y,
+		result.waveform.w,
+		PLAYER_WAVEFORM_NAVIGATOR_HEIGHT,
 	}
 	selector_width := 42.0
 	for index in 0..<len(result.waveform_selectors) {
@@ -7273,6 +7291,35 @@ build_player_waveform_geometry :: proc(
 	push_border(vertices, rect, rule)
 }
 
+build_waveform_navigator_geometry :: proc(
+	vertices: ^[dynamic]Solid_Vertex,
+	track: UI_Rect,
+	field, rule, accent: [4]f32,
+) {
+	if track.w <= 0 || track.h <= 0 || ui.player_duration <= 0 {return}
+	push_rect(vertices, track, field, "waveform-navigator")
+	push_border(vertices, track, rule)
+	thumb := waveform_navigator_thumb(track, ui.player_duration)
+	if thumb.w <= 0 {return}
+	fill := accent
+	fill[3] = ui.waveform_navigator_drag != .None || contains(thumb, ui.mouse) ? 0.28 : 0.18
+	push_rect(vertices, thumb, fill, "waveform-navigator-window")
+	push_border(vertices, thumb, accent)
+	handle_width := min(2.0, thumb.w/2)
+	push_rect(
+		vertices,
+		{thumb.x, thumb.y, handle_width, thumb.h},
+		accent,
+		"waveform-navigator-handle",
+	)
+	push_rect(
+		vertices,
+		{thumb.x+thumb.w-handle_width, thumb.y, handle_width, thumb.h},
+		accent,
+		"waveform-navigator-handle",
+	)
+}
+
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	previous_lookup := ui_base_control_lookup
 	ui_base_control_lookup = true
@@ -7513,6 +7560,15 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			rule,
 			ui_color_32(theme.ink),
 		)
+		if !ui.playback_fullscreen_active {
+			build_waveform_navigator_geometry(
+				vertices,
+				ui_control_rect(.Waveform_Navigator),
+				field,
+				rule,
+				accent,
+			)
+		}
 		waveform_selector_kinds := [4]UI_Action_Kind{
 			.Waveform_All,
 			.Waveform_Low,
@@ -9949,6 +10005,12 @@ add_player_controls :: proc(
 		{.Primary_Press, .Drag},
 	)
 	if !ui.playback_fullscreen_active {
+		add_pointer_control(
+			"pan or resize the waveform view",
+			transport.waveform_navigator,
+			.Waveform_Navigator,
+			{.Primary_Press, .Drag},
+		)
 		selector_kinds := [4]UI_Action_Kind{
 			.Waveform_All,
 			.Waveform_Low,
@@ -12881,6 +12943,29 @@ activate_registered_target_at_point :: proc(
 		}
 		ui.source_scrubbing = true
 		seek_player_timeline_rect(point, control.rect)
+	case .Waveform_Navigator:
+		cancel_player_surface_click()
+		ui.source_scrubbing = false
+		if click_count >= 2 {
+			waveform_view_reset(ui.player_duration)
+			ui.waveform_navigator_drag = .None
+			ui.needs_redraw = true
+			return true
+		}
+		hit := waveform_navigator_hit(point, control.rect, ui.player_duration)
+		#partial switch hit {
+		case .Recenter:
+			ratio := clamp((point.x-control.rect.x)/control.rect.w, 0, 1)
+			waveform_navigator_recenter(ratio, ui.player_duration)
+			ui.waveform_navigator_drag = .Pan
+		case .Pan: ui.waveform_navigator_drag = .Pan
+		case .Resize_Start: ui.waveform_navigator_drag = .Resize_Start
+		case .Resize_End: ui.waveform_navigator_drag = .Resize_End
+		}
+		ui.waveform_navigator_drag_start_x = point.x
+		ui.waveform_navigator_initial_start,
+		ui.waveform_navigator_initial_end = waveform_view_range(ui.player_duration)
+		ui.needs_redraw = true
 	case .Player_Surface:
 		now_ms := numbered_action_time_ms()
 		if player_surface_click_is_double(
@@ -13022,6 +13107,7 @@ begin_window_resize :: proc(point: Point) -> bool {
 	ui.resize_edges = edges
 	text_input.end_pointer_selection(&ui.input_state)
 	ui.source_scrubbing = false
+	ui.waveform_navigator_drag = .None
 	ui.resize_start_mouse = msg_point(
 		objc_getClass("NSEvent"),
 		sel_registerName("mouseLocation"),
@@ -13158,6 +13244,17 @@ on_metal_mouse_dragged :: proc "c" (self: Id, command: Sel, event: Id) {
 	if ui.source_scrubbing {
 		control := find_ui_control_by_action(.Source_Timeline)
 		if control != nil && .Drag in control.flags {seek_player_timeline_rect(ui.mouse, control.rect)}
+	} else if ui.waveform_navigator_drag != .None {
+		control := find_ui_control_by_action(.Waveform_Navigator)
+		if control != nil && control.rect.w > 0 && .Drag in control.flags {
+			waveform_navigator_drag(
+				ui.waveform_navigator_drag,
+				(ui.mouse.x-ui.waveform_navigator_drag_start_x)/control.rect.w,
+				ui.waveform_navigator_initial_start,
+				ui.waveform_navigator_initial_end,
+				ui.player_duration,
+			)
+		}
 	}
 	ui.needs_redraw = true
 }
@@ -13171,6 +13268,10 @@ on_metal_mouse_up :: proc "c" (self: Id, command: Sel, event: Id) {
 	}
 	if ui.source_scrubbing {
 		ui.source_scrubbing = false
+		ui.needs_redraw = true
+	}
+	if ui.waveform_navigator_drag != .None {
+		ui.waveform_navigator_drag = .None
 		ui.needs_redraw = true
 	}
 }

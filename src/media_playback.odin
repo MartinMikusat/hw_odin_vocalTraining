@@ -377,6 +377,7 @@ metal_player_clear :: proc() {
 	set_source_playback_active(false)
 	cancel_dance_count_in()
 	ui.source_scrubbing = false
+	ui.waveform_navigator_drag = .None
 	ui.source_hint_menu_open = false
 	waveform_clear_active()
 	metal_player_clear_texture()

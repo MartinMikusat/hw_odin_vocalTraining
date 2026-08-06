@@ -227,6 +227,91 @@ waveform_view_pan :: proc(delta_ratio, duration: f64) {
 	waveform_runtime.view_initialized = true
 }
 
+Waveform_Navigator_Drag :: enum {
+	None,
+	Pan,
+	Resize_Start,
+	Resize_End,
+}
+
+Waveform_Navigator_Hit :: enum {
+	Recenter,
+	Pan,
+	Resize_Start,
+	Resize_End,
+}
+
+waveform_view_set_range :: proc(start, end, duration: f64) {
+	if duration <= 0 {return}
+	minimum := min(WAVEFORM_MIN_VIEW_SECONDS, duration)
+	span := clamp(end-start, minimum, duration)
+	next_start := clamp(start, 0, duration-span)
+	waveform_runtime.view_start_seconds = next_start
+	waveform_runtime.view_end_seconds = next_start+span
+	waveform_runtime.view_initialized = true
+}
+
+waveform_navigator_thumb :: proc(track: UI_Rect, duration: f64) -> UI_Rect {
+	if track.w <= 0 || duration <= 0 {return UI_Rect{track.x, track.y, 0, track.h}}
+	start, end := waveform_view_range(duration)
+	width := min(track.w, max(1/max(1, ui.scale), (end-start)/duration*track.w))
+	return UI_Rect{
+		clamp(track.x+start/duration*track.w, track.x, track.x+track.w-width),
+		track.y,
+		width,
+		track.h,
+	}
+}
+
+waveform_navigator_hit :: proc(
+	point: Point,
+	track: UI_Rect,
+	duration: f64,
+) -> Waveform_Navigator_Hit {
+	thumb := waveform_navigator_thumb(track, duration)
+	if thumb.w <= 0 {return .Recenter}
+	hit_inset := 6.0
+	if point.x < thumb.x-hit_inset || point.x > thumb.x+thumb.w+hit_inset {
+		return .Recenter
+	}
+	if thumb.w < 16 {
+		return point.x < thumb.x+thumb.w/2 ? .Resize_Start : .Resize_End
+	}
+	if point.x <= thumb.x+8 {return .Resize_Start}
+	if point.x >= thumb.x+thumb.w-8 {return .Resize_End}
+	return .Pan
+}
+
+waveform_navigator_recenter :: proc(pointer_ratio, duration: f64) {
+	if duration <= 0 {return}
+	start, end := waveform_view_range(duration)
+	span := end-start
+	center := clamp(pointer_ratio, 0, 1)*duration
+	waveform_view_set_range(center-span/2, center+span/2, duration)
+}
+
+waveform_navigator_drag :: proc(
+	mode: Waveform_Navigator_Drag,
+	delta_ratio, initial_start, initial_end, duration: f64,
+) {
+	if duration <= 0 {return}
+	delta := delta_ratio*duration
+	minimum := min(WAVEFORM_MIN_VIEW_SECONDS, duration)
+	#partial switch mode {
+	case .Pan:
+		span := initial_end-initial_start
+		next_start := clamp(initial_start+delta, 0, duration-span)
+		waveform_view_set_range(next_start, next_start+span, duration)
+	case .Resize_Start:
+		next_start := clamp(initial_start+delta, 0, initial_end-minimum)
+		waveform_view_set_range(next_start, initial_end, duration)
+	case .Resize_End:
+		next_end := clamp(initial_end+delta, initial_start+minimum, duration)
+		waveform_view_set_range(initial_start, next_end, duration)
+	case:
+	}
+}
+
 waveform_seconds_at_point :: proc(
 	point: Point,
 	rect: UI_Rect,

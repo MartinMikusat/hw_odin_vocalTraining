@@ -244,7 +244,10 @@ that level when another source or clip is loaded during the session. The
 transport can play, pause, stop at zero, change speed, change volume, and scrub
 across the loaded media waveform. Scroll vertically over the waveform to zoom
 around the pointer, scroll horizontally to pan, and double-click to restore the
-full-duration view. Waveform peaks are generated from decoded audio and retained
+full-duration view. The bar below the waveform shows the visible range within
+the complete clip. Drag its window to pan, drag either edge to change the visible
+range, click outside it to recenter the range, or double-click it to restore the
+complete clip. Waveform peaks are generated from decoded audio and retained
 only in a bounded runtime cache. Frequency selection changes only the display;
 it does not filter playback audio. Source reset seeks to the imported URL timestamp.
 Clip reset seeks to the start of the clip.

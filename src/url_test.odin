@@ -7300,6 +7300,74 @@ waveform_view_maps_zooms_pans_and_resets_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+waveform_navigator_maps_recenters_and_drags_view_test :: proc(t: ^testing.T) {
+	old_runtime := waveform_runtime
+	old_scale := ui.scale
+	defer {
+		waveform_runtime = old_runtime
+		ui.scale = old_scale
+	}
+	waveform_runtime = {}
+	ui.scale = 2
+	track := UI_Rect{100, 20, 400, 14}
+	thumb := waveform_navigator_thumb(track, 200)
+	testing.expect_value(t, thumb, track)
+
+	waveform_view_set_range(50, 150, 200)
+	thumb = waveform_navigator_thumb(track, 200)
+	testing.expect_value(t, thumb, UI_Rect{200, 20, 200, 14})
+	testing.expect_value(
+		t,
+		waveform_navigator_hit(Point{300, 25}, track, 200),
+		Waveform_Navigator_Hit.Pan,
+	)
+	testing.expect_value(
+		t,
+		waveform_navigator_hit(Point{200, 25}, track, 200),
+		Waveform_Navigator_Hit.Resize_Start,
+	)
+	testing.expect_value(
+		t,
+		waveform_navigator_hit(Point{400, 25}, track, 200),
+		Waveform_Navigator_Hit.Resize_End,
+	)
+	testing.expect_value(
+		t,
+		waveform_navigator_hit(Point{120, 25}, track, 200),
+		Waveform_Navigator_Hit.Recenter,
+	)
+
+	waveform_navigator_recenter(0, 200)
+	start, end := waveform_view_range(200)
+	testing.expect_value(t, start, 0.0)
+	testing.expect_value(t, end, 100.0)
+	waveform_navigator_drag(.Pan, 0.75, start, end, 200)
+	start, end = waveform_view_range(200)
+	testing.expect_value(t, start, 100.0)
+	testing.expect_value(t, end, 200.0)
+	waveform_navigator_drag(.Resize_Start, 0.99, start, end, 200)
+	start, end = waveform_view_range(200)
+	testing.expect_value(t, end-start, WAVEFORM_MIN_VIEW_SECONDS)
+	testing.expect_value(t, end, 200.0)
+	waveform_navigator_drag(.Resize_End, -0.99, 0, 100, 200)
+	start, end = waveform_view_range(200)
+	testing.expect_value(t, start, 0.0)
+	testing.expect_value(t, end, WAVEFORM_MIN_VIEW_SECONDS)
+
+	thumb = waveform_navigator_thumb(track, 200)
+	testing.expect_value(
+		t,
+		waveform_navigator_hit(Point{101, 25}, track, 200),
+		Waveform_Navigator_Hit.Resize_Start,
+	)
+	testing.expect_value(
+		t,
+		waveform_navigator_hit(Point{103, 25}, track, 200),
+		Waveform_Navigator_Hit.Resize_End,
+	)
+}
+
+@(test)
 waveform_band_visibility_and_shared_scale_test :: proc(t: ^testing.T) {
 	for band in Waveform_Band {
 		testing.expect(t, waveform_band_visible(.All, band))
@@ -7519,11 +7587,28 @@ expect_player_transport_layout_for_test :: proc(
 	testing.expect_value(t, layout.timeline.w, layout.waveform.w)
 	testing.expect_value(t, layout.waveform_plot, UI_Rect{
 		layout.waveform.x,
-		layout.waveform.y,
+		layout.waveform.y+PLAYER_WAVEFORM_NAVIGATOR_HEIGHT+
+		PLAYER_WAVEFORM_NAVIGATOR_GAP,
 		layout.waveform.w,
 		PLAYER_WAVEFORM_HEIGHT-PLAYER_WAVEFORM_SELECTOR_HEIGHT-
-		PLAYER_WAVEFORM_SELECTOR_GAP,
+		PLAYER_WAVEFORM_SELECTOR_GAP-PLAYER_WAVEFORM_NAVIGATOR_HEIGHT-
+		PLAYER_WAVEFORM_NAVIGATOR_GAP,
 	})
+	testing.expect_value(t, layout.waveform_navigator, UI_Rect{
+		layout.waveform.x,
+		layout.waveform.y,
+		layout.waveform.w,
+		PLAYER_WAVEFORM_NAVIGATOR_HEIGHT,
+	})
+	testing.expect(t, layout.waveform_navigator.x >= layout.waveform.x)
+	testing.expect(t,
+		layout.waveform_navigator.x+layout.waveform_navigator.w <=
+		layout.waveform.x+layout.waveform.w,
+	)
+	testing.expect(t, !player_transport_rects_overlap_for_test(
+		layout.waveform_navigator,
+		layout.waveform_plot,
+	))
 	for selector, index in layout.waveform_selectors {
 		testing.expect(t, selector.x >= layout.waveform.x)
 		testing.expect(t, selector.x+selector.w <= layout.waveform.x+layout.waveform.w)
@@ -7532,6 +7617,10 @@ expect_player_transport_layout_for_test :: proc(
 		testing.expect(t, !player_transport_rects_overlap_for_test(
 			selector,
 			layout.waveform_plot,
+		))
+		testing.expect(t, !player_transport_rects_overlap_for_test(
+			selector,
+			layout.waveform_navigator,
 		))
 		if index > 0 {
 			testing.expect(t, !player_transport_rects_overlap_for_test(
