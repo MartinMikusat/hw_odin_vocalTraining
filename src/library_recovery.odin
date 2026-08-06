@@ -12,7 +12,7 @@ import "core:strings"
 import "core:time"
 import "base:runtime"
 
-LIBRARY_SCHEMA_VERSION :: 9
+LIBRARY_SCHEMA_VERSION :: 10
 LIBRARY_BACKUP_RETENTION :: 10
 
 Library_Storage_Mode :: enum {
@@ -241,6 +241,10 @@ clip_storage_equal :: proc(a, b: Clip) -> bool {
 	       a.dance_count_in_beats == b.dance_count_in_beats &&
 	       a.dance_count_each_loop == b.dance_count_each_loop &&
 	       a.dance_count_in_bpm == b.dance_count_in_bpm &&
+	       a.dance_detected_bpm == b.dance_detected_bpm &&
+	       a.dance_bpm_confidence == b.dance_bpm_confidence &&
+	       a.dance_bpm_detector_revision == b.dance_bpm_detector_revision &&
+	       a.dance_bpm_user_set == b.dance_bpm_user_set &&
 	       a.dance_playback_rate == b.dance_playback_rate
 }
 

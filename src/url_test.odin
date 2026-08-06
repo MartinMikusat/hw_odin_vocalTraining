@@ -3,6 +3,7 @@ package main
 import "core:testing"
 import "core:encoding/json"
 import "core:fmt"
+import "core:math"
 import os "core:os/old"
 import os2 "core:os"
 
@@ -4774,6 +4775,582 @@ dancing_count_in_interval_uses_saved_bpm_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+dancing_bpm_adjustment_marks_manual_override_test :: proc(t: ^testing.T) {
+	clip := Clip{
+		workflow=.Dancing,
+		dance_count_in_bpm=120,
+		dance_bpm_user_set=false,
+	}
+	testing.expect(t, dance_clip_adjust_bpm(&clip, 1))
+	testing.expect_value(t, clip.dance_count_in_bpm, 121)
+	testing.expect(t, clip.dance_bpm_user_set)
+
+	clip.dance_bpm_user_set = false
+	testing.expect(t, dance_clip_adjust_bpm(&clip, -1))
+	testing.expect_value(t, clip.dance_count_in_bpm, 120)
+	testing.expect(t, clip.dance_bpm_user_set)
+}
+
+@(test)
+bpm_terminal_runtime_result_matches_only_same_media_test :: proc(t: ^testing.T) {
+	bpm_runtime_result_clear()
+	defer bpm_runtime_result_clear()
+	clip := Clip{id="clip-1", clip_path="/tmp/clip-1.mp4"}
+	testing.expect(t, !bpm_runtime_result_matches_clip(&clip))
+	testing.expect(t, bpm_runtime_result_set(clip.id, clip.clip_path, .No_Audio))
+	testing.expect(t, bpm_runtime_result_matches_clip(&clip))
+	clip.clip_path = "/tmp/replaced-clip-1.mp4"
+	testing.expect(t, !bpm_runtime_result_matches_clip(&clip))
+}
+
+bpm_test_fill_onsets :: proc(
+	envelope: []f32,
+	bpm, envelope_rate_hz: f64,
+	alternating_strength := false,
+) {
+	lag := int(math.round(60.0 * envelope_rate_hz / bpm))
+	beat := 0
+	for index := lag; index < len(envelope); index += lag {
+		strength: f32 = 1
+		if alternating_strength && beat%2 == 1 {
+			strength = 0.45
+		}
+		envelope[index] = strength
+		if index+1 < len(envelope) {
+			envelope[index+1] = strength * 0.35
+		}
+		beat += 1
+	}
+}
+
+bpm_test_expect_near :: proc(t: ^testing.T, actual, expected: f64) {
+	testing.expect(t, math.abs(actual-expected) <= 1.0)
+}
+
+bpm_test_fill_fractional_onsets :: proc(
+	envelope: []f32,
+	bpm, envelope_rate_hz: f64,
+) {
+	period := 60.0 * envelope_rate_hz / bpm
+	beat := 1
+	for {
+		index := int(math.round(f64(beat) * period))
+		if index >= len(envelope) {break}
+		envelope[index] = 1
+		if index+1 < len(envelope) {
+			envelope[index+1] = 0.3
+		}
+		beat += 1
+	}
+}
+
+bpm_test_fill_noise :: proc(envelope: []f32, seed: u64) {
+	state := seed
+	for &sample in envelope {
+		state = (state * 1_664_525 + 1_013_904_223) % 4_294_967_296
+		sample = f32(f64(state) / 2_147_483_648.0 - 1.0)
+	}
+}
+
+@(test)
+bpm_estimator_preserves_strongest_unrelated_rhythm_peak_test :: proc(t: ^testing.T) {
+	envelope: [1000]f32
+	onset_offsets := [4]int{0, 11, 22, 39}
+	for cycle_start := 0; cycle_start < len(envelope); cycle_start += 50 {
+		for onset_offset in onset_offsets {
+			envelope[cycle_start+onset_offset] = 1
+		}
+	}
+
+	estimate := estimate_bpm_from_onset_envelope(envelope[:], 100)
+	testing.expect(t, estimate.valid)
+	testing.expectf(
+		t,
+		math.abs(estimate.bpm-120) <= 2,
+		"expected the global 120 BPM rhythm, got %.3f BPM",
+		estimate.bpm,
+	)
+}
+
+@(test)
+bpm_estimator_detects_clean_120_and_128_bpm_envelopes_test :: proc(
+	t: ^testing.T,
+) {
+	envelope_120: [800]f32
+	bpm_test_fill_onsets(envelope_120[:], 120, 100)
+	estimate_120 := estimate_bpm_from_onset_envelope(envelope_120[:], 100)
+	testing.expect(t, estimate_120.valid)
+	bpm_test_expect_near(t, estimate_120.bpm, 120)
+	testing.expect(t, estimate_120.confidence >= 0.5)
+
+	envelope_128: [1024]f32
+	bpm_test_fill_onsets(envelope_128[:], 128, 128)
+	estimate_128 := estimate_bpm_from_onset_envelope(envelope_128[:], 128)
+	testing.expect(t, estimate_128.valid)
+	bpm_test_expect_near(t, estimate_128.bpm, 128)
+	testing.expect(t, estimate_128.confidence >= 0.5)
+}
+
+@(test)
+bpm_estimator_accepts_exact_lower_and_upper_bounds_test :: proc(t: ^testing.T) {
+	lower: [2880]f32
+	bpm_test_fill_onsets(lower[:], 40, 240)
+	lower_estimate := estimate_bpm_from_onset_envelope(lower[:], 240, 40, 240)
+	testing.expect(t, lower_estimate.valid)
+	bpm_test_expect_near(t, lower_estimate.bpm, 40)
+
+	upper: [720]f32
+	bpm_test_fill_onsets(upper[:], 240, 240)
+	upper_estimate := estimate_bpm_from_onset_envelope(upper[:], 240, 40, 240)
+	testing.expect(t, upper_estimate.valid)
+	bpm_test_expect_near(t, upper_estimate.bpm, 240)
+}
+
+@(test)
+bpm_estimator_rejects_silence_and_low_information_test :: proc(t: ^testing.T) {
+	silence: [1024]f32
+	testing.expect(t, !estimate_bpm_from_onset_envelope(silence[:], 100).valid)
+
+	one_onset: [1024]f32
+	one_onset[512] = 1
+	testing.expect(t, !estimate_bpm_from_onset_envelope(one_onset[:], 100).valid)
+
+	two_onsets: [1024]f32
+	two_onsets[211] = 1
+	two_onsets[271] = 1
+	testing.expect(t, !estimate_bpm_from_onset_envelope(two_onsets[:], 100).valid)
+}
+
+@(test)
+bpm_estimator_rejects_deterministic_noise_patterns_test :: proc(t: ^testing.T) {
+	noise_short: [511]f32
+	noise_medium: [1024]f32
+	noise_long: [1703]f32
+	bpm_test_fill_noise(noise_short[:], 1)
+	bpm_test_fill_noise(noise_medium[:], 0x1234_5678)
+	bpm_test_fill_noise(noise_long[:], 0xdead_beef)
+	testing.expect(t, !estimate_bpm_from_onset_envelope(noise_short[:], 43.066).valid)
+	testing.expect(t, !estimate_bpm_from_onset_envelope(noise_medium[:], 100).valid)
+	testing.expect(t, !estimate_bpm_from_onset_envelope(noise_long[:], 128).valid)
+}
+
+@(test)
+bpm_estimator_interpolates_fractional_lags_at_realistic_rate_test :: proc(t: ^testing.T) {
+	envelope_187: [1800]f32
+	bpm_test_fill_fractional_onsets(envelope_187[:], 187, 43.066)
+	estimate_187 := estimate_bpm_from_onset_envelope(envelope_187[:], 43.066)
+	testing.expect(t, estimate_187.valid)
+	testing.expectf(t, math.abs(estimate_187.bpm-187) <= 2, "expected 187 BPM, got %.3f", estimate_187.bpm)
+
+	envelope_211: [1800]f32
+	bpm_test_fill_fractional_onsets(envelope_211[:], 211, 43.066)
+	estimate_211 := estimate_bpm_from_onset_envelope(envelope_211[:], 43.066)
+	testing.expect(t, estimate_211.valid)
+	testing.expectf(t, math.abs(estimate_211.bpm-211) <= 2, "expected 211 BPM, got %.3f", estimate_211.bpm)
+}
+
+@(test)
+bpm_estimator_reports_64_128_ambiguity_test :: proc(t: ^testing.T) {
+	ambiguous: [1536]f32
+	bpm_test_fill_onsets(ambiguous[:], 128, 128, true)
+	estimate := estimate_bpm_from_onset_envelope(ambiguous[:], 128)
+	testing.expect(t, estimate.valid)
+	is_64 := math.abs(estimate.bpm-64) <= 1
+	is_128 := math.abs(estimate.bpm-128) <= 1
+	testing.expect(t, is_64 || is_128)
+	testing.expect(t, estimate.alternative_count > 0)
+	other_found := false
+	for alternative in estimate.alternatives[:estimate.alternative_count] {
+		testing.expect(t, alternative >= 40 && alternative <= 240)
+		if (is_64 && math.abs(alternative-128) <= 1) ||
+		   (is_128 && math.abs(alternative-64) <= 1) {
+			other_found = true
+		}
+	}
+	testing.expect(t, other_found)
+
+	unambiguous: [1536]f32
+	bpm_test_fill_onsets(unambiguous[:], 128, 128)
+	unambiguous_estimate := estimate_bpm_from_onset_envelope(
+		unambiguous[:],
+		128,
+		100,
+		150,
+	)
+	testing.expect(t, unambiguous_estimate.valid)
+	testing.expect_value(t, unambiguous_estimate.alternative_count, 0)
+	testing.expect(
+		t,
+		f64(estimate.confidence) + 0.15 <= f64(unambiguous_estimate.confidence),
+	)
+
+	supported_half_only: [1200]f32
+	bpm_test_fill_onsets(supported_half_only[:], 100, 100)
+	supported_half_estimate := estimate_bpm_from_onset_envelope(
+		supported_half_only[:],
+		100,
+	)
+	testing.expect(t, supported_half_estimate.valid)
+	supported_half_found := false
+	unsupported_double_found := false
+	for alternative in supported_half_estimate.alternatives[:supported_half_estimate.alternative_count] {
+		if math.abs(alternative-50) <= 1 {supported_half_found = true}
+		if math.abs(alternative-200) <= 1 {unsupported_double_found = true}
+	}
+	testing.expect(t, supported_half_found)
+	testing.expect(t, !unsupported_double_found)
+}
+
+@(test)
+bpm_estimator_fails_closed_for_non_finite_input_test :: proc(t: ^testing.T) {
+	envelope: [800]f32
+	bpm_test_fill_onsets(envelope[:], 120, 100)
+	envelope[20] = math.QNAN_F32
+	testing.expect(t, !estimate_bpm_from_onset_envelope(envelope[:], 100).valid)
+	envelope[20] = math.INF_F32
+	testing.expect(t, !estimate_bpm_from_onset_envelope(envelope[:], 100).valid)
+}
+
+@(test)
+bpm_estimator_rejects_invalid_rate_bounds_and_length_test :: proc(t: ^testing.T) {
+	envelope: [800]f32
+	bpm_test_fill_onsets(envelope[:], 120, 100)
+	testing.expect(t, !estimate_bpm_from_onset_envelope(envelope[:], 0).valid)
+	testing.expect(t, !estimate_bpm_from_onset_envelope(envelope[:], math.INF_F64).valid)
+	testing.expect(t, !estimate_bpm_from_onset_envelope(envelope[:], 100, 0, 240).valid)
+	testing.expect(t, !estimate_bpm_from_onset_envelope(envelope[:], 100, 120, 120).valid)
+	testing.expect(t, !estimate_bpm_from_onset_envelope(envelope[:], 100, 240, 40).valid)
+	short: [20]f32
+	testing.expect(t, !estimate_bpm_from_onset_envelope(short[:], 100).valid)
+}
+
+bpm_bridge_append_u16_le :: proc(bytes: ^[dynamic]u8, value: u16) {
+	append(bytes, u8(value), u8(value >> 8))
+}
+
+bpm_bridge_append_u32_le :: proc(bytes: ^[dynamic]u8, value: u32) {
+	append(bytes, u8(value), u8(value >> 8), u8(value >> 16), u8(value >> 24))
+}
+
+BPM_Bridge_Wav_Kind :: enum {
+	Clicks,
+	Steady_Tone,
+	Burst_Transitions,
+	Stereo_Identical,
+}
+
+bpm_bridge_wav_create :: proc(
+	kind: BPM_Bridge_Wav_Kind,
+	sample_count: int,
+) -> (string, bool) {
+	file, create_error := os2.create_temp_file("", "hw_videoClips-bpm-*.wav")
+	if create_error != nil {return "", false}
+	temporary_path := os2.name(file)
+	path, clone_error := strings.clone(temporary_path)
+	_ = os2.close(file)
+	if clone_error != nil {
+		_ = os.remove(temporary_path)
+		return "", false
+	}
+
+	sample_rate: u32 = 22_050
+	channels: u16 = 1
+	if kind == .Stereo_Identical {channels = 2}
+	bytes_per_frame := int(channels) * 2
+	data_size := u32(sample_count * bytes_per_frame)
+	bytes := make([dynamic]u8, 0, 44+int(data_size))
+	defer delete(bytes)
+	append(&bytes, 'R', 'I', 'F', 'F')
+	bpm_bridge_append_u32_le(&bytes, 36+data_size)
+	append(&bytes, 'W', 'A', 'V', 'E', 'f', 'm', 't', ' ')
+	bpm_bridge_append_u32_le(&bytes, 16)
+	bpm_bridge_append_u16_le(&bytes, 1)
+	bpm_bridge_append_u16_le(&bytes, channels)
+	bpm_bridge_append_u32_le(&bytes, sample_rate)
+	bpm_bridge_append_u32_le(&bytes, sample_rate*u32(bytes_per_frame))
+	bpm_bridge_append_u16_le(&bytes, u16(bytes_per_frame))
+	bpm_bridge_append_u16_le(&bytes, 16)
+	append(&bytes, 'd', 'a', 't', 'a')
+	bpm_bridge_append_u32_le(&bytes, data_size)
+	for index in 0..<sample_count {
+		sample: i16
+		switch kind {
+		case .Clicks:
+			phase := index % (int(sample_rate)/2)
+			if phase < 96 {
+				if phase%2 == 0 {sample = 24_000} else {sample = -24_000}
+			}
+		case .Steady_Tone, .Stereo_Identical:
+			phase := index % 50
+			if phase < 25 {sample = 12_000} else {sample = -12_000}
+		case .Burst_Transitions:
+			in_first_burst := index >= int(sample_rate)/2 && index < int(sample_rate)
+			in_second_burst := index >= int(sample_rate)*2 && index < int(sample_rate)*5/2
+			if in_first_burst || in_second_burst {
+				phase := index % 50
+				if phase < 25 {sample = 12_000} else {sample = -12_000}
+			}
+		}
+		bpm_bridge_append_u16_le(&bytes, transmute(u16)sample)
+		if channels == 2 {
+			bpm_bridge_append_u16_le(&bytes, transmute(u16)sample)
+		}
+	}
+	if !os.write_entire_file(path, bytes[:]) {
+		_ = os.remove(path)
+		delete(path)
+		return "", false
+	}
+	return path, true
+}
+
+bpm_bridge_click_wav_create :: proc() -> (string, bool) {
+	return bpm_bridge_wav_create(.Clicks, 22_050*4)
+}
+
+bpm_bridge_call :: proc(
+	path: string,
+	cancellation_token: ^BPM_Cancellation_Token,
+	values: ^[^]f32,
+	count: ^uint,
+	rate_hz: ^f64,
+) -> BPM_Analysis_Status {
+	path_c := strings.clone_to_cstring(path)
+	defer delete(path_c)
+	return hw_bpm_copy_onset_envelope(path_c, cancellation_token, values, count, rate_hz)
+}
+
+@(test)
+bpm_bridge_decodes_pcm_clicks_to_finite_onset_envelope_test :: proc(t: ^testing.T) {
+	path, created := bpm_bridge_click_wav_create()
+	testing.expect(t, created)
+	if !created {return}
+	defer {
+		os.remove(path)
+		delete(path)
+	}
+
+	values: [^]f32
+	count: uint
+	rate_hz: f64
+	status := bpm_bridge_call(path, nil, &values, &count, &rate_hz)
+	defer hw_bpm_free_onset_envelope(values)
+	testing.expect_value(t, status, BPM_Analysis_Status.OK)
+	testing.expect(t, values != nil)
+	testing.expect(t, count > 0)
+	testing.expect(t, math.abs(rate_hz-(22_050.0/512.0)) < 1.0e-9)
+	for index in 0..<count {
+		testing.expect(t, !math.is_nan(values[index]) && !math.is_inf(values[index]))
+		testing.expect(t, values[index] >= 0 && values[index] <= 1)
+	}
+}
+
+@(test)
+bpm_bridge_short_audio_zero_pads_one_finite_frame_test :: proc(t: ^testing.T) {
+	path, created := bpm_bridge_wav_create(.Steady_Tone, 1000)
+	testing.expect(t, created)
+	if !created {return}
+	defer {
+		_ = os.remove(path)
+		delete(path)
+	}
+
+	values: [^]f32
+	count: uint
+	rate_hz: f64
+	status := bpm_bridge_call(path, nil, &values, &count, &rate_hz)
+	defer hw_bpm_free_onset_envelope(values)
+	testing.expect_value(t, status, BPM_Analysis_Status.OK)
+	testing.expect(t, values != nil)
+	testing.expect_value(t, count, uint(1))
+	if count == 1 {
+		testing.expect(t, !math.is_nan(values[0]) && !math.is_inf(values[0]))
+		testing.expect(t, values[0] >= 0 && values[0] <= 1)
+	}
+}
+
+@(test)
+bpm_bridge_local_mean_uses_only_prior_frames_test :: proc(t: ^testing.T) {
+	path, created := bpm_bridge_wav_create(.Steady_Tone, 22_050)
+	testing.expect(t, created)
+	if !created {return}
+	defer {
+		_ = os.remove(path)
+		delete(path)
+	}
+
+	values: [^]f32
+	count: uint
+	rate_hz: f64
+	status := bpm_bridge_call(path, nil, &values, &count, &rate_hz)
+	defer hw_bpm_free_onset_envelope(values)
+	testing.expect_value(t, status, BPM_Analysis_Status.OK)
+	testing.expect(t, count > 1)
+	if count > 1 {
+		// Subtract the mean of prior frames before inserting the current frame.
+		// The first onset therefore remains the strongest steady-tone onset.
+		testing.expect(t, values[0] > 0.99)
+		for index in 1..<count {
+			testing.expect(t, values[index] <= values[0])
+		}
+	}
+}
+
+@(test)
+bpm_bridge_frequency_bursts_produce_finite_transition_dominated_flux_test :: proc(
+	t: ^testing.T,
+) {
+	path, created := bpm_bridge_wav_create(.Burst_Transitions, 22_050*3)
+	testing.expect(t, created)
+	if !created {return}
+	defer {
+		_ = os.remove(path)
+		delete(path)
+	}
+
+	values: [^]f32
+	count: uint
+	rate_hz: f64
+	status := bpm_bridge_call(path, nil, &values, &count, &rate_hz)
+	defer hw_bpm_free_onset_envelope(values)
+	testing.expect_value(t, status, BPM_Analysis_Status.OK)
+	testing.expect(t, count > 0)
+	transition_flux: f32
+	steady_flux: f32
+	for index in 0..<count {
+		value := values[index]
+		testing.expect(t, !math.is_nan(value) && !math.is_inf(value))
+		testing.expect(t, value >= 0 && value <= 1)
+		seconds := f64(index) / rate_hz
+		near_transition := math.abs(seconds-0.5) < 0.12 ||
+			math.abs(seconds-2.0) < 0.12
+		if near_transition {
+			transition_flux = max(transition_flux, value)
+		} else if (seconds > 0.7 && seconds < 0.9) ||
+		          (seconds > 2.2 && seconds < 2.4) {
+			steady_flux = max(steady_flux, value)
+		}
+	}
+	testing.expect(t, transition_flux > 0.9)
+	testing.expect(t, transition_flux > steady_flux*4)
+}
+
+@(test)
+bpm_bridge_stereo_channels_downmix_to_finite_mono_envelope_test :: proc(t: ^testing.T) {
+	path, created := bpm_bridge_wav_create(.Stereo_Identical, 22_050)
+	testing.expect(t, created)
+	if !created {return}
+	defer {
+		_ = os.remove(path)
+		delete(path)
+	}
+
+	values: [^]f32
+	count: uint
+	rate_hz: f64
+	status := bpm_bridge_call(path, nil, &values, &count, &rate_hz)
+	defer hw_bpm_free_onset_envelope(values)
+	testing.expect_value(t, status, BPM_Analysis_Status.OK)
+	testing.expect(t, count > 0)
+	for index in 0..<count {
+		testing.expect(t, !math.is_nan(values[index]) && !math.is_inf(values[index]))
+		testing.expect(t, values[index] >= 0 && values[index] <= 1)
+	}
+}
+
+@(test)
+bpm_bridge_reports_no_audio_for_valid_video_test :: proc(t: ^testing.T) {
+	path_value := getenv("HW_VIDEO_CLIPS_BPM_NO_AUDIO_FIXTURE")
+	testing.expect(t, path_value != nil)
+	if path_value == nil {return}
+	values: [^]f32
+	count: uint = 99
+	rate_hz := 99.0
+	status := bpm_bridge_call(string(path_value), nil, &values, &count, &rate_hz)
+	testing.expect_value(t, status, BPM_Analysis_Status.No_Audio)
+	testing.expect(t, values == nil)
+	testing.expect_value(t, count, uint(0))
+	testing.expect_value(t, rate_hz, 0.0)
+}
+
+@(test)
+bpm_bridge_fails_closed_for_unreadable_and_cancelled_input_test :: proc(t: ^testing.T) {
+	dummy: f32
+	values: [^]f32 = &dummy
+	count: uint = 99
+	rate_hz := 99.0
+	status := bpm_bridge_call(
+		"/path/that/does/not/exist/hw-bpm.wav", nil, &values, &count, &rate_hz,
+	)
+	testing.expect_value(t, status, BPM_Analysis_Status.Unreadable)
+	testing.expect(t, values == nil)
+	testing.expect_value(t, count, uint(0))
+	testing.expect_value(t, rate_hz, 0.0)
+
+	path, created := bpm_bridge_click_wav_create()
+	testing.expect(t, created)
+	if !created {return}
+	defer {
+		os.remove(path)
+		delete(path)
+	}
+	cancellation_token: BPM_Cancellation_Token
+	hw_bpm_cancellation_token_init(&cancellation_token)
+	hw_bpm_cancellation_token_cancel(&cancellation_token)
+	testing.expect(t, hw_bpm_cancellation_token_is_cancelled(&cancellation_token))
+	values = &dummy
+	count = 99
+	rate_hz = 99
+	status = bpm_bridge_call(path, &cancellation_token, &values, &count, &rate_hz)
+	testing.expect_value(t, status, BPM_Analysis_Status.Cancelled)
+	testing.expect(t, values == nil)
+	testing.expect_value(t, count, uint(0))
+	testing.expect_value(t, rate_hz, 0.0)
+
+	testing.expect(t, os.write_entire_file(path, []byte{'n', 'o', 't', ' ', 'm', 'e', 'd', 'i', 'a'}))
+	values = &dummy
+	count = 99
+	rate_hz = 99
+	status = bpm_bridge_call(path, nil, &values, &count, &rate_hz)
+	testing.expect_value(t, status, BPM_Analysis_Status.Unreadable)
+	testing.expect(t, values == nil)
+	testing.expect_value(t, count, uint(0))
+	testing.expect_value(t, rate_hz, 0.0)
+}
+
+@(test)
+bpm_bridge_rejects_invalid_output_pointers_test :: proc(t: ^testing.T) {
+	path, created := bpm_bridge_click_wav_create()
+	testing.expect(t, created)
+	if !created {return}
+	defer {
+		os.remove(path)
+		delete(path)
+	}
+
+	dummy: f32
+	values: [^]f32 = &dummy
+	count: uint = 99
+	rate_hz := 99.0
+	status := bpm_bridge_call(path, nil, nil, &count, &rate_hz)
+	testing.expect_value(t, status, BPM_Analysis_Status.Unreadable)
+	testing.expect_value(t, count, uint(0))
+	testing.expect_value(t, rate_hz, 0.0)
+
+	status = bpm_bridge_call(path, nil, &values, nil, &rate_hz)
+	testing.expect_value(t, status, BPM_Analysis_Status.Unreadable)
+	testing.expect(t, values == nil)
+	testing.expect_value(t, rate_hz, 0.0)
+
+	values = &dummy
+	count = 99
+	status = bpm_bridge_call(path, nil, &values, &count, nil)
+	testing.expect_value(t, status, BPM_Analysis_Status.Unreadable)
+	testing.expect(t, values == nil)
+	testing.expect_value(t, count, uint(0))
+}
+
+@(test)
 numbered_action_keys_use_digits_one_through_nine_test :: proc(t: ^testing.T) {
 	key_codes := [9]uint{18, 19, 20, 21, 23, 22, 26, 28, 25}
 	for key_code, index in key_codes {
@@ -4914,9 +5491,16 @@ dancing_tools_register_controls_without_pitch_controls_test :: proc(
 	previous_ui_build := ui_build
 	previous_recovery := library_recovery_state
 	previous_pending := major_change_pending
+	previous_bpm_result := bpm_runtime_result
+	previous_bpm_job := bpm_job
 	state = {}
+	bpm_runtime_result = {}
+	bpm_job = nil
 	defer {
 		app_state_collections_destroy(&state)
+		bpm_runtime_result_clear()
+		bpm_runtime_result = previous_bpm_result
+		bpm_job = previous_bpm_job
 		state = previous_state
 		ui = previous_ui
 		ui_build = previous_ui_build
@@ -4930,10 +5514,19 @@ dancing_tools_register_controls_without_pitch_controls_test :: proc(
 	testing.expect(t, transcripts_ok)
 	if !transcripts_ok {return}
 	state.transcripts = transcripts
+	source, source_ok := clone_source_video(Source_Video{
+		id="dance-source",
+		workflow=.Dancing,
+		has_audio=true,
+	})
+	testing.expect(t, source_ok)
+	if !source_ok {return}
+	append(&state.sources, source)
 	clip, clip_ok := clone_clip(Clip{
 		id="dance-clip",
 		source_id="dance-source",
 		workflow=.Dancing,
+		clip_path="/tmp/dance-clip.mp4",
 		dance_count_in_bpm=120,
 		dance_playback_rate=1,
 	})
@@ -4954,6 +5547,10 @@ dancing_tools_register_controls_without_pitch_controls_test :: proc(
 	}
 	library_recovery_state = {}
 	major_change_pending = {}
+	testing.expect(t, !active_dance_clip_count_in_enabled())
+	state.clips[0].dance_count_in_beats = 4
+	testing.expect(t, active_dance_clip_count_in_enabled())
+	state.clips[0].dance_count_in_beats = 0
 	frame_arena: mem_virtual.Arena
 	frame_error := mem_virtual.arena_init_static(
 		&frame_arena,
@@ -4965,32 +5562,83 @@ dancing_tools_register_controls_without_pitch_controls_test :: proc(
 	defer mem_virtual.arena_destroy(&frame_arena)
 	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
-	dance_kinds := [6]UI_Action_Kind{
+	dance_kinds := [9]UI_Action_Kind{
 		.Dance_Mirror_Toggle,
 		.Dance_Loop_Toggle,
 		.Dance_Count_In,
 		.Dance_Count_Each_Loop_Toggle,
 		.Dance_BPM_Down,
 		.Dance_BPM_Up,
+		.Dance_BPM_Status,
+		.Dance_BPM_Use_Auto,
+		.Dance_BPM_Analyze_Again,
 	}
 	for kind in dance_kinds {
 		testing.expect(t, find_ui_control_by_action(kind) != nil)
 	}
 	testing.expect(t, find_ui_control_by_action(.Pitch_Toggle) == nil)
 	testing.expect(t, find_ui_control_by_action(.Pitch_Reference_Down) == nil)
+	use_auto := find_ui_control_by_action(.Dance_BPM_Use_Auto)
+	analyze_again := find_ui_control_by_action(.Dance_BPM_Analyze_Again)
+	testing.expect(t, use_auto != nil && .Enabled not_in use_auto.flags)
+	testing.expect(t, analyze_again != nil && .Enabled not_in analyze_again.flags)
+
+	testing.expect(t, bpm_runtime_result_set(
+		state.clips[0].id,
+		state.clips[0].clip_path,
+		.Ready,
+		BPM_Estimate{bpm=128, confidence=0.8, valid=true},
+	))
+	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
+	use_auto = find_ui_control_by_action(.Dance_BPM_Use_Auto)
+	analyze_again = find_ui_control_by_action(.Dance_BPM_Analyze_Again)
+	testing.expect(t, use_auto != nil && .Enabled in use_auto.flags)
+	testing.expect(t, analyze_again != nil && .Enabled in analyze_again.flags)
 }
 
 @(test)
-dancing_count_each_loop_and_bpm_label_do_not_overlap_test :: proc(
+dancing_bpm_group_stays_below_clip_and_inside_panel_test :: proc(
 	t: ^testing.T,
 ) {
 	panel := UI_Rect{0, 0, 220, 600}
 	content := dance_content_rect(panel)
 	content_top := content.y + content.h
-	count_each_loop_bottom := content_top - 32 - 4 * 32
+	clip_bottom := content_top - 32
 	bpm_down := dance_bpm_down_rect(panel)
 	bpm_label_top := bpm_down.y + bpm_down.h + 8 + 20
-	testing.expect(t, bpm_label_top <= count_each_loop_bottom)
+	testing.expect(t, bpm_label_top <= clip_bottom)
+	status := dance_bpm_status_rect(panel)
+	use_auto := dance_bpm_action_rect(panel, 0)
+	analyze_again := dance_bpm_action_rect(panel, 1)
+	saved_speed := dance_saved_speed_rect(panel)
+	testing.expect(t, status.y + status.h <= bpm_down.y)
+	testing.expect(t, use_auto.y + use_auto.h <= status.y)
+	testing.expect(t, use_auto.x + use_auto.w < analyze_again.x)
+	testing.expect(t, saved_speed.y + saved_speed.h <= use_auto.y)
+	testing.expect(t, saved_speed.y >= content.y)
+}
+
+@(test)
+dancing_bpm_status_and_use_value_follow_runtime_result_test :: proc(t: ^testing.T) {
+	clip := Clip{id="clip-1", clip_path="/tmp/clip-1.mp4"}
+	result := BPM_Runtime_Result{
+		clip_id="clip-1",
+		clip_path="/tmp/clip-1.mp4",
+		state=.Analyzing,
+	}
+	testing.expect_value(t, bpm_runtime_status_text(result, &clip), "AUTO / ANALYZING...")
+
+	result.state = .Ready
+	result.estimate = BPM_Estimate{bpm=127.6, confidence=0.8, valid=true}
+	testing.expect_value(t, bpm_runtime_status_text(result, &clip), "AUTO / 128 BPM · HIGH")
+	value, available := bpm_runtime_estimate_value(result, &clip)
+	testing.expect(t, available)
+	testing.expect_value(t, value, 128)
+
+	result.estimate.bpm = 64
+	result.estimate.alternatives[0] = 128
+	result.estimate.alternative_count = 1
+	testing.expect_value(t, bpm_runtime_status_text(result, &clip), "AUTO / 64 OR 128")
 }
 
 @(test)

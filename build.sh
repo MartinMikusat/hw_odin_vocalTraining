@@ -76,12 +76,27 @@ EXECUTABLE="$APP/Contents/MacOS/hw_videoClips"
 TEMP="$ROOT/build/temp/$MODE"
 mkdir -p "$TEMP"
 PITCH_CAPTURE_OBJECT="$TEMP/pitch_capture.o"
+BPM_ANALYSIS_OBJECT="$TEMP/bpm_analysis.o"
 xcrun clang \
   -fobjc-arc \
   -fblocks \
   -mmacosx-version-min=13.0 \
   -c "$ROOT/src/pitch_capture.m" \
   -o "$PITCH_CAPTURE_OBJECT"
+xcrun clang \
+  -fobjc-arc \
+  -fblocks \
+  -mmacosx-version-min=13.0 \
+  -Wall \
+  -Wextra \
+  -Werror \
+  -Wpedantic \
+  -Wconversion \
+  -Wsign-conversion \
+  -Wshorten-64-to-32 \
+  -Wcast-align \
+  -c "$ROOT/src/bpm_analysis.m" \
+  -o "$BPM_ANALYSIS_OBJECT"
 cd "$TEMP"
 odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
   -collection:match_sorter="$MATCH_SORTER_ROOT" \
@@ -90,7 +105,7 @@ odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
   -collection:components="$COMPONENTS_ROOT" \
   -collection:task_queue="$TASK_QUEUE_ROOT" \
   -collection:ui_framework="$UI_FRAMEWORK_ROOT" \
-  -extra-linker-flags:"$PITCH_CAPTURE_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics -framework ImageIO"
+  -extra-linker-flags:"$PITCH_CAPTURE_OBJECT $BPM_ANALYSIS_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics -framework ImageIO -framework Accelerate"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/Icons/Iconoir"
 cp "$ICON_ROOT/xmark.svg" "$APP/Contents/Resources/Icons/Iconoir/xmark.svg"

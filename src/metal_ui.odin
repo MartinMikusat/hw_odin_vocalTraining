@@ -571,6 +571,9 @@ UI_Action_Kind :: enum {
 	Dance_Count_Each_Loop_Toggle,
 	Dance_BPM_Down,
 	Dance_BPM_Up,
+	Dance_BPM_Status,
+	Dance_BPM_Use_Auto,
+	Dance_BPM_Analyze_Again,
 	Clip_Name,
 	Cancel_Clip_Rename,
 	Confirm_Clip_Rename,
@@ -3573,7 +3576,7 @@ dance_bpm_down_rect :: proc(panel: UI_Rect) -> UI_Rect {
 	content := dance_content_rect(panel)
 	return UI_Rect{
 		content.x,
-		content.y + content.h - 228,
+		content.y + content.h - 104,
 		34,
 		30,
 	}
@@ -3587,6 +3590,31 @@ dance_bpm_value_rect :: proc(panel: UI_Rect) -> UI_Rect {
 dance_bpm_up_rect :: proc(panel: UI_Rect) -> UI_Rect {
 	value := dance_bpm_value_rect(panel)
 	return UI_Rect{value.x + value.w + 4, value.y, 34, value.h}
+}
+
+dance_bpm_status_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	content := dance_content_rect(panel)
+	down := dance_bpm_down_rect(panel)
+	return UI_Rect{content.x, down.y - 30, content.w, 22}
+}
+
+dance_bpm_action_rect :: proc(panel: UI_Rect, index: int) -> UI_Rect {
+	content := dance_content_rect(panel)
+	status := dance_bpm_status_rect(panel)
+	gap := 4.0
+	width := (content.w - gap) / 2
+	return UI_Rect{
+		content.x + f64(index) * (width + gap),
+		status.y - 34,
+		width,
+		28,
+	}
+}
+
+dance_saved_speed_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	content := dance_content_rect(panel)
+	action := dance_bpm_action_rect(panel, 0)
+	return UI_Rect{content.x, action.y - 42, content.w, 24}
 }
 
 pitch_settings_rect :: proc(panel: UI_Rect) -> UI_Rect {
@@ -3915,6 +3943,11 @@ active_dance_clip_looping :: proc() -> bool {
 	return clip != nil && clip.dance_loop
 }
 
+active_dance_clip_count_in_enabled :: proc() -> bool {
+	clip := active_dance_clip()
+	return clip != nil && clip.dance_count_in_beats > 0
+}
+
 active_dance_clip_counts_each_loop :: proc() -> bool {
 	clip := active_dance_clip()
 	return clip != nil && clip.dance_count_each_loop
@@ -3933,6 +3966,15 @@ save_active_dance_clip :: proc() -> bool {
 	if save_library() {return true}
 	set_error_status("Unable to save the Dancing clip settings")
 	return false
+}
+
+dance_clip_adjust_bpm :: proc(clip: ^Clip, delta: int) -> bool {
+	if clip == nil || delta == 0 {return false}
+	adjusted := clamp(clip.dance_count_in_bpm + delta, 40, 240)
+	if adjusted == clip.dance_count_in_bpm {return false}
+	clip.dance_count_in_bpm = adjusted
+	clip.dance_bpm_user_set = true
+	return true
 }
 
 adjust_playback_rate :: proc(delta: f32) {
@@ -6068,33 +6110,15 @@ draw_dance_tools :: proc(
 		return
 	}
 	top := content.y + content.h
-	rows := [5]string{
+	draw_text_in_rect(
+		ctx,
+		font,
 		fmt.tprintf("CLIP / %s", clip.name),
-		clip.dance_mirrored ? "MIRROR / ON" : "MIRROR / OFF",
-		clip.dance_loop ? "LOOP / ON" : "LOOP / OFF",
-		fmt.tprintf("COUNT-IN / %d", clip.dance_count_in_beats),
-		clip.dance_count_each_loop ? "COUNT EACH LOOP / ON" : "COUNT EACH LOOP / OFF",
-	}
-	for text, index in rows {
-		color := muted
-		if index > 0 {
-			active :=
-				(index == 1 && clip.dance_mirrored) ||
-				(index == 2 && clip.dance_loop) ||
-				(index == 3 && clip.dance_count_in_beats > 0) ||
-				(index == 4 && clip.dance_count_each_loop)
-			if active {color = cool}
-		}
-		draw_text_in_rect(
-			ctx,
-			font,
-			text,
-			UI_Rect{content.x, top - 32 - f64(index) * 32, content.w, 24},
-			.Start,
-			.Center,
-			color,
-		)
-	}
+		UI_Rect{content.x, top - 32, content.w, 24},
+		.Start,
+		.Center,
+		muted,
+	)
 	bpm_down := ui_control_rect(.Dance_BPM_Down)
 	bpm_up := ui_control_rect(.Dance_BPM_Up)
 	bpm_value := dance_bpm_value_rect(panel)
@@ -6118,11 +6142,43 @@ draw_dance_tools :: proc(
 		bright,
 	)
 	draw_text_in_rect(ctx, font, "+", bpm_up, .Center, .Center, clip.dance_count_in_bpm < 240 ? accent : dim)
+	status := bpm_runtime_status_text(bpm_runtime_result, clip)
+	status_ready := bpm_runtime_result_matches_clip(clip) &&
+	                bpm_runtime_result.state == .Ready
+	draw_text_in_rect(
+		ctx,
+		font,
+		status,
+		dance_bpm_status_rect(panel),
+		.Start,
+		.Center,
+		status_ready ? cool : muted,
+	)
+	use_auto := ui_control_rect(.Dance_BPM_Use_Auto)
+	analyze_again := ui_control_rect(.Dance_BPM_Analyze_Again)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"USE AUTO",
+		use_auto,
+		.Center,
+		.Center,
+		ui_action_enabled_for_current_job(.Dance_BPM_Use_Auto) ? accent : dim,
+	)
+	draw_text_in_rect(
+		ctx,
+		font,
+		"ANALYZE AGAIN",
+		analyze_again,
+		.Center,
+		.Center,
+		ui_action_enabled_for_current_job(.Dance_BPM_Analyze_Again) ? accent : dim,
+	)
 	draw_text_in_rect(
 		ctx,
 		font,
 		fmt.tprintf("SAVED SPEED / %.1fx", clip.dance_playback_rate),
-		UI_Rect{content.x, bpm_value.y - 42, content.w, 24},
+		dance_saved_speed_rect(panel),
 		.Start,
 		.Center,
 		muted,
@@ -7086,7 +7142,12 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			push_rect(vertices, help_rect, row_hover)
 		}
 	} else if ui.mode == .Play && ui.workflow == .Dancing {
-		bpm_kinds := [2]UI_Action_Kind{.Dance_BPM_Down, .Dance_BPM_Up}
+		bpm_kinds := [4]UI_Action_Kind{
+			.Dance_BPM_Down,
+			.Dance_BPM_Up,
+			.Dance_BPM_Use_Auto,
+			.Dance_BPM_Analyze_Again,
+		}
 		for kind in bpm_kinds {
 			rect := ui_control_rect(kind)
 			if rect.w <= 0 {continue}
@@ -7286,6 +7347,8 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		     active_dance_clip_mirrored()) ||
 		    (kind == .Dance_Loop_Toggle &&
 		     active_dance_clip_looping()) ||
+		    (kind == .Dance_Count_In &&
+		     active_dance_clip_count_in_enabled()) ||
 		    (kind == .Dance_Count_Each_Loop_Toggle &&
 		     active_dance_clip_counts_each_loop())) {
 			push_border(vertices, rect, UI_COLOR_GUM_32)
@@ -9299,6 +9362,24 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 		}
 		return false
 	}
+	if kind == .Dance_BPM_Use_Auto {
+		clip := active_dance_clip()
+		_, available := bpm_runtime_estimate_value(bpm_runtime_result, clip)
+		return available
+	}
+	if kind == .Dance_BPM_Analyze_Again {
+		clip := active_dance_clip()
+		if clip == nil || bpm_job != nil ||
+		   !bpm_runtime_result_matches_clip(clip) {
+			return false
+		}
+		switch bpm_runtime_result.state {
+		case .Ready, .Low_Confidence, .Unavailable, .Cancelled:
+			return bpm_analysis_source_has_audio(clip)
+		case .Idle, .Analyzing, .No_Audio:
+			return false
+		}
+	}
 	if kind == .Close_Pitch_Help {
 		return ui.pitch.help_open
 	}
@@ -9375,7 +9456,7 @@ add_ax_element :: proc(
 	if enabled {
 		flags += {.Enabled, .Flash, .Primary_Press}
 	}
-	if kind == .Pitch_Chart {
+	if kind == .Pitch_Chart || kind == .Dance_BPM_Status {
 		flags = {.Accessibility, .Enabled}
 	}
 	if kind == .Open_Source_Details {
@@ -10743,6 +10824,46 @@ build_ui_controls_for_scope :: proc(
 				.Dance_BPM_Up,
 				flash_label = "raise count in bpm",
 			)
+			add_ax_element(
+				array,
+				element_class,
+				bpm_runtime_status_text(
+					bpm_runtime_result,
+					active_dance_clip(),
+				),
+				"AXGroup",
+				dance_bpm_status_rect(pitch_panel),
+				.Dance_BPM_Status,
+				functional_name = "automatic bpm status",
+			)
+			use_auto_label := "Use automatically detected BPM"
+			if value, available := bpm_runtime_estimate_value(
+				bpm_runtime_result,
+				active_dance_clip(),
+			); available {
+				use_auto_label = fmt.tprintf(
+					"Use automatically detected %d BPM",
+					value,
+				)
+			}
+			add_ax_element(
+				array,
+				element_class,
+				use_auto_label,
+				"AXButton",
+				dance_bpm_action_rect(pitch_panel, 0),
+				.Dance_BPM_Use_Auto,
+				flash_label = "use automatic bpm",
+			)
+			add_ax_element(
+				array,
+				element_class,
+				"Analyze clip tempo again",
+				"AXButton",
+				dance_bpm_action_rect(pitch_panel, 1),
+				.Dance_BPM_Analyze_Again,
+				flash_label = "analyze clip tempo again",
+			)
 		}
 	}
 	kinds := [20]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle}
@@ -10793,6 +10914,8 @@ build_ui_controls_for_scope :: proc(
 			} else if kind == .Dance_Loop_Toggle {
 				role = "AXCheckBox"
 				accessibility_label = active_dance_clip_looping() ? "Loop on" : "Loop off"
+			} else if kind == .Dance_Count_In {
+				accessibility_label = dance_count_in_action_label()
 			} else if kind == .Dance_Count_Each_Loop_Toggle {
 				role = "AXCheckBox"
 				accessibility_label = active_dance_clip_counts_each_loop() ? "Count before each loop on" : "Count before each loop off"
@@ -11164,20 +11287,36 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		}
 		return false
 	case .Dance_BPM_Down:
-		if clip := active_dance_clip(); clip != nil {
-			clip.dance_count_in_bpm =
-				max(40, clip.dance_count_in_bpm - 1)
+		if clip := active_dance_clip(); dance_clip_adjust_bpm(clip, -1) {
 			ui.needs_redraw = true
 			return save_active_dance_clip()
 		}
 		return false
 	case .Dance_BPM_Up:
-		if clip := active_dance_clip(); clip != nil {
-			clip.dance_count_in_bpm =
-				min(240, clip.dance_count_in_bpm + 1)
+		if clip := active_dance_clip(); dance_clip_adjust_bpm(clip, 1) {
 			ui.needs_redraw = true
 			return save_active_dance_clip()
 		}
+		return false
+	case .Dance_BPM_Use_Auto:
+		clip := active_dance_clip()
+		value, available := bpm_runtime_estimate_value(bpm_runtime_result, clip)
+		if !available {return false}
+		previous_bpm := clip.dance_count_in_bpm
+		previous_user_set := clip.dance_bpm_user_set
+		clip.dance_count_in_bpm = value
+		clip.dance_bpm_user_set = true
+		ui.needs_redraw = true
+		if save_active_dance_clip() {return true}
+		clip.dance_count_in_bpm = previous_bpm
+		clip.dance_bpm_user_set = previous_user_set
+		return false
+	case .Dance_BPM_Analyze_Again:
+		if bpm_analysis_retry_active() {
+			ui.needs_redraw = true
+			return true
+		}
+		set_error_status("Unable to analyze the clip tempo again")
 		return false
 	case .Pitch_Reference_Down:
 		ui.pitch.settings.reference_hz =
@@ -11686,6 +11825,26 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 			),
 		),
 		"Available in Play mode with microphone access available",
+	)
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Dance_BPM_Use_Auto},
+		"Use automatically detected BPM",
+		"Set count-in BPM from the current clip tempo estimate",
+		"Command",
+		[]string{"dance", "tempo", "count in"},
+		palette_condition(PALETTE_CONTEXT_PLAY),
+		"Available for a Dancing clip with a valid tempo estimate",
+	)
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Dance_BPM_Analyze_Again},
+		"Analyze clip tempo again",
+		"Discard the cached estimate and analyze the active Dancing clip again",
+		"Command",
+		[]string{"dance", "bpm", "retry"},
+		palette_condition(PALETTE_CONTEXT_PLAY),
+		"Available after tempo analysis finishes",
 	)
 	append_command_palette_entry(
 		&entries,
@@ -13269,6 +13428,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 		)
 		render_frame()
 	}
+	bpm_analysis_maybe_schedule_active()
 	ui_automation_advance()
 }
 
@@ -13302,6 +13462,12 @@ register_delegate :: proc(app: Id) {
 		delegate_class,
 		sel_registerName("sourceProbeFinished:"),
 		rawptr(on_source_probe_finished),
+		"v@:@",
+	)
+	class_addMethod(
+		delegate_class,
+		sel_registerName("bpmAnalysisFinished:"),
+		rawptr(on_bpm_analysis_finished),
 		"v@:@",
 	)
 	class_addMethod(

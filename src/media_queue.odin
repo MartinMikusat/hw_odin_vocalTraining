@@ -401,6 +401,34 @@ media_queue_probe_finalize :: proc(data: rawptr) {
 	}
 }
 
+media_queue_bpm_task :: proc(
+	task_context: ^task_queue.Task_Context,
+) -> task_queue.Task_Outcome {
+	job := (^BPM_Job)(task_context.data)
+	bpm_job_execute(job)
+	if media_queue_is_shutting_down() {return {}}
+	msg_void_sel_id_b(
+		job.completion_target,
+		sel_registerName("performSelectorOnMainThread:withObject:waitUntilDone:"),
+		sel_registerName("bpmAnalysisFinished:"),
+		nil,
+		false,
+	)
+	_ = media_task_completion_wait(&job.completion)
+	return {}
+}
+
+media_queue_bpm_cancel :: proc(data: rawptr) {
+	bpm_job_cancel((^BPM_Job)(data))
+}
+
+media_queue_bpm_finalize :: proc(data: rawptr) {
+	job := (^BPM_Job)(data)
+	if media_task_completion_processed(&job.completion) {
+		bpm_job_destroy(job)
+	}
+}
+
 media_queue_library_replacement_finalize :: proc(data: rawptr) {
 	job := (^Library_Replacement_Job)(data)
 	if media_task_completion_processed(&job.completion) {
@@ -538,6 +566,45 @@ media_queue_schedule_probe :: proc(job: ^Source_Probe_Job) -> bool {
 		return false
 	}
 	job.task_id = id
+	return true
+}
+
+media_queue_schedule_bpm :: proc(job: ^BPM_Job) -> bool {
+	if job == nil || !media_queue_initialized {return false}
+	id, add_error := task_queue.add(
+		&media_queue,
+		{
+			procedure = media_queue_bpm_task,
+			data = job,
+			cancel_procedure = media_queue_bpm_cancel,
+			finalize_procedure = media_queue_bpm_finalize,
+			policy_data = media_queue_policy_encode(
+				.Export,
+				resource_key = media_queue_resource_key(.Dancing, job.clip_id),
+			),
+			release_on_finish = true,
+			label = "Analyze clip tempo",
+		},
+	)
+	if add_error != .None {return false}
+	job.task_id = id
+	return true
+}
+
+media_queue_cancel_bpm :: proc(job: ^BPM_Job) -> bool {
+	if job == nil || !media_queue_initialized {return false}
+	previous_state, changed := task_queue.cancel_with_state(
+		&media_queue,
+		job.task_id,
+	)
+	if !changed {return false}
+	if previous_state == .Waiting {
+		bpm_job_cancel(job)
+		if bpm_job == job {bpm_job = nil}
+		_ = bpm_runtime_result_set(job.clip_id, job.clip_path, .Cancelled)
+		media_task_completion_finish(&job.completion)
+		bpm_job_destroy(job)
+	}
 	return true
 }
 

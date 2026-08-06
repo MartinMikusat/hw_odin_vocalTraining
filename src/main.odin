@@ -113,6 +113,10 @@ Clip :: struct {
 	dance_count_in_beats: int,
 	dance_count_each_loop: bool,
 	dance_count_in_bpm: int,
+	dance_detected_bpm: f64,
+	dance_bpm_confidence: f32,
+	dance_bpm_detector_revision: int,
+	dance_bpm_user_set: bool,
 	dance_playback_rate: f32,
 }
 
@@ -4504,6 +4508,12 @@ jobs_shutdown :: proc() {
 		clip_normalize_job = nil
 		clip_normalize_job_destroy(job)
 	}
+	if bpm_job != nil {
+		job := bpm_job
+		bpm_job = nil
+		bpm_job_destroy(job)
+	}
+	bpm_runtime_result_clear()
 	if source_probe_job != nil {
 		source_probe_job_destroy(source_probe_job)
 		source_probe_job = nil

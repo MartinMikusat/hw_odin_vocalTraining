@@ -136,6 +136,15 @@ produce count audio. **Count Each Loop** repeats the visual count before each
 loop. Pause and resume do not start another count. **Loop** restarts the active
 clip and takes priority over Autoplay.
 
+The app analyzes each Dancing clip's audio in the background and shows the
+result below the count-in BPM controls. A suitable unambiguous result can
+initialize an untouched BPM. Minus, plus, and **Use Auto** record an explicit
+choice, so later analysis does not overwrite it. **Analyze Again** clears only
+the cached detection and keeps the current count-in BPM. Low-confidence,
+ambiguous, missing-audio, and unavailable results are reported without being
+applied automatically. Tempo detection can be wrong; use the displayed result
+as a suggestion and adjust the saved BPM when required.
+
 With the app focused, press **Command-V** after copying one or more supported
 YouTube URL lines. The application preserves the active workflow, switches to
 Sources, opens Add Source, and starts the metadata check. If Add Source is
