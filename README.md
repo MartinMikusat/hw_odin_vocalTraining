@@ -131,11 +131,13 @@ clip finishes. Autoplay uses the current Shuffle state and current filter.
 
 Dancing **Mirror** flips only the decoded video texture horizontally. Text and
 controls retain their normal direction. **Count-in** cycles through Off, 4,
-and 8. The app draws the count over the video at the saved BPM and does not
-produce count audio. **Count Each Loop** repeats the visual count before each
-loop. Selecting a clip or pressing Play from the beginning starts the count.
-Pause and resume from a later timestamp do not start another count. **Loop**
-restarts the active clip and takes priority over Autoplay.
+and 8. When a beat grid is available, the app schedules accented count clicks
+against the audio host clock and preserves clip timestamp zero. **Metronome**
+continues the four-beat click pattern during playback and is saved per clip.
+**Count Each Loop** repeats the count before each loop. Selecting a clip or
+pressing Play from the beginning starts the count. Pause and resume from a
+later timestamp do not start another count. **Loop** restarts the active clip
+and takes priority over Autoplay.
 
 The app analyzes each Dancing clip's audio in the background and shows the
 result below the count-in BPM controls. A suitable unambiguous result can
@@ -145,6 +147,11 @@ the cached detection and keeps the current count-in BPM. Low-confidence,
 ambiguous, missing-audio, and unavailable results are reported without being
 applied automatically. Tempo detection can be wrong; use the displayed result
 as a suggestion and adjust the saved BPM when required.
+
+Automatic analysis also estimates the beat grid. **Set 1** stores the current
+playhead as the four-beat downbeat. **Earlier** and **Later** move that grid in
+10 ms steps, and **Reset Auto** restores the detected phase. Synchronized
+clicks remain disabled when phase is unavailable until Set 1 calibrates it.
 
 With the app focused, press **Command-V** after copying one or more supported
 YouTube URL lines. The application preserves the active workflow, switches to
@@ -286,9 +293,9 @@ The Vocal Clips actions are **11 Play Next**, **12 Randomize**, **13 Rename**,
 **31 Stop Pitch**.
 
 The Dancing Clips actions replace Pitch with **31 Mirror**, **32 Loop**,
-**33 Count-in**, and **34 Count Each Loop**. Dance Tools exposes BPM minus and
-plus controls through pointer, Accessibility, Flash, and the shared control
-registry.
+**33 Count-in**, **34 Count Each Loop**, and **35 Metronome**. Dance Tools
+exposes BPM and beat-grid calibration through pointer, Accessibility, Flash,
+and the shared control registry.
 Press **Left Arrow** or **Right Arrow** to scrub by one second. Hold **Shift**
 to scrub by 0.1 seconds, or hold **Command** to scrub by 10 seconds.
 

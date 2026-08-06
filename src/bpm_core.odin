@@ -26,17 +26,89 @@ BPM_ALTERNATIVE_SCORE_RATIO            :: 0.55
 BPM_CONFIDENCE_STRENGTH_WEIGHT         :: 0.40
 BPM_CONFIDENCE_PROMINENCE_WEIGHT       :: 0.25
 BPM_CONFIDENCE_SEPARATION_WEIGHT       :: 0.35
+BPM_PHASE_MIN_CONFIDENCE               :: 0.08
+BPM_ANALYSIS_WINDOW_CENTER_SECONDS     :: 1024.0 / 22050.0
 
 BPM_Estimate :: struct {
 	bpm:               f64,
 	confidence:        f32,
 	alternatives:      [2]f64,
 	alternative_count: int,
+	beat_period_seconds: f64,
+	beat_phase_seconds: f64,
+	phase_confidence: f32,
+	phase_valid: bool,
 	valid:              bool,
+}
+
+bpm_envelope_sample_linear :: proc(envelope: []f32, position: f64) -> f64 {
+	left := int(math.floor(position))
+	if left < 0 || left >= len(envelope) {return 0}
+	right := min(left + 1, len(envelope) - 1)
+	fraction := position - f64(left)
+	return f64(envelope[left]) * (1-fraction) +
+	       f64(envelope[right]) * fraction
+}
+
+bpm_estimate_phase :: proc(
+	envelope: []f32,
+	envelope_rate_hz, period_samples: f64,
+) -> (phase_seconds: f64, confidence: f32, valid: bool) {
+	phase_count := int(math.round(period_samples))
+	if phase_count < 2 || phase_count > len(envelope) {return}
+	best_phase := 0
+	best_score := -math.INF_F64
+	second_score := -math.INF_F64
+	for phase in 0 ..< phase_count {
+		score := 0.0
+		position := f64(phase)
+		for position < f64(len(envelope)) {
+			score += bpm_envelope_sample_linear(envelope, position)
+			position += period_samples
+		}
+		if score > best_score {
+			second_score = best_score
+			best_score = score
+			best_phase = phase
+		} else if score > second_score {
+			second_score = score
+		}
+	}
+	if best_score <= BPM_ENERGY_EPSILON {return}
+	confidence = f32(clamp(
+		(best_score-max(0.0, second_score))/best_score,
+		0.0,
+		1.0,
+	))
+	period_seconds := period_samples / envelope_rate_hz
+	phase_seconds = math.mod(
+		f64(best_phase)/envelope_rate_hz + BPM_ANALYSIS_WINDOW_CENTER_SECONDS,
+		period_seconds,
+	)
+	valid = confidence >= BPM_PHASE_MIN_CONFIDENCE
+	return
 }
 
 bpm_value_is_finite :: proc(value: f64) -> bool {
 	return !math.is_nan(value) && !math.is_inf(value)
+}
+
+bpm_beat_grid_valid :: proc(period, offset: f64, confidence: f32) -> bool {
+	if !bpm_value_is_finite(period) || !bpm_value_is_finite(offset) ||
+	   confidence < 0 || confidence > 1 {
+		return false
+	}
+	if period == 0 {return offset == 0 && confidence == 0}
+	return period >= 0.25 && period <= 1.5 &&
+	       offset >= 0 && offset < period*4
+}
+
+bpm_normalize_grid_offset :: proc(offset, period: f64) -> f64 {
+	if period <= 0 {return 0}
+	bar := period * 4
+	result := math.mod(offset, bar)
+	if result < 0 {result += bar}
+	return result
 }
 
 bpm_autocorrelation :: proc(
@@ -314,6 +386,14 @@ estimate_bpm_from_onset_envelope :: proc(
 		maximum_lag,
 	)
 	result.bpm = 60.0 * envelope_rate_hz / fractional_lag
+	result.beat_period_seconds = fractional_lag / envelope_rate_hz
+	result.beat_phase_seconds,
+	result.phase_confidence,
+	result.phase_valid = bpm_estimate_phase(
+		envelope,
+		envelope_rate_hz,
+		fractional_lag,
+	)
 	strength := clamp(best_score, 0.0, 1.0)
 	prominence := clamp(best_score-neighbor_score, 0.0, 1.0)
 	strongest_competitor := max(second_score, half_double_score)

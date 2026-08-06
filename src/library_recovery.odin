@@ -12,7 +12,7 @@ import "core:strings"
 import "core:time"
 import "base:runtime"
 
-LIBRARY_SCHEMA_VERSION :: 10
+LIBRARY_SCHEMA_VERSION :: 11
 LIBRARY_BACKUP_RETENTION :: 10
 
 Library_Storage_Mode :: enum {
@@ -245,6 +245,11 @@ clip_storage_equal :: proc(a, b: Clip) -> bool {
 	       a.dance_bpm_confidence == b.dance_bpm_confidence &&
 	       a.dance_bpm_detector_revision == b.dance_bpm_detector_revision &&
 	       a.dance_bpm_user_set == b.dance_bpm_user_set &&
+	       a.dance_beat_period_seconds == b.dance_beat_period_seconds &&
+	       a.dance_beat_grid_offset_seconds == b.dance_beat_grid_offset_seconds &&
+	       a.dance_beat_phase_confidence == b.dance_beat_phase_confidence &&
+	       a.dance_beat_phase_user_set == b.dance_beat_phase_user_set &&
+	       a.dance_metronome_enabled == b.dance_metronome_enabled &&
 	       a.dance_playback_rate == b.dance_playback_rate
 }
 
@@ -805,7 +810,7 @@ database_salvage_state :: proc(
 
 	statement, prepared := sqlite_prepare(
 		database,
-		`SELECT id, video_id, title, url, media_path, duration,
+		`SELECT id, workflow, video_id, title, url, media_path, duration,
 		        metadata_status, width, height, fps, video_codec,
 		        audio_codec, container, format_id, file_size, source_kind,
 		        original_filename, content_sha256, has_audio
@@ -826,26 +831,27 @@ database_salvage_state :: proc(
 			source := Source_Video{}
 			valid := true
 			source.id, valid = sqlite_column_required_string(statement, 0)
-			if valid {source.video_id, valid = sqlite_column_required_string(statement, 1)}
-			if valid {source.title, valid = sqlite_column_required_string(statement, 2)}
-			if valid {source.url, valid = sqlite_column_required_string(statement, 3)}
+			source.workflow = Workflow_Kind(sqlite3_column_int(statement, 1))
+			if valid {source.video_id, valid = sqlite_column_required_string(statement, 2)}
+			if valid {source.title, valid = sqlite_column_required_string(statement, 3)}
+			if valid {source.url, valid = sqlite_column_required_string(statement, 4)}
 			stored_path := ""
-			if valid {stored_path, valid = sqlite_column_required_string(statement, 4, context.temp_allocator)}
+			if valid {stored_path, valid = sqlite_column_required_string(statement, 5, context.temp_allocator)}
 			if valid {source.media_path, valid = database_file_path_for_runtime(stored_path)}
-			source.duration = sqlite3_column_double(statement, 5)
-			source.metadata_status = Source_Metadata_Status(sqlite3_column_int(statement, 6))
-			source.metadata.width = int(sqlite3_column_int(statement, 7))
-			source.metadata.height = int(sqlite3_column_int(statement, 8))
-			source.metadata.fps = sqlite3_column_double(statement, 9)
-			if valid {source.metadata.vcodec, valid = sqlite_column_required_string(statement, 10)}
-			if valid {source.metadata.acodec, valid = sqlite_column_required_string(statement, 11)}
-			if valid {source.metadata.ext, valid = sqlite_column_required_string(statement, 12)}
-			if valid {source.metadata.format_id, valid = sqlite_column_required_string(statement, 13)}
-			source.metadata.filesize_approx = sqlite3_column_int64(statement, 14)
-			source.kind = Source_Kind(sqlite3_column_int(statement, 15))
-			if valid {source.original_filename, valid = sqlite_column_required_string(statement, 16)}
-			if valid {source.content_sha256, valid = sqlite_column_required_string(statement, 17)}
-			source.has_audio = sqlite3_column_int(statement, 18) != 0
+			source.duration = sqlite3_column_double(statement, 6)
+			source.metadata_status = Source_Metadata_Status(sqlite3_column_int(statement, 7))
+			source.metadata.width = int(sqlite3_column_int(statement, 8))
+			source.metadata.height = int(sqlite3_column_int(statement, 9))
+			source.metadata.fps = sqlite3_column_double(statement, 10)
+			if valid {source.metadata.vcodec, valid = sqlite_column_required_string(statement, 11)}
+			if valid {source.metadata.acodec, valid = sqlite_column_required_string(statement, 12)}
+			if valid {source.metadata.ext, valid = sqlite_column_required_string(statement, 13)}
+			if valid {source.metadata.format_id, valid = sqlite_column_required_string(statement, 14)}
+			source.metadata.filesize_approx = sqlite3_column_int64(statement, 15)
+			source.kind = Source_Kind(sqlite3_column_int(statement, 16))
+			if valid {source.original_filename, valid = sqlite_column_required_string(statement, 17)}
+			if valid {source.content_sha256, valid = sqlite_column_required_string(statement, 18)}
+			source.has_audio = sqlite3_column_int(statement, 19) != 0
 			valid = valid &&
 			        library_salvage_source_valid(&source) &&
 			        library_source_index(result.sources[:], source.id) < 0
@@ -938,15 +944,35 @@ database_salvage_state :: proc(
 		sqlite3_finalize(statement)
 	}
 
-	statement, prepared = sqlite_prepare(
-		database,
-		`SELECT e.id, e.source_id, e.name, e.start_seconds,
-		        e.end_seconds, e.clip_path,
-		        COALESCE(r.last_sequence, 0)
+	clip_query := `SELECT e.id, e.source_id, e.workflow, e.name,
+		        e.start_seconds, e.end_seconds, e.clip_path,
+		        COALESCE(r.last_sequence, 0), e.dance_mirrored,
+		        e.dance_loop, e.dance_count_in_beats,
+		        e.dance_count_each_loop, e.dance_count_in_bpm,
+		        e.dance_detected_bpm, e.dance_bpm_confidence,
+		        e.dance_bpm_detector_revision, e.dance_bpm_user_set,
+		        e.dance_playback_rate
 		 FROM clips e
 		 LEFT JOIN clip_randomization r ON r.clip_id = e.id
-		 ORDER BY e.position`,
-	)
+		 ORDER BY e.position`
+	schema_version, schema_read := library_database_user_version(database)
+	if schema_read && schema_version >= 11 {
+		clip_query = `SELECT e.id, e.source_id, e.workflow, e.name,
+		        e.start_seconds, e.end_seconds, e.clip_path,
+		        COALESCE(r.last_sequence, 0), e.dance_mirrored,
+		        e.dance_loop, e.dance_count_in_beats,
+		        e.dance_count_each_loop, e.dance_count_in_bpm,
+		        e.dance_detected_bpm, e.dance_bpm_confidence,
+		        e.dance_bpm_detector_revision, e.dance_bpm_user_set,
+		        e.dance_playback_rate, e.dance_beat_period_seconds,
+		        e.dance_beat_grid_offset_seconds,
+		        e.dance_beat_phase_confidence,
+		        e.dance_beat_phase_user_set, e.dance_metronome_enabled
+		 FROM clips e
+		 LEFT JOIN clip_randomization r ON r.clip_id = e.id
+		 ORDER BY e.position`
+	}
+	statement, prepared = sqlite_prepare(database, clip_query)
 	if !prepared {
 		report.incomplete_tables += 1
 		complete = false
@@ -960,16 +986,34 @@ database_salvage_state :: proc(
 				break
 			}
 			clip := Clip{
-				start_seconds = sqlite3_column_double(statement, 3),
-				end_seconds = sqlite3_column_double(statement, 4),
-				last_randomized_sequence = sqlite3_column_int64(statement, 6),
+				workflow = Workflow_Kind(sqlite3_column_int(statement, 2)),
+				start_seconds = sqlite3_column_double(statement, 4),
+				end_seconds = sqlite3_column_double(statement, 5),
+				last_randomized_sequence = sqlite3_column_int64(statement, 7),
+				dance_mirrored = sqlite3_column_int(statement, 8) != 0,
+				dance_loop = sqlite3_column_int(statement, 9) != 0,
+				dance_count_in_beats = int(sqlite3_column_int(statement, 10)),
+				dance_count_each_loop = sqlite3_column_int(statement, 11) != 0,
+				dance_count_in_bpm = int(sqlite3_column_int(statement, 12)),
+				dance_detected_bpm = sqlite3_column_double(statement, 13),
+				dance_bpm_confidence = f32(sqlite3_column_double(statement, 14)),
+				dance_bpm_detector_revision = int(sqlite3_column_int(statement, 15)),
+				dance_bpm_user_set = sqlite3_column_int(statement, 16) != 0,
+				dance_playback_rate = f32(sqlite3_column_double(statement, 17)),
+			}
+			if schema_read && schema_version >= 11 {
+				clip.dance_beat_period_seconds = sqlite3_column_double(statement, 18)
+				clip.dance_beat_grid_offset_seconds = sqlite3_column_double(statement, 19)
+				clip.dance_beat_phase_confidence = f32(sqlite3_column_double(statement, 20))
+				clip.dance_beat_phase_user_set = sqlite3_column_int(statement, 21) != 0
+				clip.dance_metronome_enabled = sqlite3_column_int(statement, 22) != 0
 			}
 			valid := true
 			clip.id, valid = sqlite_column_required_string(statement, 0)
 			if valid {clip.source_id, valid = sqlite_column_required_string(statement, 1)}
-			if valid {clip.name, valid = sqlite_column_required_string(statement, 2)}
+			if valid {clip.name, valid = sqlite_column_required_string(statement, 3)}
 			stored_path := ""
-			if valid {stored_path, valid = sqlite_column_required_string(statement, 5, context.temp_allocator)}
+			if valid {stored_path, valid = sqlite_column_required_string(statement, 6, context.temp_allocator)}
 			if valid {clip.clip_path, valid = database_file_path_for_runtime(stored_path)}
 			source_index := source_index_for_id(result.sources[:], clip.source_id)
 			valid = valid &&
@@ -1377,7 +1421,6 @@ library_recovery_sync_directory :: proc(path: string) -> bool {
 
 library_recovery_sync_parent :: proc(path: string) -> bool {
 	parent := filepath.dir(path)
-	defer delete(parent)
 	return library_recovery_sync_directory(parent)
 }
 

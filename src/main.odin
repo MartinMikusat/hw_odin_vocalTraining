@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:encoding/json"
+import "core:math"
 import "core:math/rand"
 import "core:mem"
 import os "core:os/old"
@@ -117,6 +118,11 @@ Clip :: struct {
 	dance_bpm_confidence: f32,
 	dance_bpm_detector_revision: int,
 	dance_bpm_user_set: bool,
+	dance_beat_period_seconds: f64,
+	dance_beat_grid_offset_seconds: f64,
+	dance_beat_phase_confidence: f32,
+	dance_beat_phase_user_set: bool,
+	dance_metronome_enabled: bool,
 	dance_playback_rate: f32,
 }
 
@@ -1160,8 +1166,10 @@ seek_seconds :: proc(
 	ui.playback_completion_pending = false
 	request_transcript_follow_to(seconds)
 	resume := playback_actively_playing()
+	if ui.metronome != nil {hw_metronome_stop(ui.metronome)}
 	seek_video_seconds(seconds, warm_paused_frame, exact)
 	metal_audio_seek(seconds, resume)
+	if resume {dance_schedule_continuous_metronome(active_dance_clip(), seconds)}
 }
 
 scrub_player_by :: proc(delta: f64) {
@@ -1172,13 +1180,14 @@ scrub_player_by :: proc(delta: f64) {
 	ui.needs_redraw = true
 }
 
-start_prepared_playback :: proc() {
+start_prepared_playback :: proc(media_seconds := 0.0) {
 	if state.player == nil {return}
 	cancel_paused_video_frame_warmup()
 	cancel_dance_count_in()
 	ui.playback_completion_pending = false
 	if metal_audio_play() {
 		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
+		dance_schedule_continuous_metronome(active_dance_clip(), media_seconds)
 	} else {
 		set_error_status("Unable to start audio playback")
 	}
@@ -1189,7 +1198,7 @@ start_loaded_playback_at :: proc(seconds: f64) {
 	request_transcript_follow_to(seconds)
 	seek_video_seconds(seconds)
 	metal_audio_seek(seconds, false)
-	start_prepared_playback()
+	start_prepared_playback(seconds)
 }
 
 cancel_dance_count_in :: proc() {
@@ -1197,11 +1206,142 @@ cancel_dance_count_in :: proc() {
 	ui.count_in_value = 0
 	ui.count_in_remaining = 0
 	ui.count_in_deadline_ms = 0
+	ui.count_in_playback_deadline_ms = 0
+	ui.count_in_host_scheduled = false
 	ui.count_in_for_loop = false
 }
 
 dance_count_in_interval_ms :: proc(bpm: int) -> i64 {
 	return max(i64(1), i64(60_000 / max(1, bpm)))
+}
+
+dance_beat_period :: proc(clip: ^Clip) -> f64 {
+	if clip == nil {return 0}
+	if clip.dance_beat_period_seconds >= 0.25 &&
+	   clip.dance_beat_period_seconds <= 1.5 {
+		return clip.dance_beat_period_seconds
+	}
+	return 60.0 / f64(clamp(clip.dance_count_in_bpm, 40, 240))
+}
+
+dance_beat_grid_available :: proc(clip: ^Clip) -> bool {
+	return clip != nil && dance_beat_period(clip) > 0 &&
+	       (clip.dance_beat_phase_user_set ||
+	        clip.dance_beat_phase_confidence >= BPM_PHASE_MIN_CONFIDENCE)
+}
+
+dance_grid_offset_normalized :: proc(clip: ^Clip) -> f64 {
+	period := dance_beat_period(clip)
+	if period <= 0 {return 0}
+	bar := period * 4
+	offset := math.mod(clip.dance_beat_grid_offset_seconds, bar)
+	if offset < 0 {offset += bar}
+	return offset
+}
+
+dance_count_in_preroll_seconds :: proc(clip: ^Clip) -> f64 {
+	if clip == nil || clip.dance_count_in_beats <= 0 {return 0}
+	period := dance_beat_period(clip)
+	if period <= 0 {return 0}
+	phase := math.mod(dance_grid_offset_normalized(clip), period)
+	return f64(clip.dance_count_in_beats)*period - phase
+}
+
+dance_schedule_metronome_clicks :: proc(
+	clip: ^Clip,
+	first_click_host, playback_host: u64,
+) {
+	if clip == nil || ui.metronome == nil {return}
+	period := dance_beat_period(clip)
+	rate := f64(max(ui.playback_rate, 0.1))
+	for beat in 0 ..< clip.dance_count_in_beats {
+		host := hw_host_time_after_seconds(
+			first_click_host,
+			f64(beat)*period/rate,
+		)
+		_ = hw_metronome_schedule(ui.metronome, host, beat%4 == 0)
+	}
+	if clip.dance_metronome_enabled {
+		offset := dance_grid_offset_normalized(clip)
+		beat_index := int(math.ceil(-offset/period))
+		for scheduled := 0; scheduled < 4096; scheduled += 1 {
+			media_seconds := offset + f64(beat_index)*period
+			if media_seconds > ui.player_duration {break}
+			if media_seconds >= 0 {
+				host := hw_host_time_after_seconds(
+					playback_host,
+					media_seconds/rate,
+				)
+				accent_index := beat_index % 4
+				if accent_index < 0 {accent_index += 4}
+				_ = hw_metronome_schedule(
+					ui.metronome,
+					host,
+					accent_index == 0,
+				)
+			}
+			beat_index += 1
+		}
+	}
+	hw_metronome_play(ui.metronome)
+}
+
+dance_schedule_continuous_metronome :: proc(
+	clip: ^Clip,
+	media_seconds: f64,
+) {
+	if ui.metronome == nil {return}
+	hw_metronome_stop(ui.metronome)
+	if clip == nil || !clip.dance_metronome_enabled ||
+	   !dance_beat_grid_available(clip) || !metal_audio_prepare_engine() {
+		return
+	}
+	period := dance_beat_period(clip)
+	offset := dance_grid_offset_normalized(clip)
+	rate := f64(max(ui.playback_rate, 0.1))
+	beat_index := int(math.ceil((media_seconds-offset)/period))
+	anchor_host := hw_host_time_now()
+	for scheduled := 0; scheduled < 4096; scheduled += 1 {
+		beat_seconds := offset + f64(beat_index)*period
+		if beat_seconds > ui.player_duration {break}
+		delay := (beat_seconds-media_seconds)/rate
+		if delay >= 0.03 {
+			host := hw_host_time_after_seconds(anchor_host, delay)
+			accent_index := beat_index % 4
+			if accent_index < 0 {accent_index += 4}
+			_ = hw_metronome_schedule(
+				ui.metronome,
+				host,
+				accent_index == 0,
+			)
+		}
+		beat_index += 1
+	}
+	hw_metronome_play(ui.metronome)
+}
+
+dance_schedule_count_in_start :: proc(clip: ^Clip) -> (i64, bool) {
+	if !dance_beat_grid_available(clip) || ui.metronome == nil ||
+	   ui.audio_player == nil || !metal_audio_prepare_engine() {
+		return 0, false
+	}
+	period := dance_beat_period(clip)
+	pre_roll := dance_count_in_preroll_seconds(clip)
+	rate := f64(max(ui.playback_rate, 0.1))
+	delay := pre_roll / rate
+	first_click_host := hw_host_time_after_seconds(hw_host_time_now(), 0.06)
+	playback_host := hw_host_time_after_seconds(first_click_host, delay)
+	dance_schedule_metronome_clicks(clip, first_click_host, playback_host)
+	pitch_latency := 0.0
+	if ui.audio_pitch != nil {
+		pitch_latency = max(0.0, msg_f64(ui.audio_pitch, sel_registerName("latency")))
+	}
+	song_host := hw_host_time_before_seconds(playback_host, pitch_latency)
+	if !hw_audio_player_play_at_host_time(ui.audio_player, song_host) {
+		hw_metronome_stop(ui.metronome)
+		return 0, false
+	}
+	return numbered_action_time_ms() + i64((delay+0.06)*1000), true
 }
 
 dance_count_in_should_start_on_resume :: proc(
@@ -1236,9 +1376,12 @@ begin_dance_count_in :: proc(for_loop: bool) -> bool {
 	ui.count_in_value = 1
 	ui.count_in_remaining = clip.dance_count_in_beats
 	ui.count_in_for_loop = for_loop
-	ui.count_in_deadline_ms =
-		numbered_action_time_ms() +
-		dance_count_in_interval_ms(clip.dance_count_in_bpm)
+	playback_deadline, host_scheduled := dance_schedule_count_in_start(clip)
+	ui.count_in_host_scheduled = host_scheduled
+	ui.count_in_playback_deadline_ms = playback_deadline
+	interval_ms := i64(dance_beat_period(clip) /
+		f64(max(ui.playback_rate, 0.1)) * 1000)
+	ui.count_in_deadline_ms = numbered_action_time_ms() + max(i64(1), interval_ms)
 	set_text(
 		state.status,
 		fmt.tprintf(
@@ -1263,18 +1406,25 @@ advance_dance_count_in :: proc(now_ms: i64) -> bool {
 		cancel_dance_count_in()
 		return true
 	}
-	interval := dance_count_in_interval_ms(clip.dance_count_in_bpm)
+	interval := max(
+		i64(1),
+		i64(dance_beat_period(clip)/f64(max(ui.playback_rate, 0.1))*1000),
+	)
 	changed := false
 	for ui.count_in_active && now_ms >= ui.count_in_deadline_ms {
-		ui.count_in_remaining -= 1
 		changed = true
-		if ui.count_in_remaining <= 0 {
+		if ui.count_in_remaining <= 1 {
 			cancel_dance_count_in()
-			start_prepared_playback()
+			start_prepared_playback(0)
 			break
 		}
+		ui.count_in_remaining -= 1
 		ui.count_in_value += 1
-		ui.count_in_deadline_ms += interval
+		if ui.count_in_remaining == 1 && ui.count_in_host_scheduled {
+			ui.count_in_deadline_ms = ui.count_in_playback_deadline_ms
+		} else {
+			ui.count_in_deadline_ms += interval
+		}
 		set_text(
 			state.status,
 			fmt.tprintf(
@@ -1352,6 +1502,7 @@ stop_player_playback :: proc() {
 	ui.playback_completion_pending = false
 	msg_void(state.player, sel_registerName("pause"))
 	metal_audio_pause()
+	if ui.metronome != nil {hw_metronome_stop(ui.metronome)}
 	seek_seconds(0, false, true)
 	ui.needs_redraw = true
 }
@@ -1362,6 +1513,7 @@ pause_player_playback :: proc() {
 	ui.playback_completion_pending = false
 	msg_void(state.player, sel_registerName("pause"))
 	metal_audio_pause()
+	if ui.metronome != nil {hw_metronome_stop(ui.metronome)}
 	ui.needs_redraw = true
 }
 
@@ -1387,6 +1539,7 @@ resume_player_playback :: proc() -> bool {
 	metal_audio_seek(seconds, false)
 	if !metal_audio_play() {return false}
 	msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
+	dance_schedule_continuous_metronome(active_dance_clip(), seconds)
 	ui.needs_redraw = true
 	return true
 }
@@ -4685,6 +4838,7 @@ video_clips_process_main :: proc(args := os.args) {
 	}
 	load_result := load_library()
 	ui.theme = database_interface_theme_load(library_database)
+	ui.metronome_volume = database_metronome_volume_load(library_database)
 	ui.vocal_playback_rate = database_vocal_playback_rate_load(
 		library_database,
 	)

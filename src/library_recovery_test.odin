@@ -551,6 +551,7 @@ salvage_keeps_valid_rows_and_rejects_corrupt_dependencies_test :: proc(
 	sources := [2]Source_Video{
 		{
 			id = "source-good",
+			workflow = .Dancing,
 			video_id = "video-good",
 			title = "Good",
 			url = "https://youtu.be/video-good",
@@ -570,10 +571,26 @@ salvage_keeps_valid_rows_and_rejects_corrupt_dependencies_test :: proc(
 		{
 			id = "clip-good",
 			source_id = "source-good",
+			workflow = .Dancing,
 			name = "Good",
 			start_seconds = 1,
 			end_seconds = 2,
 			clip_path = "/tmp/good-clip.mp4",
+			dance_mirrored = true,
+			dance_loop = true,
+			dance_count_in_beats = 4,
+			dance_count_each_loop = true,
+			dance_count_in_bpm = 128,
+			dance_detected_bpm = 127.8,
+			dance_bpm_confidence = 0.8,
+			dance_bpm_detector_revision = 2,
+			dance_bpm_user_set = true,
+			dance_beat_period_seconds = 0.469,
+			dance_beat_grid_offset_seconds = 0.12,
+			dance_beat_phase_confidence = 0.7,
+			dance_beat_phase_user_set = true,
+			dance_metronome_enabled = true,
+			dance_playback_rate = 0.8,
 		},
 		{
 			id = "clip-bad",
@@ -606,8 +623,15 @@ salvage_keeps_valid_rows_and_rejects_corrupt_dependencies_test :: proc(
 	defer app_state_collections_destroy(&salvage)
 	testing.expect_value(t, len(salvage.sources), 1)
 	testing.expect_value(t, salvage.sources[0].id, "source-good")
+	testing.expect_value(t, salvage.sources[0].workflow, Workflow_Kind.Dancing)
 	testing.expect_value(t, len(salvage.clips), 1)
 	testing.expect_value(t, salvage.clips[0].id, "clip-good")
+	testing.expect_value(t, salvage.clips[0].workflow, Workflow_Kind.Dancing)
+	testing.expect(t, salvage.clips[0].dance_mirrored)
+	testing.expect(t, salvage.clips[0].dance_loop)
+	testing.expect_value(t, salvage.clips[0].dance_count_in_beats, 4)
+	testing.expect_value(t, salvage.clips[0].dance_count_in_bpm, 128)
+	testing.expect(t, salvage.clips[0].dance_metronome_enabled)
 	testing.expect(t, report.rejected_records >= 2)
 }
 

@@ -190,6 +190,7 @@ framework_numbered_action_index :: proc(kind: UI_Action_Kind) -> (int, bool) {
 	case .Dance_Loop_Toggle: return 16, true
 	case .Dance_Count_In: return 17, true
 	case .Dance_Count_Each_Loop_Toggle: return 18, true
+	case .Dance_Metronome_Toggle: return 20, true
 	case .Playback_Fullscreen_Toggle: return 19, true
 	}
 	return -1, false

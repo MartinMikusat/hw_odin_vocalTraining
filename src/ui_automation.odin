@@ -247,7 +247,7 @@ ui_automation_action_effect :: proc(
 	     .Clip_Search, .Open_Randomize_Help,
 		     .Close_Randomize_Help,
 		     .Pitch_Chart, .Open_Pitch_Help, .Close_Pitch_Help,
-		     .Dance_BPM_Status,
+		     .Dance_BPM_Status, .Dance_Grid_Status,
 	     .Clip_Name, .Cancel_Clip_Rename, .Clip_Rename,
 	     .Close_Clip_Metadata, .Rename, .Metadata,
 	     .Volume_Down, .Volume_Up, .Source_Play_Pause,
@@ -258,10 +258,14 @@ ui_automation_action_effect :: proc(
 		return .Transient
 	case .Set_Theme, .Shortcut_Save, .Shortcut_Reset,
 	     .Workflow_Toggle, .Mode_Toggle,
+	     .Metronome_Volume_Down, .Metronome_Volume_Up,
 	     .Dance_Mirror_Toggle,
 		     .Dance_Loop_Toggle, .Dance_Count_In,
 		     .Dance_Count_Each_Loop_Toggle, .Dance_BPM_Down,
 		     .Dance_BPM_Up, .Dance_BPM_Use_Auto,
+		     .Dance_Grid_Earlier, .Dance_Grid_Later,
+		     .Dance_Grid_Set_One, .Dance_Grid_Reset_Auto,
+		     .Dance_Metronome_Toggle,
 		     .Pitch_Reference_Down, .Pitch_Reference_Up,
 	     .Pitch_Octaves_Down, .Pitch_Octaves_Up, .Pitch_Labels, .Pitch_Transpose,
 	     .Pitch_Highlight, .Speed_Down, .Speed_Up, .Source_Hint,
@@ -784,6 +788,7 @@ ui_automation_reset_transient :: proc(
 	ui.clip_shuffle = false
 	ui.clip_autoplay = false
 	ui.player_volume = 1
+	ui.metronome_volume = 1
 	ui.source_hint_menu_open = false
 	invalidate_transcript_matches()
 	workflow := ui.workflow

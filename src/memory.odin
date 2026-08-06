@@ -275,6 +275,11 @@ clone_clip :: proc(clip: Clip, allocator := context.allocator) -> (Clip, bool) {
 		dance_bpm_confidence = clip.dance_bpm_confidence,
 		dance_bpm_detector_revision = clip.dance_bpm_detector_revision,
 		dance_bpm_user_set = clip.dance_bpm_user_set,
+		dance_beat_period_seconds = clip.dance_beat_period_seconds,
+		dance_beat_grid_offset_seconds = clip.dance_beat_grid_offset_seconds,
+		dance_beat_phase_confidence = clip.dance_beat_phase_confidence,
+		dance_beat_phase_user_set = clip.dance_beat_phase_user_set,
+		dance_metronome_enabled = clip.dance_metronome_enabled,
 		dance_playback_rate = clip.dance_playback_rate,
 	}
 	copied := false

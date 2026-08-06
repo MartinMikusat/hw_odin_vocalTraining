@@ -158,6 +158,7 @@ DANCE_LOOP_ACTION_INDEX :: 16
 DANCE_COUNT_IN_ACTION_INDEX :: 17
 DANCE_COUNT_EACH_LOOP_ACTION_INDEX :: 18
 PLAYBACK_FULLSCREEN_ACTION_INDEX :: 19
+METRONOME_ACTION_INDEX :: 20
 
 PLAYBACK_FULLSCREEN_CONTROL_TIMEOUT_MS :: i64(2_000)
 PLAYER_SURFACE_DOUBLE_CLICK_INTERVAL_MS :: i64(180)
@@ -196,6 +197,7 @@ UI_State :: struct {
 	audio_player:       Id,
 	audio_pitch:        Id,
 	audio_file:         Id,
+	metronome:          rawptr,
 	audio_start_frame:  i64,
 	last_video_texture: Id,
 	last_video_width:   uint,
@@ -292,12 +294,15 @@ UI_State :: struct {
 	player_item:        Id,
 	playback_completion_pending: bool,
 	player_volume:      f32,
+	metronome_volume:   f32,
 	playback_rate:      f32,
 	vocal_playback_rate: f32,
 	count_in_active:    bool,
 	count_in_value:     int,
 	count_in_remaining: int,
 	count_in_deadline_ms: i64,
+	count_in_playback_deadline_ms: i64,
+	count_in_host_scheduled: bool,
 	count_in_for_loop:  bool,
 	player_duration:    f64,
 	source_playback_active: bool,
@@ -342,6 +347,9 @@ Player_Transport_Layout :: struct {
 	volume_down:  UI_Rect,
 	volume_value: UI_Rect,
 	volume_up:    UI_Rect,
+	metronome_volume_down:  UI_Rect,
+	metronome_volume_value: UI_Rect,
+	metronome_volume_up:    UI_Rect,
 	timestamp:    UI_Rect,
 	ready_status: UI_Rect,
 	fullscreen:   UI_Rect,
@@ -574,6 +582,12 @@ UI_Action_Kind :: enum {
 	Dance_BPM_Status,
 	Dance_BPM_Use_Auto,
 	Dance_BPM_Analyze_Again,
+	Dance_Grid_Status,
+	Dance_Grid_Earlier,
+	Dance_Grid_Later,
+	Dance_Grid_Set_One,
+	Dance_Grid_Reset_Auto,
+	Dance_Metronome_Toggle,
 	Clip_Name,
 	Cancel_Clip_Rename,
 	Confirm_Clip_Rename,
@@ -587,6 +601,8 @@ UI_Action_Kind :: enum {
 	Confirm_Delete_Clip,
 	Volume_Down,
 	Volume_Up,
+	Metronome_Volume_Down,
+	Metronome_Volume_Up,
 	Speed_Down,
 	Speed_Up,
 	Source_Play_Pause,
@@ -680,6 +696,7 @@ UI_Control_Build_Scope :: enum {
 
 ui := UI_State{
 	player_volume = 1,
+	metronome_volume = 1,
 	playback_rate = 1,
 	vocal_playback_rate = 1,
 	source_details_index = -1,
@@ -3099,7 +3116,7 @@ layout_rects :: proc(
 
 control_slot_count :: proc(mode: UI_Mode) -> int {
 	if mode == .Create {return 9}
-	return ui.workflow == .Vocal ? 11 : 14
+	return ui.workflow == .Vocal ? 11 : 15
 }
 
 control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
@@ -3135,6 +3152,7 @@ control_action_for_slot :: proc(mode: UI_Mode, slot: int) -> int {
 	case 11: return DANCE_LOOP_ACTION_INDEX
 	case 12: return DANCE_COUNT_IN_ACTION_INDEX
 	case 13: return DANCE_COUNT_EACH_LOOP_ACTION_INDEX
+	case 14: return METRONOME_ACTION_INDEX
 	}
 	return -1
 }
@@ -3180,6 +3198,7 @@ numbered_action_code_for_action :: proc(
 	case DANCE_LOOP_ACTION_INDEX: return {3, 2}, true
 	case DANCE_COUNT_IN_ACTION_INDEX: return {3, 3}, true
 	case DANCE_COUNT_EACH_LOOP_ACTION_INDEX: return {3, 4}, true
+	case METRONOME_ACTION_INDEX: return {3, 5}, true
 	}
 	return {}, false
 }
@@ -3613,8 +3632,29 @@ dance_bpm_action_rect :: proc(panel: UI_Rect, index: int) -> UI_Rect {
 
 dance_saved_speed_rect :: proc(panel: UI_Rect) -> UI_Rect {
 	content := dance_content_rect(panel)
-	action := dance_bpm_action_rect(panel, 0)
+	action := dance_grid_action_rect(panel, 2)
 	return UI_Rect{content.x, action.y - 42, content.w, 24}
+}
+
+dance_grid_status_rect :: proc(panel: UI_Rect) -> UI_Rect {
+	content := dance_content_rect(panel)
+	action := dance_bpm_action_rect(panel, 0)
+	return UI_Rect{content.x, action.y - 30, content.w, 22}
+}
+
+dance_grid_action_rect :: proc(panel: UI_Rect, index: int) -> UI_Rect {
+	content := dance_content_rect(panel)
+	status := dance_grid_status_rect(panel)
+	gap := 4.0
+	width := (content.w - gap) / 2
+	row := index / 2
+	column := index % 2
+	return UI_Rect{
+		content.x + f64(column) * (width + gap),
+		status.y - 34 - f64(row) * 32,
+		width,
+		28,
+	}
 }
 
 pitch_settings_rect :: proc(panel: UI_Rect) -> UI_Rect {
@@ -3723,8 +3763,9 @@ player_content_rect :: proc(player: UI_Rect) -> UI_Rect {
 
 PLAYER_TRANSPORT_INSET_X :: 10.0
 PLAYER_TRANSPORT_ROW_PITCH :: 32.0
-PLAYER_TRANSPORT_ONE_ROW_WIDTH :: 776.0
-PLAYER_TRANSPORT_TWO_ROW_WIDTH :: 484.0
+PLAYER_TRANSPORT_ONE_ROW_WIDTH :: 902.0
+PLAYER_TRANSPORT_TWO_ROW_WIDTH :: 610.0
+PLAYER_TRANSPORT_THREE_ROW_WIDTH :: 410.0
 PLAYER_TRANSPORT_MINIMUM_WIDTH :: 284.0
 
 player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_Layout) {
@@ -3737,6 +3778,9 @@ player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_La
 	if inner_w < PLAYER_TRANSPORT_TWO_ROW_WIDTH {
 		result.row_count = 3
 	}
+	if inner_w < PLAYER_TRANSPORT_THREE_ROW_WIDTH {
+		result.row_count = 4
+	}
 
 	when ODIN_DEBUG {
 		assert(
@@ -3748,28 +3792,41 @@ player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_La
 	transport_x := inner_x
 	speed_x := inner_x
 	volume_x := inner_x
+	metronome_volume_x := inner_x
 	status_x := inner_x
 	transport_y := player.y
 	speed_y := player.y
 	volume_y := player.y
+	metronome_volume_y := player.y
 	status_y := player.y
 
 	switch result.row_count {
 	case 1:
 		speed_x = inner_x + 226
 		volume_x = inner_x + 366
-		status_x = inner_x + 492
+		metronome_volume_x = inner_x + 492
+		status_x = inner_x + 618
 	case 2:
 		transport_y = player.y + PLAYER_TRANSPORT_ROW_PITCH
 		speed_y = transport_y
 		volume_y = transport_y
 		speed_x = inner_x + 226
 		volume_x = inner_x + 366
+		metronome_volume_x = inner_x + 492
+		metronome_volume_y = transport_y
 	case 3:
 		transport_y = player.y + PLAYER_TRANSPORT_ROW_PITCH*2
 		speed_y = player.y + PLAYER_TRANSPORT_ROW_PITCH
 		volume_y = speed_y
 		volume_x = inner_x + 140
+		metronome_volume_y = speed_y
+		metronome_volume_x = inner_x + 266
+	case 4:
+		transport_y = player.y + PLAYER_TRANSPORT_ROW_PITCH*3
+		speed_y = player.y + PLAYER_TRANSPORT_ROW_PITCH*2
+		volume_y = player.y + PLAYER_TRANSPORT_ROW_PITCH
+		metronome_volume_y = volume_y
+		metronome_volume_x = inner_x + 126
 	}
 
 	result.play_pause = {transport_x, transport_y+3, 62, 24}
@@ -3781,6 +3838,9 @@ player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_La
 	result.volume_down = {volume_x, volume_y+3, 24, 24}
 	result.volume_value = {volume_x+28, volume_y, 62, 30}
 	result.volume_up = {volume_x+94, volume_y+3, 24, 24}
+	result.metronome_volume_down = {metronome_volume_x, metronome_volume_y+3, 24, 24}
+	result.metronome_volume_value = {metronome_volume_x+28, metronome_volume_y, 62, 30}
+	result.metronome_volume_up = {metronome_volume_x+94, metronome_volume_y+3, 24, 24}
 	result.timestamp = {status_x, status_y, 140, 30}
 	result.ready_status = {status_x+152, status_y, 100, 30}
 	result.fullscreen = {inner_x+inner_w-24, status_y+3, 24, 24}
@@ -3918,6 +3978,20 @@ adjust_player_volume :: proc(delta: f32) {
 	ui.needs_redraw = true
 }
 
+adjust_metronome_volume :: proc(delta: f32) {
+	ui.metronome_volume = clamp_volume(ui.metronome_volume + delta)
+	if ui.metronome != nil {
+		hw_metronome_set_volume(ui.metronome, ui.metronome_volume)
+	}
+	if !database_metronome_volume_save(
+		library_database,
+		ui.metronome_volume,
+	) {
+		fmt.eprintln("[hw_videoClips] could not persist metronome volume")
+	}
+	ui.needs_redraw = true
+}
+
 clamp_playback_rate :: proc(value: f32) -> f32 {
 	return min(max(value, 0.1), 2)
 }
@@ -3974,7 +4048,52 @@ dance_clip_adjust_bpm :: proc(clip: ^Clip, delta: int) -> bool {
 	if adjusted == clip.dance_count_in_bpm {return false}
 	clip.dance_count_in_bpm = adjusted
 	clip.dance_bpm_user_set = true
+	clip.dance_beat_period_seconds = 60.0 / f64(adjusted)
+	if clip.dance_beat_phase_user_set {
+		clip.dance_beat_grid_offset_seconds = bpm_normalize_grid_offset(
+			clip.dance_beat_grid_offset_seconds,
+			clip.dance_beat_period_seconds,
+		)
+	} else {
+		clip.dance_beat_grid_offset_seconds = 0
+		clip.dance_beat_phase_confidence = 0
+	}
 	return true
+}
+
+dance_grid_status_text :: proc(clip: ^Clip) -> string {
+	if clip == nil || !dance_beat_grid_available(clip) {
+		return "GRID / SET 1 REQUIRED"
+	}
+	if clip.dance_beat_phase_user_set {return "GRID / MANUAL"}
+	return "GRID / AUTO"
+}
+
+dance_grid_nudge :: proc(clip: ^Clip, delta_seconds: f64) -> bool {
+	if clip == nil || !dance_beat_grid_available(clip) || delta_seconds == 0 {
+		return false
+	}
+	period := dance_beat_period(clip)
+	bar := period * 4
+	offset := math.mod(clip.dance_beat_grid_offset_seconds + delta_seconds, bar)
+	if offset < 0 {offset += bar}
+	clip.dance_beat_grid_offset_seconds = offset
+	clip.dance_beat_phase_user_set = true
+	clip.dance_beat_phase_confidence = 1
+	return true
+}
+
+dance_metronome_refresh_active :: proc() {
+	if ui.count_in_active {return}
+	clip := active_dance_clip()
+	if clip == nil || ui.metronome == nil {return}
+	if !clip.dance_metronome_enabled || !playback_actively_playing() {
+		hw_metronome_stop(ui.metronome)
+		return
+	}
+	if seconds, available := metal_audio_current_seconds(); available {
+		dance_schedule_continuous_metronome(clip, seconds)
+	}
 }
 
 adjust_playback_rate :: proc(delta: f32) {
@@ -4004,6 +4123,9 @@ adjust_playback_rate :: proc(delta: f32) {
 	if state.player != nil && msg_f32(state.player, sel_registerName("rate")) > 0 {
 		if has_audio_time {seek_video_seconds(audio_seconds)}
 		msg_void_f32(state.player, sel_registerName("setRate:"), ui.playback_rate)
+		if has_audio_time {
+			dance_schedule_continuous_metronome(active_dance_clip(), audio_seconds)
+		}
 	}
 	ui.needs_redraw = true
 }
@@ -6177,6 +6299,34 @@ draw_dance_tools :: proc(
 	draw_text_in_rect(
 		ctx,
 		font,
+		dance_grid_status_text(clip),
+		dance_grid_status_rect(panel),
+		.Start,
+		.Center,
+		dance_beat_grid_available(clip) ? cool : muted,
+	)
+	grid_labels := [4]string{"EARLIER", "LATER", "SET 1", "RESET AUTO"}
+	grid_kinds := [4]UI_Action_Kind{
+		.Dance_Grid_Earlier,
+		.Dance_Grid_Later,
+		.Dance_Grid_Set_One,
+		.Dance_Grid_Reset_Auto,
+	}
+	for label, index in grid_labels {
+		rect := ui_control_rect(grid_kinds[index])
+		draw_text_in_rect(
+			ctx,
+			font,
+			label,
+			rect,
+			.Center,
+			.Center,
+			ui_action_enabled_for_current_job(grid_kinds[index]) ? accent : dim,
+		)
+	}
+	draw_text_in_rect(
+		ctx,
+		font,
 		fmt.tprintf("SAVED SPEED / %.1fx", clip.dance_playback_rate),
 		dance_saved_speed_rect(panel),
 		.Start,
@@ -7142,11 +7292,15 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			push_rect(vertices, help_rect, row_hover)
 		}
 	} else if ui.mode == .Play && ui.workflow == .Dancing {
-		bpm_kinds := [4]UI_Action_Kind{
+		bpm_kinds := [8]UI_Action_Kind{
 			.Dance_BPM_Down,
 			.Dance_BPM_Up,
 			.Dance_BPM_Use_Auto,
 			.Dance_BPM_Analyze_Again,
+			.Dance_Grid_Earlier,
+			.Dance_Grid_Later,
+			.Dance_Grid_Set_One,
+			.Dance_Grid_Reset_Auto,
 		}
 		for kind in bpm_kinds {
 			rect := ui_control_rect(kind)
@@ -7173,9 +7327,11 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		push_rect(vertices, rect, field)
 	}
 	if state.player != nil {
-		button_kinds := [7]UI_Action_Kind{
+		button_kinds := [9]UI_Action_Kind{
 			.Volume_Down,
 			.Volume_Up,
+			.Metronome_Volume_Down,
+			.Metronome_Volume_Up,
 			.Speed_Down,
 			.Speed_Up,
 			.Source_Play_Pause,
@@ -7316,7 +7472,7 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		}
 	}
 
-	control_kinds := [20]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle}
+	control_kinds := [21]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle, .Dance_Metronome_Toggle}
 	valid_range := active_clip_range_is_valid()
 	number_prefix_active :=
 		ui.number_prefix > 0 &&
@@ -7350,7 +7506,10 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 		    (kind == .Dance_Count_In &&
 		     active_dance_clip_count_in_enabled()) ||
 		    (kind == .Dance_Count_Each_Loop_Toggle &&
-		     active_dance_clip_counts_each_loop())) {
+		     active_dance_clip_counts_each_loop()) ||
+		    (kind == .Dance_Metronome_Toggle &&
+		     active_dance_clip() != nil &&
+		     active_dance_clip().dance_metronome_enabled)) {
 			push_border(vertices, rect, UI_COLOR_GUM_32)
 		}
 		toggle_active :=
@@ -7671,9 +7830,11 @@ draw_playback_fullscreen_transport :: proc(
 	background[3] = 0.92
 	fill_overlay_rect(ctx, player, background)
 
-	button_kinds := [7]UI_Action_Kind{
+	button_kinds := [9]UI_Action_Kind{
 		.Volume_Down,
 		.Volume_Up,
+		.Metronome_Volume_Down,
+		.Metronome_Volume_Up,
 		.Speed_Down,
 		.Speed_Up,
 		.Source_Play_Pause,
@@ -7789,6 +7950,9 @@ draw_playback_fullscreen_transport :: proc(
 		.Center,
 		ui.player_volume >= 1 ? dim : cyan,
 	)
+	draw_text_in_rect(ctx, font, "-", ui_control_rect(.Metronome_Volume_Down), .Center, .Center, ui.metronome_volume <= 0 ? dim : cyan)
+	draw_text_in_rect(ctx, font, fmt.tprintf("MET %d%%", volume_percent(ui.metronome_volume)), transport.metronome_volume_value, .Center, .Center, cyan)
+	draw_text_in_rect(ctx, font, "+", ui_control_rect(.Metronome_Volume_Up), .Center, .Center, ui.metronome_volume >= 1 ? dim : cyan)
 	timestamp_rect := transport.timestamp
 	if seconds, ok := current_seconds(); ok {
 		draw_timestamp_text_in_rect(
@@ -8195,6 +8359,9 @@ build_overlay_commands :: proc(modal_only := false) {
 			.Center,
 			volume_up_color,
 		)
+		draw_text_in_rect(ctx, small_font, "-", ui_control_rect(.Metronome_Volume_Down), .Center, .Center, ui.metronome_volume <= 0 ? dim : cyan)
+		draw_text_in_rect(ctx, small_font, fmt.tprintf("MET %d%%", volume_percent(ui.metronome_volume)), transport.metronome_volume_value, .Center, .Center, cyan)
+		draw_text_in_rect(ctx, small_font, "+", ui_control_rect(.Metronome_Volume_Up), .Center, .Center, ui.metronome_volume >= 1 ? dim : cyan)
 		timestamp_rect := transport.timestamp
 		if seconds, ok := current_seconds(); ok {
 			timestamp := fmt.tprintf("%s / %s", format_timestamp(seconds), format_timestamp(ui.player_duration))
@@ -8526,7 +8693,7 @@ build_overlay_commands :: proc(modal_only := false) {
 		}
 	}
 
-	labels := [20]string {
+	labels := [21]string {
 		"MARK IN",
 		"MARK OUT",
 		"COMMIT",
@@ -8547,8 +8714,9 @@ build_overlay_commands :: proc(modal_only := false) {
 		"COUNT-IN",
 		"COUNT EACH LOOP",
 		"FULLSCREEN",
+		"METRONOME",
 	}
-	control_kinds := [20]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle}
+	control_kinds := [21]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle, .Dance_Metronome_Toggle}
 	valid_range := active_clip_range_is_valid()
 	for label, i in labels {
 		button_label := label
@@ -8566,6 +8734,9 @@ build_overlay_commands :: proc(modal_only := false) {
 			button_label = dance_count_in_action_label()
 		} else if control_kinds[i] == .Dance_Count_Each_Loop_Toggle {
 			button_label = active_dance_clip_counts_each_loop() ? "LOOP COUNT ON" : "LOOP COUNT OFF"
+		} else if control_kinds[i] == .Dance_Metronome_Toggle {
+			clip := active_dance_clip()
+			button_label = clip != nil && clip.dance_metronome_enabled ? "METRONOME ON" : "METRONOME OFF"
 		} else if control_kinds[i] == .Playback_Fullscreen_Toggle {
 			button_label = ui.playback_fullscreen_active ? "EXIT FULLSCREEN" : "FULLSCREEN"
 		}
@@ -9380,6 +9551,23 @@ ui_action_enabled_for_current_job :: proc(kind: UI_Action_Kind) -> bool {
 			return false
 		}
 	}
+	if kind == .Dance_Grid_Earlier || kind == .Dance_Grid_Later {
+		return dance_beat_grid_available(active_dance_clip())
+	}
+	if kind == .Dance_Grid_Set_One {
+		clip := active_dance_clip()
+		_, has_seconds := current_seconds()
+		return clip != nil && state.player != nil && has_seconds
+	}
+	if kind == .Dance_Grid_Reset_Auto {
+		clip := active_dance_clip()
+		return clip != nil && bpm_runtime_result_matches_clip(clip) &&
+		       bpm_runtime_result.state == .Ready &&
+		       bpm_runtime_result.estimate.phase_valid
+	}
+	if kind == .Dance_Metronome_Toggle {
+		return dance_beat_grid_available(active_dance_clip())
+	}
 	if kind == .Close_Pitch_Help {
 		return ui.pitch.help_open
 	}
@@ -9456,7 +9644,8 @@ add_ax_element :: proc(
 	if enabled {
 		flags += {.Enabled, .Flash, .Primary_Press}
 	}
-	if kind == .Pitch_Chart || kind == .Dance_BPM_Status {
+	if kind == .Pitch_Chart || kind == .Dance_BPM_Status ||
+	   kind == .Dance_Grid_Status {
 		flags = {.Accessibility, .Enabled}
 	}
 	if kind == .Open_Source_Details {
@@ -9649,6 +9838,25 @@ add_player_controls :: proc(
 		transport.volume_up,
 		.Volume_Up,
 		flash_label = "louder",
+	)
+	metronome_percent := volume_percent(ui.metronome_volume)
+	add_ax_element(
+		array,
+		element_class,
+		fmt.tprintf("Decrease metronome volume, %d percent", metronome_percent),
+		"AXButton",
+		transport.metronome_volume_down,
+		.Metronome_Volume_Down,
+		flash_label = "quieter metronome",
+	)
+	add_ax_element(
+		array,
+		element_class,
+		fmt.tprintf("Increase metronome volume, %d percent", metronome_percent),
+		"AXButton",
+		transport.metronome_volume_up,
+		.Metronome_Volume_Up,
+		flash_label = "louder metronome",
 	)
 	fullscreen_label := "Enter full screen playback"
 	if ui.playback_fullscreen_active {
@@ -10864,10 +11072,42 @@ build_ui_controls_for_scope :: proc(
 				.Dance_BPM_Analyze_Again,
 				flash_label = "analyze clip tempo again",
 			)
+			add_ax_element(
+				array,
+				element_class,
+				dance_grid_status_text(active_dance_clip()),
+				"AXGroup",
+				dance_grid_status_rect(pitch_panel),
+				.Dance_Grid_Status,
+				functional_name = "beat grid status",
+			)
+			grid_labels := [4]string{
+				"Move beat grid earlier by 10 milliseconds",
+				"Move beat grid later by 10 milliseconds",
+				"Set beat one at the current playhead",
+				"Reset to the automatically detected beat grid",
+			}
+			grid_kinds := [4]UI_Action_Kind{
+				.Dance_Grid_Earlier,
+				.Dance_Grid_Later,
+				.Dance_Grid_Set_One,
+				.Dance_Grid_Reset_Auto,
+			}
+			for label, index in grid_labels {
+				add_ax_element(
+					array,
+					element_class,
+					label,
+					"AXButton",
+					dance_grid_action_rect(pitch_panel, index),
+					grid_kinds[index],
+					flash_label = label,
+				)
+			}
 		}
 	}
-	kinds := [20]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle}
-	labels := [20]string {
+	kinds := [21]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle, .Dance_Metronome_Toggle}
+	labels := [21]string {
 		"Set start",
 		"Set end",
 		"Save clip",
@@ -10888,8 +11128,9 @@ build_ui_controls_for_scope :: proc(
 		"Cycle visual count in",
 		"Toggle count in before each loop",
 		"Enter full screen playback",
+		"Toggle continuous metronome",
 	}
-	flash_labels := [20]string{"mark in", "mark out", "commit", "play", "pause", "captions", "audition", "data", "rename clip", "clip metadata", "randomize clip", "toggle pitch tracking", "play next clip", "toggle shuffle", "toggle autoplay", "toggle mirror", "toggle loop", "cycle count in", "toggle count each loop", "full screen playback"}
+	flash_labels := [21]string{"mark in", "mark out", "commit", "play", "pause", "captions", "audition", "data", "rename clip", "clip metadata", "randomize clip", "toggle pitch tracking", "play next clip", "toggle shuffle", "toggle autoplay", "toggle mirror", "toggle loop", "cycle count in", "toggle count each loop", "full screen playback", "toggle metronome"}
 	slot_count := control_slot_count(ui.mode)
 	for slot in 0 ..< slot_count {
 		action_index := control_action_for_slot(ui.mode, slot)
@@ -10919,6 +11160,10 @@ build_ui_controls_for_scope :: proc(
 			} else if kind == .Dance_Count_Each_Loop_Toggle {
 				role = "AXCheckBox"
 				accessibility_label = active_dance_clip_counts_each_loop() ? "Count before each loop on" : "Count before each loop off"
+			} else if kind == .Dance_Metronome_Toggle {
+				role = "AXCheckBox"
+				clip := active_dance_clip()
+				accessibility_label = clip != nil && clip.dance_metronome_enabled ? "Metronome on" : "Metronome off"
 			}
 			add_ax_element(
 				array,
@@ -11056,7 +11301,8 @@ activate_flash_target :: proc(id: flash.Target_ID) -> bool {
 activate_ui_action :: proc(action: UI_Action) -> bool {
 	if !ui_action_enabled_for_current_job(action.kind) {return false}
 	#partial switch action.kind {
-	case .Volume_Down, .Volume_Up, .Speed_Down, .Speed_Up,
+	case .Volume_Down, .Volume_Up, .Metronome_Volume_Down,
+	     .Metronome_Volume_Up, .Speed_Down, .Speed_Up,
 	     .Source_Play_Pause, .Source_Stop, .Source_Timeline,
 	     .Source_Reset, .Source_Hint_Menu, .Source_Hint:
 		playback_fullscreen_show_controls()
@@ -11304,12 +11550,82 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		if !available {return false}
 		previous_bpm := clip.dance_count_in_bpm
 		previous_user_set := clip.dance_bpm_user_set
+		previous_period := clip.dance_beat_period_seconds
+		previous_grid := clip.dance_beat_grid_offset_seconds
+		previous_phase_confidence := clip.dance_beat_phase_confidence
 		clip.dance_count_in_bpm = value
 		clip.dance_bpm_user_set = true
+		detected_period := bpm_runtime_result.estimate.beat_period_seconds
+		if detected_period < 0.25 || detected_period > 1.5 {
+			detected_period = 60.0 / bpm_runtime_result.estimate.bpm
+		}
+		clip.dance_beat_period_seconds = detected_period
+		if clip.dance_beat_phase_user_set {
+			clip.dance_beat_grid_offset_seconds = bpm_normalize_grid_offset(
+				clip.dance_beat_grid_offset_seconds,
+				clip.dance_beat_period_seconds,
+			)
+		} else if bpm_runtime_result.estimate.phase_valid {
+			clip.dance_beat_grid_offset_seconds = bpm_runtime_result.estimate.beat_phase_seconds
+			clip.dance_beat_phase_confidence = bpm_runtime_result.estimate.phase_confidence
+		}
 		ui.needs_redraw = true
 		if save_active_dance_clip() {return true}
 		clip.dance_count_in_bpm = previous_bpm
 		clip.dance_bpm_user_set = previous_user_set
+		clip.dance_beat_period_seconds = previous_period
+		clip.dance_beat_grid_offset_seconds = previous_grid
+		clip.dance_beat_phase_confidence = previous_phase_confidence
+		return false
+	case .Dance_Grid_Earlier:
+		if clip := active_dance_clip(); dance_grid_nudge(clip, -0.01) {
+			ui.needs_redraw = true
+			dance_metronome_refresh_active()
+			return save_active_dance_clip()
+		}
+		return false
+	case .Dance_Grid_Later:
+		if clip := active_dance_clip(); dance_grid_nudge(clip, 0.01) {
+			ui.needs_redraw = true
+			dance_metronome_refresh_active()
+			return save_active_dance_clip()
+		}
+		return false
+	case .Dance_Grid_Set_One:
+		clip := active_dance_clip()
+		seconds, available := metal_audio_current_seconds()
+		if !available {seconds, available = current_seconds()}
+		if clip == nil || !available {return false}
+		period := dance_beat_period(clip)
+		if period <= 0 {return false}
+		clip.dance_beat_grid_offset_seconds = math.mod(seconds, period*4)
+		if clip.dance_beat_grid_offset_seconds < 0 {
+			clip.dance_beat_grid_offset_seconds += period*4
+		}
+		clip.dance_beat_phase_confidence = 1
+		clip.dance_beat_phase_user_set = true
+		ui.needs_redraw = true
+		dance_metronome_refresh_active()
+		return save_active_dance_clip()
+	case .Dance_Grid_Reset_Auto:
+		clip := active_dance_clip()
+		if clip == nil || !bpm_runtime_result_matches_clip(clip) ||
+		   !bpm_runtime_result.estimate.phase_valid {
+			return false
+		}
+		clip.dance_beat_grid_offset_seconds = bpm_runtime_result.estimate.beat_phase_seconds
+		clip.dance_beat_phase_confidence = bpm_runtime_result.estimate.phase_confidence
+		clip.dance_beat_phase_user_set = false
+		ui.needs_redraw = true
+		dance_metronome_refresh_active()
+		return save_active_dance_clip()
+	case .Dance_Metronome_Toggle:
+		if clip := active_dance_clip(); clip != nil && dance_beat_grid_available(clip) {
+			clip.dance_metronome_enabled = !clip.dance_metronome_enabled
+			ui.needs_redraw = true
+			dance_metronome_refresh_active()
+			return save_active_dance_clip()
+		}
 		return false
 	case .Dance_BPM_Analyze_Again:
 		if bpm_analysis_retry_active() {
@@ -11378,6 +11694,10 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		adjust_player_volume(-0.1)
 	case .Volume_Up:
 		adjust_player_volume(0.1)
+	case .Metronome_Volume_Down:
+		adjust_metronome_volume(-0.1)
+	case .Metronome_Volume_Up:
+		adjust_metronome_volume(0.1)
 	case .Speed_Down:
 		adjust_playback_rate(-0.1)
 	case .Speed_Up:
@@ -11786,18 +12106,22 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		palette_condition(play_player),
 		"Available after loading a clip in Clips",
 	)
-	transport_actions := [4]UI_Action{
+	transport_actions := [6]UI_Action{
 		{kind = .Speed_Down},
 		{kind = .Speed_Up},
 		{kind = .Volume_Down},
 		{kind = .Volume_Up},
+		{kind = .Metronome_Volume_Down},
+		{kind = .Metronome_Volume_Up},
 	}
-	transport_titles := [4]string{"Decrease speed", "Increase speed", "Decrease volume", "Increase volume"}
-	transport_subtitles := [4]string{
+	transport_titles := [6]string{"Decrease speed", "Increase speed", "Decrease volume", "Increase volume", "Decrease metronome volume", "Increase metronome volume"}
+	transport_subtitles := [6]string{
 		"Reduce playback speed by 0.1x",
 		"Increase playback speed by 0.1x",
 		"Reduce volume by 10 percent",
 		"Increase volume by 10 percent",
+		"Reduce metronome volume by 10 percent",
+		"Increase metronome volume by 10 percent",
 	}
 	for action, index in transport_actions {
 		append_command_palette_entry(
@@ -11845,6 +12169,27 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		[]string{"dance", "bpm", "retry"},
 		palette_condition(PALETTE_CONTEXT_PLAY),
 		"Available after tempo analysis finishes",
+	)
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Dance_Grid_Set_One},
+		"Set beat one at playhead",
+		"Calibrate the active Dancing clip downbeat at the current timestamp",
+		"Command",
+		[]string{"dance", "beat", "phase", "grid"},
+		palette_condition(PALETTE_CONTEXT_PLAY),
+		"Available while a Dancing clip is loaded",
+	)
+	clip := active_dance_clip()
+	append_command_palette_entry(
+		&entries,
+		UI_Action{kind = .Dance_Metronome_Toggle},
+		clip != nil && clip.dance_metronome_enabled ? "Disable metronome" : "Enable metronome",
+		"Toggle beat-grid clicks during Dancing clip playback",
+		"Command",
+		[]string{"dance", "beat", "click", "metronome"},
+		palette_condition(PALETTE_CONTEXT_PLAY),
+		"Available after beat-grid calibration",
 	)
 	append_command_palette_entry(
 		&entries,
@@ -12099,7 +12444,7 @@ ui_memory_destroy :: proc() {
 }
 
 activate_control :: proc(index: int) {
-	kinds := [20]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle}
+	kinds := [21]UI_Action_Kind{.Start, .End, .Save, .Play, .Pause, .Captions, .Preview, .Data, .Rename, .Metadata, .Randomize, .Pitch_Toggle, .Play_Next, .Shuffle_Toggle, .Autoplay_Toggle, .Dance_Mirror_Toggle, .Dance_Loop_Toggle, .Dance_Count_In, .Dance_Count_Each_Loop_Toggle, .Playback_Fullscreen_Toggle, .Dance_Metronome_Toggle}
 	if index < 0 || index >= len(kinds) {return}
 	if index == PLAYBACK_FULLSCREEN_ACTION_INDEX {
 		if ui_action_enabled_for_current_job(.Playback_Fullscreen_Toggle) {

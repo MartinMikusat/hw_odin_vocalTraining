@@ -7,7 +7,7 @@ import "core:strings"
 import "base:runtime"
 import task_queue "task_queue:."
 
-BPM_DETECTOR_REVISION :: 1
+BPM_DETECTOR_REVISION :: 2
 BPM_AUTO_APPLY_MIN_CONFIDENCE :: 0.35
 
 BPM_Runtime_State :: enum {
@@ -196,6 +196,18 @@ bpm_apply_estimate :: proc(clip: ^Clip, estimate: BPM_Estimate) -> bool {
 	clip.dance_bpm_detector_revision = BPM_DETECTOR_REVISION
 	if !clip.dance_bpm_user_set && bpm_estimate_auto_applicable(estimate) {
 		clip.dance_count_in_bpm = clamp(int(math.round(estimate.bpm)), 40, 240)
+		period := estimate.beat_period_seconds
+		if period < 0.25 || period > 1.5 {period = 60.0 / estimate.bpm}
+		clip.dance_beat_period_seconds = period
+		if clip.dance_beat_phase_user_set {
+			clip.dance_beat_grid_offset_seconds = bpm_normalize_grid_offset(
+				clip.dance_beat_grid_offset_seconds,
+				period,
+			)
+		} else if estimate.phase_valid {
+			clip.dance_beat_grid_offset_seconds = estimate.beat_phase_seconds
+			clip.dance_beat_phase_confidence = estimate.phase_confidence
+		}
 	}
 	return true
 }
@@ -237,6 +249,10 @@ bpm_analysis_schedule :: proc(clip: ^Clip) -> bool {
 			BPM_Estimate{
 				bpm = clip.dance_detected_bpm,
 				confidence = clip.dance_bpm_confidence,
+				beat_period_seconds = clip.dance_beat_period_seconds,
+				beat_phase_seconds = clip.dance_beat_grid_offset_seconds,
+				phase_confidence = clip.dance_beat_phase_confidence,
+				phase_valid = clip.dance_beat_phase_confidence >= BPM_PHASE_MIN_CONFIDENCE,
 				valid = true,
 			},
 		)
@@ -279,13 +295,23 @@ bpm_analysis_retry_active :: proc() -> bool {
 	previous_detected := clip.dance_detected_bpm
 	previous_confidence := clip.dance_bpm_confidence
 	previous_revision := clip.dance_bpm_detector_revision
+	previous_period := clip.dance_beat_period_seconds
+	previous_grid := clip.dance_beat_grid_offset_seconds
+	previous_phase_confidence := clip.dance_beat_phase_confidence
 	clip.dance_detected_bpm = 0
 	clip.dance_bpm_confidence = 0
 	clip.dance_bpm_detector_revision = 0
+	if !clip.dance_beat_phase_user_set {
+		clip.dance_beat_grid_offset_seconds = 0
+		clip.dance_beat_phase_confidence = 0
+	}
 	if !save_library() {
 		clip.dance_detected_bpm = previous_detected
 		clip.dance_bpm_confidence = previous_confidence
 		clip.dance_bpm_detector_revision = previous_revision
+		clip.dance_beat_period_seconds = previous_period
+		clip.dance_beat_grid_offset_seconds = previous_grid
+		clip.dance_beat_phase_confidence = previous_phase_confidence
 		return false
 	}
 	bpm_runtime_result_clear()
@@ -325,6 +351,9 @@ on_bpm_analysis_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 		previous_confidence := clip.dance_bpm_confidence
 		previous_revision := clip.dance_bpm_detector_revision
 		previous_bpm := clip.dance_count_in_bpm
+		previous_period := clip.dance_beat_period_seconds
+		previous_grid := clip.dance_beat_grid_offset_seconds
+		previous_phase_confidence := clip.dance_beat_phase_confidence
 		if bpm_apply_estimate(clip, job.estimate) && save_library() {
 			_ = bpm_runtime_result_set(job.clip_id, job.clip_path, .Ready, job.estimate)
 		} else {
@@ -332,6 +361,9 @@ on_bpm_analysis_finished :: proc "c" (self: Id, command: Sel, sender: Id) {
 			clip.dance_bpm_confidence = previous_confidence
 			clip.dance_bpm_detector_revision = previous_revision
 			clip.dance_count_in_bpm = previous_bpm
+			clip.dance_beat_period_seconds = previous_period
+			clip.dance_beat_grid_offset_seconds = previous_grid
+			clip.dance_beat_phase_confidence = previous_phase_confidence
 			_ = bpm_runtime_result_set(job.clip_id, job.clip_path, .Unavailable)
 		}
 	}

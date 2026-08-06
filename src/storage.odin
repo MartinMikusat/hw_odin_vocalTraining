@@ -36,7 +36,7 @@ Source_Context_Metadata :: struct {
 }
 
 PORTABLE_LIBRARY_FORMAT  :: "hw-video-clips-library"
-PORTABLE_LIBRARY_VERSION :: 3
+PORTABLE_LIBRARY_VERSION :: 4
 LEGACY_PORTABLE_LIBRARY_FORMAT :: "vocal-training-library"
 
 Portable_Library_Scope :: enum {
@@ -109,6 +109,11 @@ Portable_Clip :: struct {
 	dance_bpm_confidence: f32,
 	dance_bpm_detector_revision: int,
 	dance_bpm_user_set: bool,
+	dance_beat_period_seconds: f64,
+	dance_beat_grid_offset_seconds: f64,
+	dance_beat_phase_confidence: f32,
+	dance_beat_phase_user_set: bool,
+	dance_metronome_enabled: bool,
 	dance_playback_rate: f32,
 }
 
@@ -297,6 +302,11 @@ portable_library_validate :: proc(data: ^Portable_Library) -> Portable_Library_E
 		     clip.dance_detected_bpm,
 		     clip.dance_bpm_confidence,
 		     clip.dance_bpm_detector_revision,
+		    ) ||
+		    !bpm_beat_grid_valid(
+		     clip.dance_beat_period_seconds,
+		     clip.dance_beat_grid_offset_seconds,
+		     clip.dance_beat_phase_confidence,
 		    ) ||
 		    clip.dance_playback_rate < 0.1 ||
 		    clip.dance_playback_rate > 2) {
@@ -665,6 +675,11 @@ database_create_schema_v8 :: proc(database: ^SQLite_DB) -> bool {
 			dance_bpm_confidence REAL NOT NULL DEFAULT 0,
 			dance_bpm_detector_revision INTEGER NOT NULL DEFAULT 0,
 			dance_bpm_user_set INTEGER NOT NULL DEFAULT 0,
+			dance_beat_period_seconds REAL NOT NULL DEFAULT 0,
+			dance_beat_grid_offset_seconds REAL NOT NULL DEFAULT 0,
+			dance_beat_phase_confidence REAL NOT NULL DEFAULT 0,
+			dance_beat_phase_user_set INTEGER NOT NULL DEFAULT 0,
+			dance_metronome_enabled INTEGER NOT NULL DEFAULT 0,
 			dance_playback_rate REAL NOT NULL DEFAULT 1.0
 		);
 		CREATE TABLE IF NOT EXISTS notifications (
@@ -720,7 +735,7 @@ database_create_schema_v8 :: proc(database: ^SQLite_DB) -> bool {
 		INSERT OR IGNORE INTO library_revisions (
 			revision, committed_at_ms
 		) VALUES (1, 0);
-		PRAGMA user_version = 10;
+		PRAGMA user_version = 11;
 	`)
 }
 
@@ -1151,6 +1166,31 @@ database_migrate_v9_to_v10 :: proc(database: ^SQLite_DB) -> bool {
 	return true
 }
 
+database_migrate_v10_to_v11 :: proc(database: ^SQLite_DB) -> bool {
+	if !sqlite_execute(database, "BEGIN IMMEDIATE") {return false}
+	committed := false
+	defer if !committed {_ = sqlite_execute(database, "ROLLBACK")}
+	if !sqlite_execute(database, `
+		ALTER TABLE clips ADD COLUMN dance_beat_period_seconds REAL NOT NULL DEFAULT 0;
+		ALTER TABLE clips ADD COLUMN dance_beat_grid_offset_seconds REAL NOT NULL DEFAULT 0;
+		ALTER TABLE clips ADD COLUMN dance_beat_phase_confidence REAL NOT NULL DEFAULT 0;
+		ALTER TABLE clips ADD COLUMN dance_beat_phase_user_set INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE clips ADD COLUMN dance_metronome_enabled INTEGER NOT NULL DEFAULT 0;
+		UPDATE clips
+		SET dance_beat_period_seconds = 60.0 / dance_count_in_bpm
+		WHERE workflow = 1 AND dance_count_in_bpm > 0;
+		UPDATE clips
+		SET dance_detected_bpm = 0,
+		    dance_bpm_confidence = 0,
+		    dance_bpm_detector_revision = 0
+		WHERE workflow = 1;
+		PRAGMA user_version = 11;
+	`) {return false}
+	if !sqlite_execute(database, "COMMIT") {return false}
+	committed = true
+	return true
+}
+
 database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 	version, version_read := library_database_user_version(database)
 	if !version_read {return false}
@@ -1174,6 +1214,10 @@ database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 	if version == 9 {
 		if !database_migrate_v9_to_v10(database) {return false}
 		version = 10
+	}
+	if version == 10 {
+		if !database_migrate_v10_to_v11(database) {return false}
+		version = 11
 	}
 	if version != 0 && version != LIBRARY_SCHEMA_VERSION {return false}
 	return database_create_schema_v8(database)
@@ -1570,6 +1614,37 @@ database_vocal_playback_rate_save :: proc(
 	       sqlite3_step(statement) == SQLITE_DONE
 }
 
+database_metronome_volume_load :: proc(database: ^SQLite_DB) -> f32 {
+	if database == nil {return 1}
+	statement, ok := sqlite_prepare(
+		database,
+		"SELECT value FROM app_preferences WHERE key = 'metronome_volume'",
+	)
+	if !ok {return 1}
+	defer sqlite3_finalize(statement)
+	if sqlite3_step(statement) != SQLITE_ROW {return 1}
+	value := sqlite3_column_double(statement, 0)
+	if value < 0 || value > 1 {return 1}
+	return f32(value)
+}
+
+database_metronome_volume_save :: proc(
+	database: ^SQLite_DB,
+	value: f32,
+) -> bool {
+	if database == nil || value < 0 || value > 1 {return false}
+	statement, ok := sqlite_prepare(
+		database,
+		`INSERT INTO app_preferences (key, value)
+		 VALUES ('metronome_volume', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	)
+	if !ok {return false}
+	defer sqlite3_finalize(statement)
+	return sqlite3_bind_double(statement, 1, f64(value)) == SQLITE_OK &&
+	       sqlite3_step(statement) == SQLITE_DONE
+}
+
 database_flash_leader_load :: proc(
 	database: ^SQLite_DB,
 	allocator := context.allocator,
@@ -1794,8 +1869,11 @@ database_save_collections :: proc(
 				dance_count_in_beats, dance_count_each_loop,
 				dance_count_in_bpm, dance_detected_bpm, dance_bpm_confidence,
 				dance_bpm_detector_revision, dance_bpm_user_set,
+				dance_beat_period_seconds, dance_beat_grid_offset_seconds,
+				dance_beat_phase_confidence, dance_beat_phase_user_set,
+				dance_metronome_enabled,
 				dance_playback_rate
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		if !ok {return false}
 		bound := sqlite_bind_text_value(statement, 1, clip.id) &&
@@ -1815,7 +1893,12 @@ database_save_collections :: proc(
 			sqlite3_bind_double(statement, 15, f64(clip.dance_bpm_confidence)) == SQLITE_OK &&
 			sqlite3_bind_int(statement, 16, i32(clip.dance_bpm_detector_revision)) == SQLITE_OK &&
 			sqlite3_bind_int(statement, 17, clip.dance_bpm_user_set ? 1 : 0) == SQLITE_OK &&
-			sqlite3_bind_double(statement, 18, f64(clip.dance_playback_rate)) == SQLITE_OK
+			sqlite3_bind_double(statement, 18, clip.dance_beat_period_seconds) == SQLITE_OK &&
+			sqlite3_bind_double(statement, 19, clip.dance_beat_grid_offset_seconds) == SQLITE_OK &&
+			sqlite3_bind_double(statement, 20, f64(clip.dance_beat_phase_confidence)) == SQLITE_OK &&
+			sqlite3_bind_int(statement, 21, clip.dance_beat_phase_user_set ? 1 : 0) == SQLITE_OK &&
+			sqlite3_bind_int(statement, 22, clip.dance_metronome_enabled ? 1 : 0) == SQLITE_OK &&
+			sqlite3_bind_double(statement, 23, f64(clip.dance_playback_rate)) == SQLITE_OK
 		stepped := bound && sqlite3_step(statement) == SQLITE_DONE
 		sqlite3_finalize(statement)
 		if !stepped {return false}
@@ -1971,6 +2054,11 @@ portable_library_from_state :: proc(
 			dance_bpm_confidence = clip.dance_bpm_confidence,
 			dance_bpm_detector_revision = clip.dance_bpm_detector_revision,
 			dance_bpm_user_set = clip.dance_bpm_user_set,
+			dance_beat_period_seconds = clip.dance_beat_period_seconds,
+			dance_beat_grid_offset_seconds = clip.dance_beat_grid_offset_seconds,
+			dance_beat_phase_confidence = clip.dance_beat_phase_confidence,
+			dance_beat_phase_user_set = clip.dance_beat_phase_user_set,
+			dance_metronome_enabled = clip.dance_metronome_enabled,
 			dance_playback_rate = clip.dance_playback_rate,
 		}
 		clip_position += 1
@@ -2033,6 +2121,13 @@ portable_library_apply_compatibility :: proc(data: ^Portable_Library) {
 		for &clip in data.clips {
 			if clip.workflow == .Dancing {
 				clip.dance_bpm_user_set = true
+			}
+		}
+	}
+	if data.version < 4 {
+		for &clip in data.clips {
+			if clip.workflow == .Dancing && clip.dance_count_in_bpm > 0 {
+				clip.dance_beat_period_seconds = 60.0 / f64(clip.dance_count_in_bpm)
 			}
 		}
 	}
@@ -2175,6 +2270,11 @@ portable_library_read_scoped :: proc(
 			dance_bpm_confidence = clip.dance_bpm_confidence,
 			dance_bpm_detector_revision = clip.dance_bpm_detector_revision,
 			dance_bpm_user_set = clip.dance_bpm_user_set,
+			dance_beat_period_seconds = clip.dance_beat_period_seconds,
+			dance_beat_grid_offset_seconds = clip.dance_beat_grid_offset_seconds,
+			dance_beat_phase_confidence = clip.dance_beat_phase_confidence,
+			dance_beat_phase_user_set = clip.dance_beat_phase_user_set,
+			dance_metronome_enabled = clip.dance_metronome_enabled,
 			dance_playback_rate = clip.dance_playback_rate,
 		}
 		copy, copied := clone_clip(runtime_clip)
@@ -2443,6 +2543,11 @@ library_state_valid :: proc(value: ^App_State) -> bool {
 			    clip.dance_bpm_confidence,
 			    clip.dance_bpm_detector_revision,
 			   ) ||
+			   !bpm_beat_grid_valid(
+			    clip.dance_beat_period_seconds,
+			    clip.dance_beat_grid_offset_seconds,
+			    clip.dance_beat_phase_confidence,
+			   ) ||
 			   clip.dance_playback_rate < 0.1 ||
 			   clip.dance_playback_rate > 2 {
 				return false
@@ -2572,6 +2677,9 @@ database_load_state_result :: proc(
 		        e.dance_count_each_loop, e.dance_count_in_bpm,
 		        e.dance_detected_bpm, e.dance_bpm_confidence,
 		        e.dance_bpm_detector_revision, e.dance_bpm_user_set,
+		        e.dance_beat_period_seconds, e.dance_beat_grid_offset_seconds,
+		        e.dance_beat_phase_confidence, e.dance_beat_phase_user_set,
+		        e.dance_metronome_enabled,
 		        e.dance_playback_rate
 		 FROM clips e
 		 LEFT JOIN clip_randomization r ON r.clip_id = e.id
@@ -2599,7 +2707,12 @@ database_load_state_result :: proc(
 			dance_bpm_confidence = f32(sqlite3_column_double(statement, 14)),
 			dance_bpm_detector_revision = int(sqlite3_column_int(statement, 15)),
 			dance_bpm_user_set = sqlite3_column_int(statement, 16) != 0,
-			dance_playback_rate = f32(sqlite3_column_double(statement, 17)),
+			dance_beat_period_seconds = sqlite3_column_double(statement, 17),
+			dance_beat_grid_offset_seconds = sqlite3_column_double(statement, 18),
+			dance_beat_phase_confidence = f32(sqlite3_column_double(statement, 19)),
+			dance_beat_phase_user_set = sqlite3_column_int(statement, 20) != 0,
+			dance_metronome_enabled = sqlite3_column_int(statement, 21) != 0,
+			dance_playback_rate = f32(sqlite3_column_double(statement, 22)),
 		}
 		copied: bool
 		clip.id, copied = sqlite_column_required_string(statement, 0); if !copied {sqlite3_finalize(statement); return library_load_failure(database, .Clips, "A clip identifier is invalid")}

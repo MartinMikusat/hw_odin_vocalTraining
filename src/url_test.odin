@@ -4805,6 +4805,7 @@ dancing_bpm_adjustment_marks_manual_override_test :: proc(t: ^testing.T) {
 	testing.expect(t, dance_clip_adjust_bpm(&clip, 1))
 	testing.expect_value(t, clip.dance_count_in_bpm, 121)
 	testing.expect(t, clip.dance_bpm_user_set)
+	testing.expect(t, math.abs(clip.dance_beat_period_seconds-60.0/121.0) < 0.000001)
 
 	clip.dance_bpm_user_set = false
 	testing.expect(t, dance_clip_adjust_bpm(&clip, -1))
@@ -4871,6 +4872,50 @@ bpm_test_fill_noise :: proc(envelope: []f32, seed: u64) {
 		state = (state * 1_664_525 + 1_013_904_223) % 4_294_967_296
 		sample = f32(f64(state) / 2_147_483_648.0 - 1.0)
 	}
+}
+
+@(test)
+bpm_phase_estimator_recovers_shifted_beat_grid_test :: proc(t: ^testing.T) {
+	envelope: [600]f32
+	for index := 7; index < len(envelope); index += 50 {
+		envelope[index] = 1
+	}
+	phase, confidence, valid := bpm_estimate_phase(envelope[:], 100, 50)
+	testing.expect(t, valid)
+	testing.expect(t, confidence >= BPM_PHASE_MIN_CONFIDENCE)
+	expected := 0.07 + BPM_ANALYSIS_WINDOW_CENTER_SECONDS
+	testing.expect(t, math.abs(phase-expected) <= 0.011)
+}
+
+@(test)
+dancing_grid_nudge_wraps_and_marks_manual_override_test :: proc(t: ^testing.T) {
+	clip := Clip{
+		workflow=.Dancing,
+		dance_count_in_bpm=120,
+		dance_beat_period_seconds=0.5,
+		dance_beat_grid_offset_seconds=0.005,
+		dance_beat_phase_confidence=0.8,
+	}
+	testing.expect(t, dance_grid_nudge(&clip, -0.01))
+	testing.expect(t, math.abs(clip.dance_beat_grid_offset_seconds-1.995) < 0.0001)
+	testing.expect(t, clip.dance_beat_phase_user_set)
+}
+
+@(test)
+dancing_count_in_preroll_preserves_timestamp_zero_phase_test :: proc(
+	t: ^testing.T,
+) {
+	clip := Clip{
+		workflow=.Dancing,
+		dance_count_in_beats=4,
+		dance_count_in_bpm=120,
+		dance_beat_period_seconds=0.5,
+		dance_beat_grid_offset_seconds=0.2,
+		dance_beat_phase_confidence=0.8,
+	}
+	testing.expect(t, math.abs(dance_count_in_preroll_seconds(&clip)-1.8) < 0.000001)
+	clip.dance_count_in_beats = 8
+	testing.expect(t, math.abs(dance_count_in_preroll_seconds(&clip)-3.8) < 0.000001)
 }
 
 @(test)
@@ -5583,7 +5628,7 @@ dancing_tools_register_controls_without_pitch_controls_test :: proc(
 	defer mem_virtual.arena_destroy(&frame_arena)
 	build_ui_controls(false, mem_virtual.arena_allocator(&frame_arena))
 	testing.expect(t, ui_controls_valid(ui_build.controls[:]))
-	dance_kinds := [9]UI_Action_Kind{
+	dance_kinds := [15]UI_Action_Kind{
 		.Dance_Mirror_Toggle,
 		.Dance_Loop_Toggle,
 		.Dance_Count_In,
@@ -5593,6 +5638,12 @@ dancing_tools_register_controls_without_pitch_controls_test :: proc(
 		.Dance_BPM_Status,
 		.Dance_BPM_Use_Auto,
 		.Dance_BPM_Analyze_Again,
+		.Dance_Grid_Status,
+		.Dance_Grid_Earlier,
+		.Dance_Grid_Later,
+		.Dance_Grid_Set_One,
+		.Dance_Grid_Reset_Auto,
+		.Dance_Metronome_Toggle,
 	}
 	for kind in dance_kinds {
 		testing.expect(t, find_ui_control_by_action(kind) != nil)
@@ -5632,10 +5683,16 @@ dancing_bpm_group_stays_below_clip_and_inside_panel_test :: proc(
 	use_auto := dance_bpm_action_rect(panel, 0)
 	analyze_again := dance_bpm_action_rect(panel, 1)
 	saved_speed := dance_saved_speed_rect(panel)
+	grid_status := dance_grid_status_rect(panel)
+	grid_first := dance_grid_action_rect(panel, 0)
+	grid_last := dance_grid_action_rect(panel, 2)
 	testing.expect(t, status.y + status.h <= bpm_down.y)
 	testing.expect(t, use_auto.y + use_auto.h <= status.y)
 	testing.expect(t, use_auto.x + use_auto.w < analyze_again.x)
-	testing.expect(t, saved_speed.y + saved_speed.h <= use_auto.y)
+	testing.expect(t, grid_status.y + grid_status.h <= use_auto.y)
+	testing.expect(t, grid_first.y + grid_first.h <= grid_status.y)
+	testing.expect(t, grid_last.y + grid_last.h <= grid_first.y)
+	testing.expect(t, saved_speed.y + saved_speed.h <= grid_last.y)
 	testing.expect(t, saved_speed.y >= content.y)
 }
 
@@ -6535,6 +6592,25 @@ interface_theme_round_trips_through_application_preferences_test :: proc(
 }
 
 @(test)
+metronome_volume_round_trips_through_application_preferences_test :: proc(
+	t: ^testing.T,
+) {
+	database, opened := library_database_open_path(
+		":memory:",
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+	)
+	testing.expect(t, opened)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, database_create_schema(database))
+	testing.expect_value(t, database_metronome_volume_load(database), f32(1))
+	testing.expect(t, database_metronome_volume_save(database, 0.7))
+	testing.expect_value(t, database_metronome_volume_load(database), f32(0.7))
+	testing.expect(t, !database_metronome_volume_save(database, -0.1))
+	testing.expect(t, !database_metronome_volume_save(database, 1.1))
+}
+
+@(test)
 clip_draft_survives_database_reopen_and_prunes_missing_sources_test :: proc(
 	t: ^testing.T,
 ) {
@@ -7237,7 +7313,7 @@ rename_clip_updates_memory_and_database_test :: proc(t: ^testing.T) {
 
 player_transport_rects_for_test :: proc(
 	layout: Player_Transport_Layout,
-) -> [13]UI_Rect {
+) -> [16]UI_Rect {
 	return {
 		layout.play_pause,
 		layout.stop,
@@ -7248,6 +7324,9 @@ player_transport_rects_for_test :: proc(
 		layout.volume_down,
 		layout.volume_value,
 		layout.volume_up,
+		layout.metronome_volume_down,
+		layout.metronome_volume_value,
+		layout.metronome_volume_up,
 		layout.timestamp,
 		layout.ready_status,
 		layout.fullscreen,
@@ -7294,13 +7373,14 @@ expect_player_transport_layout_for_test :: proc(
 
 @(test)
 player_transport_wraps_at_exact_width_thresholds_test :: proc(t: ^testing.T) {
-	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 304, 360}, 3)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 304, 360}, 4)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 429, 360}, 4)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 430, 360}, 3)
 	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 503, 360}, 3)
-	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 504, 360}, 2)
-	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 505, 360}, 2)
-	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 795, 360}, 2)
-	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 796, 360}, 1)
-	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 797, 360}, 1)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 629, 360}, 3)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 630, 360}, 2)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 921, 360}, 2)
+	expect_player_transport_layout_for_test(t, UI_Rect{300, 100, 922, 360}, 1)
 }
 
 @(test)
@@ -7316,7 +7396,7 @@ vocal_player_transport_fits_the_minimum_application_width_test :: proc(
 	ui.width, ui.height = 1100, 720
 	ui.mode, ui.workflow = .Play, .Vocal
 	_, _, _, _, player, _, _, _, _, _, _ := layout_rects()
-	expect_player_transport_layout_for_test(t, player, 3)
+	expect_player_transport_layout_for_test(t, player, 4)
 }
 
 @(test)

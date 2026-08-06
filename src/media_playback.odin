@@ -113,6 +113,18 @@ metal_audio_play :: proc() -> bool {
 	return true
 }
 
+metal_audio_prepare_engine :: proc() -> bool {
+	if ui.audio_engine == nil {return true}
+	if metal_audio_engine_running() {return true}
+	error: Id
+	msg_void(ui.audio_engine, sel_registerName("prepare"))
+	return msg_bool_error(
+		ui.audio_engine,
+		sel_registerName("startAndReturnError:"),
+		&error,
+	)
+}
+
 audio_source_seconds :: proc(start_frame, rendered_frames: i64, sample_rate: f64) -> (f64, bool) {
 	if start_frame < 0 || rendered_frames < 0 || sample_rate <= 0 {return 0, false}
 	return f64(start_frame + rendered_frames) / sample_rate, true
@@ -196,7 +208,11 @@ metal_audio_release :: proc(engine, player, pitch, file: Id) {
 	if engine != nil {msg_void(engine, sel_registerName("release"))}
 }
 
-metal_audio_load :: proc(url: Id) -> (engine, player, pitch, file: Id, ok: bool) {
+metal_audio_load :: proc(url: Id) -> (
+	engine, player, pitch, file: Id,
+	metronome: rawptr,
+	ok: bool,
+) {
 	error: Id
 	file = msg_id_id_error_2(
 		msg_id(objc_getClass("AVAudioFile"), sel_registerName("alloc")),
@@ -204,13 +220,13 @@ metal_audio_load :: proc(url: Id) -> (engine, player, pitch, file: Id, ok: bool)
 		url,
 		&error,
 	)
-	if file == nil {return nil, nil, nil, nil, false}
+	if file == nil {return nil, nil, nil, nil, nil, false}
 	engine = msg_id(objc_getClass("AVAudioEngine"), sel_registerName("new"))
 	player = msg_id(objc_getClass("AVAudioPlayerNode"), sel_registerName("new"))
 	pitch = msg_id(objc_getClass("AVAudioUnitTimePitch"), sel_registerName("new"))
 	if engine == nil || player == nil || pitch == nil {
 		metal_audio_release(engine, player, pitch, file)
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 	msg_void_id(engine, sel_registerName("attachNode:"), player)
 	msg_void_id(engine, sel_registerName("attachNode:"), pitch)
@@ -220,8 +236,14 @@ metal_audio_load :: proc(url: Id) -> (engine, player, pitch, file: Id, ok: bool)
 	msg_void_id_id_id(engine, sel_registerName("connect:to:format:"), pitch, mixer, format)
 	msg_void_f32(player, sel_registerName("setVolume:"), player_volume_gain(ui.player_volume))
 	msg_void_f32(pitch, sel_registerName("setRate:"), ui.playback_rate)
+	metronome = hw_metronome_create(engine, mixer)
+	if metronome == nil {
+		metal_audio_release(engine, player, pitch, file)
+		return nil, nil, nil, nil, nil, false
+	}
+	hw_metronome_set_volume(metronome, ui.metronome_volume)
 	metal_audio_observe_configuration(engine)
-	return engine, player, pitch, file, true
+	return engine, player, pitch, file, metronome, true
 }
 
 metal_audio_recover_configuration :: proc(engine: Id) -> bool {
@@ -362,12 +384,14 @@ metal_player_clear :: proc() {
 	output := ui.video_output
 	audio_engine, audio_player := ui.audio_engine, ui.audio_player
 	audio_pitch, audio_file := ui.audio_pitch, ui.audio_file
+	metronome := ui.metronome
 	state.player = nil
 	ui.player_item = nil
 	ui.playback_completion_pending = false
 	ui.video_output = nil
 	ui.audio_engine, ui.audio_player = nil, nil
 	ui.audio_pitch, ui.audio_file = nil, nil
+	ui.metronome = nil
 	ui.audio_start_frame = 0
 	ui.player_duration = 0
 	metal_player_stop_observing_completion(item)
@@ -378,6 +402,7 @@ metal_player_clear :: proc() {
 	if output != nil {
 		msg_void(output, sel_registerName("release"))
 	}
+	hw_metronome_destroy(metronome, audio_engine)
 	metal_audio_release(audio_engine, audio_player, audio_pitch, audio_file)
 }
 
@@ -417,9 +442,10 @@ metal_player_load :: proc(path: string, has_audio := true) -> bool {
 	}
 	msg_void_bool(player, sel_registerName("setMuted:"), true)
 	audio_engine, audio_player, audio_pitch, audio_file: Id
+	metronome: rawptr
 	if has_audio {
 		audio_ok: bool
-		audio_engine, audio_player, audio_pitch, audio_file, audio_ok = metal_audio_load(url)
+		audio_engine, audio_player, audio_pitch, audio_file, metronome, audio_ok = metal_audio_load(url)
 		if !audio_ok {
 			msg_void(player, sel_registerName("release"))
 			msg_void(output, sel_registerName("release"))
@@ -432,12 +458,14 @@ metal_player_load :: proc(path: string, has_audio := true) -> bool {
 	old_output := ui.video_output
 	old_audio_engine, old_audio_player := ui.audio_engine, ui.audio_player
 	old_audio_pitch, old_audio_file := ui.audio_pitch, ui.audio_file
+	old_metronome := ui.metronome
 	state.player = player
 	ui.player_item = item
 	ui.playback_completion_pending = false
 	ui.video_output = output
 	ui.audio_engine, ui.audio_player = audio_engine, audio_player
 	ui.audio_pitch, ui.audio_file = audio_pitch, audio_file
+	ui.metronome = metronome
 	metal_player_clear_texture()
 	metal_player_stop_observing_completion(old_item)
 	metal_player_observe_completion(item)
@@ -448,6 +476,7 @@ metal_player_load :: proc(path: string, has_audio := true) -> bool {
 	if old_output != nil {
 		msg_void(old_output, sel_registerName("release"))
 	}
+	hw_metronome_destroy(old_metronome, old_audio_engine)
 	metal_audio_release(old_audio_engine, old_audio_player, old_audio_pitch, old_audio_file)
 	request_video_frame_refresh()
 	return true

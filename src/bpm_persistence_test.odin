@@ -21,6 +21,42 @@ bpm_test_open_memory_database :: proc(t: ^testing.T) -> (^SQLite_DB, bool) {
 }
 
 @(test)
+bpm_schema_v10_migrates_beat_grid_and_invalidates_old_detector_test :: proc(
+	t: ^testing.T,
+) {
+	database, opened := bpm_test_open_memory_database(t)
+	if !opened {return}
+	defer sqlite3_close(database)
+	testing.expect(t, sqlite_execute(database, `
+		CREATE TABLE clips (
+			id TEXT PRIMARY KEY,
+			workflow INTEGER NOT NULL,
+			dance_count_in_bpm INTEGER NOT NULL,
+			dance_detected_bpm REAL NOT NULL,
+			dance_bpm_confidence REAL NOT NULL,
+			dance_bpm_detector_revision INTEGER NOT NULL
+		);
+		INSERT INTO clips VALUES ('clip-1', 1, 120, 120, 0.8, 1);
+		PRAGMA user_version = 10;
+	`))
+	testing.expect(t, database_migrate_v10_to_v11(database))
+	version, read := library_database_user_version(database)
+	testing.expect(t, read)
+	testing.expect_value(t, version, 11)
+	statement, prepared := sqlite_prepare(database, `
+		SELECT dance_beat_period_seconds, dance_bpm_detector_revision,
+		       dance_metronome_enabled FROM clips
+	`)
+	testing.expect(t, prepared)
+	if !prepared {return}
+	defer sqlite3_finalize(statement)
+	testing.expect_value(t, sqlite3_step(statement), i32(SQLITE_ROW))
+	testing.expect_value(t, sqlite3_column_double(statement, 0), 0.5)
+	testing.expect_value(t, sqlite3_column_int(statement, 1), i32(0))
+	testing.expect_value(t, sqlite3_column_int(statement, 2), i32(0))
+}
+
+@(test)
 bpm_schema_v9_migrates_to_v10_and_preserves_legacy_bpm_test :: proc(t: ^testing.T) {
 	database, opened := bpm_test_open_memory_database(t)
 	if !opened {return}
@@ -113,8 +149,12 @@ bpm_detection_and_manual_override_round_trip_through_sqlite_test :: proc(t: ^tes
 		dance_count_in_bpm = 128,
 		dance_detected_bpm = 128.25,
 		dance_bpm_confidence = 0.77,
-		dance_bpm_detector_revision = 1,
+		dance_bpm_detector_revision = BPM_DETECTOR_REVISION,
 		dance_bpm_user_set = false,
+		dance_beat_period_seconds = 60.0/128.25,
+		dance_beat_grid_offset_seconds = 0.18,
+		dance_beat_phase_confidence = 0.66,
+		dance_metronome_enabled = true,
 		dance_playback_rate = 1,
 	}}
 	testing.expect(t, database_save_collections(database, sources[:], nil, nil, clips[:]))
@@ -125,8 +165,10 @@ bpm_detection_and_manual_override_round_trip_through_sqlite_test :: proc(t: ^tes
 	if len(loaded.clips) != 1 {return}
 	testing.expect_value(t, loaded.clips[0].dance_detected_bpm, 128.25)
 	testing.expect_value(t, loaded.clips[0].dance_bpm_confidence, f32(0.77))
-	testing.expect_value(t, loaded.clips[0].dance_bpm_detector_revision, 1)
+	testing.expect_value(t, loaded.clips[0].dance_bpm_detector_revision, BPM_DETECTOR_REVISION)
 	testing.expect(t, !loaded.clips[0].dance_bpm_user_set)
+	testing.expect_value(t, loaded.clips[0].dance_beat_grid_offset_seconds, 0.18)
+	testing.expect(t, loaded.clips[0].dance_metronome_enabled)
 
 	clips[0].dance_bpm_user_set = true
 	testing.expect(t, database_save_collections(database, sources[:], nil, nil, clips[:]))
@@ -154,8 +196,13 @@ bpm_portable_fields_round_trip_and_older_input_defaults_safely_test :: proc(t: ^
 		dance_count_in_bpm = 128,
 		dance_detected_bpm = 127.9,
 		dance_bpm_confidence = 0.8,
-		dance_bpm_detector_revision = 1,
+		dance_bpm_detector_revision = BPM_DETECTOR_REVISION,
 		dance_bpm_user_set = true,
+		dance_beat_period_seconds = 60.0/127.9,
+		dance_beat_grid_offset_seconds = 0.2,
+		dance_beat_phase_confidence = 0.7,
+		dance_beat_phase_user_set = true,
+		dance_metronome_enabled = true,
 		dance_playback_rate = 1,
 	}
 	encoded, encode_error := json.marshal(clip, {}, context.temp_allocator)
@@ -167,8 +214,10 @@ bpm_portable_fields_round_trip_and_older_input_defaults_safely_test :: proc(t: ^
 	if decode_error == nil {
 		testing.expect_value(t, decoded.dance_detected_bpm, 127.9)
 		testing.expect_value(t, decoded.dance_bpm_confidence, f32(0.8))
-		testing.expect_value(t, decoded.dance_bpm_detector_revision, 1)
+		testing.expect_value(t, decoded.dance_bpm_detector_revision, BPM_DETECTOR_REVISION)
 		testing.expect(t, decoded.dance_bpm_user_set)
+		testing.expect(t, decoded.dance_beat_phase_user_set)
+		testing.expect(t, decoded.dance_metronome_enabled)
 	}
 
 	older_clips := [2]Portable_Clip{
@@ -178,6 +227,7 @@ bpm_portable_fields_round_trip_and_older_input_defaults_safely_test :: proc(t: ^
 	older := Portable_Library{version=2, clips=older_clips[:]}
 	portable_library_apply_compatibility(&older)
 	testing.expect(t, older.clips[0].dance_bpm_user_set)
+	testing.expect_value(t, older.clips[0].dance_beat_period_seconds, 0.5)
 	testing.expect(t, !older.clips[1].dance_bpm_user_set)
 
 	current_clips := [1]Portable_Clip{{
