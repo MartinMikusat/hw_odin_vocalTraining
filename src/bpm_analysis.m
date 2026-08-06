@@ -14,6 +14,7 @@ enum {
     HW_BPM_HOP_LENGTH = 512,
     HW_BPM_LOG2_FRAME_LENGTH = 11,
     HW_BPM_LOCAL_MEAN_LENGTH = 8,
+    HW_WAVEFORM_SAMPLES_PER_PEAK = 16,
 };
 
 typedef struct {
@@ -562,7 +563,7 @@ HWBPMAnalysisStatus hw_waveform_copy_peaks(
             return HWBPMAnalysisUnreadable;
         }
 
-        const size_t samplesPerPeak = 220;
+        const size_t samplesPerPeak = HW_WAVEFORM_SAMPLES_PER_PEAK;
         float *result = NULL;
         size_t resultCount = 0;
         size_t resultCapacity = 0;

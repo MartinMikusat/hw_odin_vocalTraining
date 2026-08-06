@@ -7147,7 +7147,9 @@ build_player_waveform_geometry :: proc(
 		for peak in entry.peaks[first:last] {
 			largest = max(largest, abs(f64(peak.minimum)), abs(f64(peak.maximum)))
 		}
-		columns := max(1, int(math.ceil(rect.w)))
+		pixel_scale := max(1, ui.scale)
+		columns := max(1, int(math.ceil(rect.w*pixel_scale)))
+		column_width := rect.w/f64(columns)
 		seconds, has_seconds := current_seconds()
 		for column in 0 ..< columns {
 			column_start := start+(end-start)*f64(column)/f64(columns)
@@ -7166,7 +7168,12 @@ build_player_waveform_geometry :: proc(
 			if !has_seconds || column_end <= seconds {color = accent}
 			push_rect(
 				vertices,
-				{rect.x+f64(column), y0, 1, max(1, y1-y0)},
+				{
+					rect.x+f64(column)*column_width,
+					y0,
+					column_width,
+					max(1/pixel_scale, y1-y0),
+				},
 				color,
 				"waveform",
 			)
