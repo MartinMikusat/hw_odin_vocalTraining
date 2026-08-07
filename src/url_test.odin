@@ -7592,7 +7592,15 @@ expect_player_transport_layout_for_test :: proc(
 		layout.waveform.w,
 		PLAYER_WAVEFORM_HEIGHT-PLAYER_WAVEFORM_SELECTOR_HEIGHT-
 		PLAYER_WAVEFORM_SELECTOR_GAP-PLAYER_WAVEFORM_NAVIGATOR_HEIGHT-
-		PLAYER_WAVEFORM_NAVIGATOR_GAP,
+		PLAYER_WAVEFORM_NAVIGATOR_GAP-PLAYER_WAVEFORM_RANGE_HEIGHT-
+		PLAYER_WAVEFORM_RANGE_GAP,
+	})
+	testing.expect_value(t, layout.waveform_range, UI_Rect{
+		layout.waveform.x,
+		layout.waveform_plot.y+layout.waveform_plot.h+
+		PLAYER_WAVEFORM_RANGE_GAP,
+		layout.waveform.w,
+		PLAYER_WAVEFORM_RANGE_HEIGHT,
 	})
 	testing.expect_value(t, layout.waveform_navigator, UI_Rect{
 		layout.waveform.x,
@@ -7609,6 +7617,24 @@ expect_player_transport_layout_for_test :: proc(
 		layout.waveform_navigator,
 		layout.waveform_plot,
 	))
+	testing.expect(t, !player_transport_rects_overlap_for_test(
+		layout.waveform_range,
+		layout.waveform_plot,
+	))
+	testing.expect(t, !player_transport_rects_overlap_for_test(
+		layout.waveform_range,
+		layout.waveform_navigator,
+	))
+	testing.expect(t, layout.waveform_range.x >= layout.waveform.x)
+	testing.expect(t,
+		layout.waveform_range.x+layout.waveform_range.w <=
+		layout.waveform.x+layout.waveform.w,
+	)
+	testing.expect(t, layout.waveform_range.y >= layout.waveform.y)
+	testing.expect(t,
+		layout.waveform_range.y+layout.waveform_range.h <=
+		layout.waveform.y+layout.waveform.h,
+	)
 	for selector, index in layout.waveform_selectors {
 		testing.expect(t, selector.x >= layout.waveform.x)
 		testing.expect(t, selector.x+selector.w <= layout.waveform.x+layout.waveform.w)
@@ -7622,6 +7648,10 @@ expect_player_transport_layout_for_test :: proc(
 			selector,
 			layout.waveform_navigator,
 		))
+		testing.expect(t, !player_transport_rects_overlap_for_test(
+			selector,
+			layout.waveform_range,
+		))
 		if index > 0 {
 			testing.expect(t, !player_transport_rects_overlap_for_test(
 				selector,
@@ -7630,6 +7660,49 @@ expect_player_transport_layout_for_test :: proc(
 		}
 	}
 	testing.expect(t, layout.ready_status.x+layout.ready_status.w+8 <= layout.fullscreen.x)
+}
+
+@(test)
+waveform_range_track_maps_partial_complete_and_reversed_marks_test :: proc(
+	t: ^testing.T,
+) {
+	track := UI_Rect{100, 20, 400, 8}
+	empty := waveform_range_track_geometry(track, 50, 150, 0, 0, false, false, false)
+	testing.expect_value(t, empty, Waveform_Range_Track_Geometry{})
+
+	start_only := waveform_range_track_geometry(track, 50, 150, 75, 0, true, false, false)
+	testing.expect_value(t, start_only.start_marker, UI_Rect{199, 20, 2, 8})
+	testing.expect_value(t, start_only.line, UI_Rect{})
+	end_only := waveform_range_track_geometry(track, 50, 150, 0, 125, false, true, false)
+	testing.expect_value(t, end_only.end_marker, UI_Rect{399, 20, 2, 8})
+	testing.expect_value(t, end_only.line, UI_Rect{})
+
+	complete := waveform_range_track_geometry(track, 50, 150, 75, 125, true, true, true)
+	testing.expect_value(t, complete.start_marker, UI_Rect{199, 20, 2, 8})
+	testing.expect_value(t, complete.end_marker, UI_Rect{399, 20, 2, 8})
+	testing.expect_value(t, complete.line, UI_Rect{200, 23, 200, 2})
+
+	reversed := waveform_range_track_geometry(track, 50, 150, 125, 75, true, true, false)
+	testing.expect_value(t, reversed.start_marker, UI_Rect{399, 20, 2, 8})
+	testing.expect_value(t, reversed.end_marker, UI_Rect{199, 20, 2, 8})
+	testing.expect_value(t, reversed.line, UI_Rect{})
+}
+
+@(test)
+waveform_range_track_clips_to_zoomed_view_edges_test :: proc(t: ^testing.T) {
+	track := UI_Rect{100, 20, 400, 8}
+	clipped := waveform_range_track_geometry(track, 50, 150, 25, 175, true, true, true)
+	testing.expect(t, clipped.start_clipped)
+	testing.expect(t, clipped.end_clipped)
+	testing.expect_value(t, clipped.start_marker, UI_Rect{100, 20, 4, 8})
+	testing.expect_value(t, clipped.end_marker, UI_Rect{496, 20, 4, 8})
+	testing.expect_value(t, clipped.line, UI_Rect{100, 23, 400, 2})
+
+	boundary := waveform_range_track_geometry(track, 50, 150, 50, 150, true, true, true)
+	testing.expect(t, !boundary.start_clipped)
+	testing.expect(t, !boundary.end_clipped)
+	testing.expect_value(t, boundary.start_marker, UI_Rect{100, 20, 2, 8})
+	testing.expect_value(t, boundary.end_marker, UI_Rect{498, 20, 2, 8})
 }
 
 @(test)

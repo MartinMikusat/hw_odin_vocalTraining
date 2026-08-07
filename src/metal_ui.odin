@@ -360,6 +360,7 @@ Player_Transport_Layout :: struct {
 	timeline:     UI_Rect,
 	waveform:     UI_Rect,
 	waveform_plot: UI_Rect,
+	waveform_range: UI_Rect,
 	waveform_navigator: UI_Rect,
 	waveform_selectors: [4]UI_Rect,
 	row_count:    int,
@@ -3788,6 +3789,8 @@ PLAYER_WAVEFORM_SELECTOR_HEIGHT :: 20.0
 PLAYER_WAVEFORM_SELECTOR_GAP :: 4.0
 PLAYER_WAVEFORM_NAVIGATOR_HEIGHT :: 14.0
 PLAYER_WAVEFORM_NAVIGATOR_GAP :: 4.0
+PLAYER_WAVEFORM_RANGE_HEIGHT :: 8.0
+PLAYER_WAVEFORM_RANGE_GAP :: 4.0
 
 player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_Layout) {
 	inner_x := player.x + PLAYER_TRANSPORT_INSET_X
@@ -3884,7 +3887,15 @@ player_transport_layout :: proc(player: UI_Rect) -> (result: Player_Transport_La
 		result.waveform.w,
 		PLAYER_WAVEFORM_HEIGHT-PLAYER_WAVEFORM_SELECTOR_HEIGHT-
 		PLAYER_WAVEFORM_SELECTOR_GAP-PLAYER_WAVEFORM_NAVIGATOR_HEIGHT-
-		PLAYER_WAVEFORM_NAVIGATOR_GAP,
+		PLAYER_WAVEFORM_NAVIGATOR_GAP-PLAYER_WAVEFORM_RANGE_HEIGHT-
+		PLAYER_WAVEFORM_RANGE_GAP,
+	}
+	result.waveform_range = {
+		result.waveform.x,
+		result.waveform_plot.y+result.waveform_plot.h+
+		PLAYER_WAVEFORM_RANGE_GAP,
+		result.waveform.w,
+		PLAYER_WAVEFORM_RANGE_HEIGHT,
 	}
 	result.waveform_navigator = {
 		result.waveform.x,
@@ -7320,6 +7331,100 @@ build_waveform_navigator_geometry :: proc(
 	)
 }
 
+Waveform_Range_Track_Geometry :: struct {
+	line: UI_Rect,
+	start_marker: UI_Rect,
+	end_marker: UI_Rect,
+	start_clipped: bool,
+	end_clipped: bool,
+}
+
+waveform_range_track_x :: proc(
+	track: UI_Rect,
+	view_start, view_end, seconds: f64,
+) -> f64 {
+	ratio := clamp((seconds-view_start)/(view_end-view_start), 0, 1)
+	return track.x+ratio*track.w
+}
+
+waveform_range_track_geometry :: proc(
+	track: UI_Rect,
+	view_start, view_end: f64,
+	range_start, range_end: f64,
+	has_start, has_end, valid_range: bool,
+) -> (result: Waveform_Range_Track_Geometry) {
+	if track.w <= 0 || track.h <= 0 || view_end <= view_start {return}
+	marker_width := 2.0
+	clipped_width := 4.0
+	if has_start {
+		x := waveform_range_track_x(track, view_start, view_end, range_start)
+		result.start_clipped = range_start < view_start || range_start > view_end
+		width := result.start_clipped ? clipped_width : marker_width
+		result.start_marker = {
+			clamp(x-width/2, track.x, track.x+track.w-width),
+			track.y,
+			width,
+			track.h,
+		}
+	}
+	if has_end {
+		x := waveform_range_track_x(track, view_start, view_end, range_end)
+		result.end_clipped = range_end < view_start || range_end > view_end
+		width := result.end_clipped ? clipped_width : marker_width
+		result.end_marker = {
+			clamp(x-width/2, track.x, track.x+track.w-width),
+			track.y,
+			width,
+			track.h,
+		}
+	}
+	if !has_start || !has_end || !valid_range {return}
+	visible_start := max(range_start, view_start)
+	visible_end := min(range_end, view_end)
+	if visible_end <= visible_start {return}
+	x0 := waveform_range_track_x(track, view_start, view_end, visible_start)
+	x1 := waveform_range_track_x(track, view_start, view_end, visible_end)
+	result.line = {x0, track.y+track.h/2-1, x1-x0, 2}
+	return
+}
+
+build_waveform_range_track_geometry :: proc(
+	vertices: ^[dynamic]Solid_Vertex,
+	track: UI_Rect,
+	color: [4]f32,
+) {
+	view_start, view_end := waveform_view_range(ui.player_duration)
+	geometry := waveform_range_track_geometry(
+		track,
+		view_start,
+		view_end,
+		state.range_start,
+		state.range_end,
+		state.has_start,
+		state.has_end,
+		active_clip_range_is_valid(),
+	)
+	if geometry.line.w > 0 {
+		push_rect(vertices, geometry.line, color, "waveform-range")
+	}
+	if geometry.start_marker.w > 0 {
+		push_rect(
+			vertices,
+			geometry.start_marker,
+			color,
+			geometry.start_clipped ? "waveform-range-edge" : "waveform-range-start",
+		)
+	}
+	if geometry.end_marker.w > 0 {
+		push_rect(
+			vertices,
+			geometry.end_marker,
+			color,
+			geometry.end_clipped ? "waveform-range-edge" : "waveform-range-end",
+		)
+	}
+}
+
 build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 	previous_lookup := ui_base_control_lookup
 	ui_base_control_lookup = true
@@ -7560,6 +7665,13 @@ build_geometry :: proc(vertices: ^[dynamic]Solid_Vertex) {
 			rule,
 			ui_color_32(theme.ink),
 		)
+		if ui.mode == .Create && ui.source_playback_active {
+			build_waveform_range_track_geometry(
+				vertices,
+				player_transport_layout(player).waveform_range,
+				accent,
+			)
+		}
 		if !ui.playback_fullscreen_active {
 			build_waveform_navigator_geometry(
 				vertices,
