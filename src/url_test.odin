@@ -2204,6 +2204,73 @@ footer_task_layout_caps_cards_and_reports_overflow_test :: proc(t: ^testing.T) {
 }
 
 @(test)
+development_frame_metrics_report_cadence_hitches_and_idle_test :: proc(
+	t: ^testing.T,
+) {
+	when ODIN_DEBUG {
+		stable := dev_frame_stats_from_intervals(
+			[]f64{16.6667, 16.6667, 16.6667},
+		)
+		testing.expect(t, abs(stable.fps-60) < 0.01)
+		testing.expect(t, abs(stable.worst_ms-16.6667) < 0.0001)
+		testing.expect_value(t, stable.count, 3)
+
+		hitched := dev_frame_stats_from_intervals([]f64{16, 50, 20})
+		testing.expect_value(t, hitched.worst_ms, 50.0)
+		testing.expect(t, hitched.fps > 34 && hitched.fps < 35)
+
+		now := time.tick_now()
+		metrics := Dev_Frame_Metrics{
+			active = true,
+			has_last_frame = true,
+			last_frame = time.tick_add(now, -300*time.Millisecond),
+		}
+		testing.expect(t, dev_frame_metrics_mark_idle_at(&metrics, now))
+		testing.expect(t, !metrics.active)
+		testing.expect(t, !metrics.has_last_frame)
+	} else {
+		testing.expect(t, true)
+	}
+}
+
+@(test)
+development_frame_graph_keeps_ten_seconds_and_reserves_footer_test :: proc(
+	t: ^testing.T,
+) {
+	when ODIN_DEBUG {
+		now := time.tick_now()
+		metrics: Dev_Frame_Metrics
+		metrics.samples[0] = {
+			at = time.tick_add(now, -9*time.Second),
+			interval_ms = 40,
+		}
+		metrics.samples[1] = {
+			at = time.tick_add(now, -11*time.Second),
+			interval_ms = 80,
+		}
+		metrics.next_sample = 2
+		metrics.sample_count = 2
+		columns: [20]f64
+		worst := dev_frame_graph_columns_at(&metrics, now, columns[:])
+		testing.expect_value(t, worst, 40.0)
+
+		reserved := footer_task_layout(
+			900,
+			7,
+			DEV_FRAME_BADGE_WIDTH+DEV_FRAME_BADGE_GAP,
+		)
+		testing.expect_value(t, reserved.visible_count, 1)
+		testing.expect_value(t, reserved.hidden_count, 6)
+		badge := dev_frame_badge_rect(1100)
+		graph := dev_frame_graph_rect(1100)
+		testing.expect(t, badge.x+badge.w <= 1100-18)
+		testing.expect(t, graph.x >= 18 && graph.x+graph.w <= 1100-18)
+	} else {
+		testing.expect(t, true)
+	}
+}
+
+@(test)
 simulated_tasks_use_the_real_footer_registry_without_database_writes_test :: proc(
 	t: ^testing.T,
 ) {

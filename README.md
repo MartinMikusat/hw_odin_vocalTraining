@@ -700,6 +700,10 @@ enabled. Press `Ctrl-C` to stop the watcher and app.
 
 The frame timer continues to poll jobs while the app is idle. It does not
 submit Metal work until playback or a UI change requires it.
+Development builds reserve the footer's lower-right corner for a frame-pacing
+overlay. It reports the rendered FPS and the worst frame interval from the
+latest second. Select it to show or hide the preceding ten seconds of frame
+times. Release builds exclude the overlay and its measurement state.
 Pausing playback stops the audio node and engine. Resuming playback schedules
 audio from the position stored by `AVPlayer`.
 

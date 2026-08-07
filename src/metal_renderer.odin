@@ -291,10 +291,15 @@ encode_frame_to_target :: proc(
 	}
 }
 
-render_frame :: proc() {
+render_frame :: proc(record_dev_frame := true) {
 	if ui.layer == nil || ui.width <= 0 || ui.height <= 0 {return}
 	drawable := msg_id(ui.layer, sel_registerName("nextDrawable"))
 	if drawable == nil {return}
+	when ODIN_DEBUG {
+		if record_dev_frame {
+			dev_frame_metrics_record(&dev_frame_metrics)
+		}
+	}
 	arena_reset(&memory.frame, &memory.frame_stats)
 	frame_allocator := mem_virtual.arena_allocator(&memory.frame)
 	texture := msg_id(drawable, sel_registerName("texture"))

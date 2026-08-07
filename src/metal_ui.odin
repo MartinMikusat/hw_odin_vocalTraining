@@ -653,6 +653,7 @@ UI_Action_Kind :: enum {
 	Discard_Keep_Editing,
 	Discard_Changes,
 	Waveform_Navigator,
+	Dev_Frame_Stats,
 }
 
 Modal_Discard_Target :: enum {
@@ -3255,6 +3256,142 @@ numbered_action_time_ms :: proc() -> i64 {
 	return time.to_unix_nanoseconds(time.now()) / 1_000_000
 }
 
+when ODIN_DEBUG {
+	DEV_FRAME_SAMPLE_CAPACITY :: 600
+	DEV_FRAME_HISTORY_SECONDS :: 10.0
+	DEV_FRAME_STATS_SECONDS :: 1.0
+	DEV_FRAME_IDLE_SECONDS :: 0.25
+	DEV_FRAME_BADGE_WIDTH :: 190.0
+	DEV_FRAME_BADGE_GAP :: 6.0
+
+	Dev_Frame_Sample :: struct {
+		at: time.Tick,
+		interval_ms: f64,
+	}
+
+	Dev_Frame_Stats :: struct {
+		fps: f64,
+		worst_ms: f64,
+		count: int,
+	}
+
+	Dev_Frame_Metrics :: struct {
+		samples: [DEV_FRAME_SAMPLE_CAPACITY]Dev_Frame_Sample,
+		next_sample: int,
+		sample_count: int,
+		last_frame: time.Tick,
+		has_last_frame: bool,
+		active: bool,
+		graph_open: bool,
+		ignore_next_frame: bool,
+		fps: f64,
+		worst_ms: f64,
+	}
+
+	dev_frame_metrics: Dev_Frame_Metrics
+
+	dev_frame_stats_from_intervals :: proc(intervals_ms: []f64) -> Dev_Frame_Stats {
+		result: Dev_Frame_Stats
+		total := 0.0
+		for interval in intervals_ms {
+			if interval <= 0 || math.is_nan(interval) || math.is_inf(interval) {
+				continue
+			}
+			total += interval
+			result.worst_ms = max(result.worst_ms, interval)
+			result.count += 1
+		}
+		if result.count > 0 && total > 0 {
+			result.fps = 1000.0/(total/f64(result.count))
+		}
+		return result
+	}
+
+	dev_frame_sample_index :: proc(metrics: ^Dev_Frame_Metrics, ordered_index: int) -> int {
+		start := metrics.next_sample-metrics.sample_count
+		if start < 0 {start += DEV_FRAME_SAMPLE_CAPACITY}
+		return (start+ordered_index)%DEV_FRAME_SAMPLE_CAPACITY
+	}
+
+	dev_frame_metrics_refresh_stats_at :: proc(
+		metrics: ^Dev_Frame_Metrics,
+		now: time.Tick,
+	) {
+		intervals: [DEV_FRAME_SAMPLE_CAPACITY]f64
+		count := 0
+		for ordered_index in 0..<metrics.sample_count {
+			index := dev_frame_sample_index(metrics, ordered_index)
+			sample := metrics.samples[index]
+			age := time.duration_seconds(time.tick_diff(sample.at, now))
+			if age < 0 || age > DEV_FRAME_STATS_SECONDS {continue}
+			intervals[count] = sample.interval_ms
+			count += 1
+		}
+		stats := dev_frame_stats_from_intervals(intervals[:count])
+		metrics.fps = stats.fps
+		metrics.worst_ms = stats.worst_ms
+	}
+
+	dev_frame_metrics_record_at :: proc(
+		metrics: ^Dev_Frame_Metrics,
+		now: time.Tick,
+	) {
+		if metrics.ignore_next_frame {
+			metrics.ignore_next_frame = false
+			return
+		}
+		metrics.active = true
+		if !metrics.has_last_frame {
+			metrics.last_frame = now
+			metrics.has_last_frame = true
+			metrics.fps = 0
+			metrics.worst_ms = 0
+			return
+		}
+		interval_ms := time.duration_milliseconds(
+			time.tick_diff(metrics.last_frame, now),
+		)
+		metrics.last_frame = now
+		if interval_ms <= 0 {return}
+		metrics.samples[metrics.next_sample] = {
+			at = now,
+			interval_ms = interval_ms,
+		}
+		metrics.next_sample = (metrics.next_sample+1)%DEV_FRAME_SAMPLE_CAPACITY
+		metrics.sample_count = min(
+			metrics.sample_count+1,
+			DEV_FRAME_SAMPLE_CAPACITY,
+		)
+		dev_frame_metrics_refresh_stats_at(metrics, now)
+	}
+
+	dev_frame_metrics_record :: proc(metrics: ^Dev_Frame_Metrics) {
+		dev_frame_metrics_record_at(metrics, time.tick_now())
+	}
+
+	dev_frame_metrics_mark_idle_at :: proc(
+		metrics: ^Dev_Frame_Metrics,
+		now: time.Tick,
+	) -> bool {
+		if !metrics.active || !metrics.has_last_frame {return false}
+		elapsed := time.duration_seconds(time.tick_diff(metrics.last_frame, now))
+		if elapsed < DEV_FRAME_IDLE_SECONDS {return false}
+		metrics.active = false
+		metrics.has_last_frame = false
+		metrics.fps = 0
+		metrics.worst_ms = 0
+		return true
+	}
+
+	dev_frame_badge_rect :: proc(width: f64) -> UI_Rect {
+		return {max(18, width-18-DEV_FRAME_BADGE_WIDTH), 3, DEV_FRAME_BADGE_WIDTH, 24}
+	}
+
+	dev_frame_graph_rect :: proc(width: f64) -> UI_Rect {
+		return {max(18, width-18-420), 36, min(420, width-36), 180}
+	}
+}
+
 clear_number_prefix :: proc() {
 	ui.number_prefix = 0
 	ui.number_prefix_deadline_ms = 0
@@ -3485,10 +3622,14 @@ status_source_rect :: proc() -> UI_Rect {
 	return UI_Rect{332, 3, 112, 24}
 }
 
-footer_task_layout :: proc(width: f64, task_count: int) -> Footer_Task_Layout {
+footer_task_layout :: proc(
+	width: f64,
+	task_count: int,
+	reserved_right: f64 = 0,
+) -> Footer_Task_Layout {
 	result: Footer_Task_Layout
 	if task_count <= 0 {return result}
-	footer_right := max(18, width - 18)
+	footer_right := max(18, width-18-max(0, reserved_right))
 	x := 332.0
 	available := max(0, footer_right - x)
 	visible := min(task_count, FOOTER_TASK_LIMIT)
@@ -3529,13 +3670,145 @@ footer_task_layout :: proc(width: f64, task_count: int) -> Footer_Task_Layout {
 
 footer_status_rect :: proc() -> UI_Rect {
 	footer := UI_Rect{18, 0, ui.width - 36, 30}
+	footer_right := footer.x+footer.w
+	when ODIN_DEBUG {
+		footer_right = min(
+			footer_right,
+			dev_frame_badge_rect(ui.width).x-DEV_FRAME_BADGE_GAP,
+		)
+	}
 	x := footer.x + 314
 	if len(notification_history.footer_task_ids) == 0 &&
 	   len(ui.status_source_video_id) > 0 {
 		action := status_source_rect()
 		x = action.x + action.w + 6
 	}
-	return UI_Rect{x, footer.y, min(500, max(0, footer.x + footer.w - x)), footer.h}
+	return UI_Rect{x, footer.y, min(500, max(0, footer_right - x)), footer.h}
+}
+
+when ODIN_DEBUG {
+	dev_frame_graph_columns_at :: proc(
+		metrics: ^Dev_Frame_Metrics,
+		now: time.Tick,
+		columns: []f64,
+	) -> f64 {
+		if metrics == nil || len(columns) == 0 {return 0}
+		for &column in columns {column = 0}
+		worst := 0.0
+		for ordered_index in 0..<metrics.sample_count {
+			index := dev_frame_sample_index(metrics, ordered_index)
+			sample := metrics.samples[index]
+			age := time.duration_seconds(time.tick_diff(sample.at, now))
+			if age < 0 || age > DEV_FRAME_HISTORY_SECONDS {continue}
+			ratio := 1-age/DEV_FRAME_HISTORY_SECONDS
+			column := clamp(int(ratio*f64(len(columns))), 0, len(columns)-1)
+			columns[column] = max(columns[column], sample.interval_ms)
+			worst = max(worst, sample.interval_ms)
+		}
+		return worst
+	}
+
+	draw_dev_frame_overlay :: proc(ctx, font: rawptr) {
+		if ui.playback_fullscreen_active {return}
+		theme := ui_theme_colors()
+		dark := ui_theme_is_dark(ui.theme)
+		accent := workflow_accent_color(ui.workflow, dark)
+		warning := dark ? UI_COLOR_COFFEE_64 : UI_COLOR_OCHRE_64
+		badge := dev_frame_badge_rect(ui.width)
+		fill := theme.panel_alt
+		if contains(badge, ui.mouse) {fill = theme.row_hover}
+		border := accent
+		if dev_frame_metrics.active && dev_frame_metrics.worst_ms > 33.3 {
+			border = warning
+		}
+		fill_overlay_rect(ctx, badge, fill)
+		fill_overlay_border(ctx, badge, border)
+		label := "FPS -- / WARMUP"
+		if !dev_frame_metrics.active {
+			label = "FPS -- / IDLE"
+		} else if dev_frame_metrics.fps > 0 {
+			label = fmt.tprintf(
+				"FPS %.1f / WORST %.1f MS",
+				dev_frame_metrics.fps,
+				dev_frame_metrics.worst_ms,
+			)
+		}
+		draw_text_in_rect(
+			ctx,
+			font,
+			label,
+			badge,
+			.Center,
+			.Center,
+			border,
+			9,
+		)
+		if !dev_frame_metrics.graph_open {return}
+
+		panel := dev_frame_graph_rect(ui.width)
+		fill_overlay_rect(ctx, panel, theme.modal)
+		fill_overlay_border(ctx, panel, accent)
+		plot := UI_Rect{panel.x+12, panel.y+24, panel.w-24, panel.h-52}
+		fill_overlay_rect(ctx, plot, theme.field)
+		column_count := clamp(int(plot.w), 1, 396)
+		columns: [396]f64
+		now := time.tick_now()
+		history_worst := dev_frame_graph_columns_at(
+			&dev_frame_metrics,
+			now,
+			columns[:column_count],
+		)
+		scale_ms := max(50.0, math.ceil(history_worst/10)*10)
+		column_width := plot.w/f64(column_count)
+		for interval_ms, column in columns[:column_count] {
+			if interval_ms <= 0 {continue}
+			height := min(interval_ms/scale_ms, 1)*plot.h
+			color := accent
+			if interval_ms > 33.3 {color = warning}
+			fill_overlay_rect(
+				ctx,
+				{
+					plot.x+f64(column)*column_width,
+					plot.y,
+					max(1/ui.scale, column_width),
+					height,
+				},
+				color,
+			)
+		}
+		reference_intervals := [2]f64{16.7, 33.3}
+		for reference_ms in reference_intervals {
+			y := plot.y+min(reference_ms/scale_ms, 1)*plot.h
+			fill_overlay_rect(
+				ctx,
+				{plot.x, y, plot.w, max(1/ui.scale, 1)},
+				theme.rule,
+			)
+		}
+		draw_text_in_rect(
+			ctx,
+			font,
+			fmt.tprintf(
+				"FRAME TIME / LAST 10 S / SCALE %.0f MS",
+				scale_ms,
+			),
+			{panel.x+12, panel.y+panel.h-26, panel.w-24, 18},
+			.Start,
+			.Center,
+			theme.ink,
+			9,
+		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			"16.7 MS / 60 FPS     33.3 MS / 30 FPS",
+			{panel.x+12, panel.y+4, panel.w-24, 18},
+			.Start,
+			.Center,
+			theme.muted,
+			8,
+		)
+	}
 }
 
 footer_task_action_rect :: proc(card: UI_Rect) -> UI_Rect {
@@ -9216,9 +9489,14 @@ build_overlay_commands :: proc(modal_only := false) {
 	)
 	if !ui.playback_fullscreen_active &&
 	   len(notification_history.footer_task_ids) > 0 {
+		reserved_right := 0.0
+		when ODIN_DEBUG {
+			reserved_right = DEV_FRAME_BADGE_WIDTH+DEV_FRAME_BADGE_GAP
+		}
 		task_layout := footer_task_layout(
 			ui.width,
 			len(notification_history.footer_task_ids),
+			reserved_right,
 		)
 		for task_index in 0 ..< task_layout.visible_count {
 			notification_id := notification_history.footer_task_ids[task_index]
@@ -9699,6 +9977,9 @@ build_overlay_commands :: proc(modal_only := false) {
 		draw_backup_warning(ctx, small_font, bright, muted, warning, danger)
 	}
 	if !modal_only && !ui.playback_fullscreen_active {draw_window_controls(ctx)}
+	when ODIN_DEBUG {
+		if !modal_only {draw_dev_frame_overlay(ctx, small_font)}
+	}
 	if modal_only {draw_flash_hints(ctx, small_font)}
 }
 
@@ -10726,9 +11007,14 @@ build_ui_controls_for_scope :: proc(
 	                  !command_palette.is_open(&command_palette_state)
 	if include_footer && !ui.playback_fullscreen_active &&
 	   len(notification_history.footer_task_ids) > 0 {
+		reserved_right := 0.0
+		when ODIN_DEBUG {
+			reserved_right = DEV_FRAME_BADGE_WIDTH+DEV_FRAME_BADGE_GAP
+		}
 		task_layout := footer_task_layout(
 			ui.width,
 			len(notification_history.footer_task_ids),
+			reserved_right,
 		)
 		for task_index in 0 ..< task_layout.visible_count {
 			notification_id := notification_history.footer_task_ids[task_index]
@@ -10868,6 +11154,20 @@ build_ui_controls_for_scope :: proc(
 				)
 				break
 			}
+		}
+	}
+	when ODIN_DEBUG {
+		if include_footer && !ui.playback_fullscreen_active {
+			add_ax_element(
+				array,
+				element_class,
+				"Toggle development frame-time graph",
+				"AXButton",
+				dev_frame_badge_rect(ui.width),
+				.Dev_Frame_Stats,
+				flash_label = "frame statistics",
+				functional_name = "development frame statistics",
+			)
 		}
 	}
 	if scope == .Active && command_palette.is_open(&command_palette_state) {
@@ -12159,6 +12459,17 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		_ = select_source_hint(state.active_source, action.seconds)
 	case .Playback_Fullscreen_Toggle:
 		_ = toggle_playback_fullscreen()
+	case .Dev_Frame_Stats:
+		when ODIN_DEBUG {
+			if !dev_frame_metrics.active {
+				dev_frame_metrics.ignore_next_frame = true
+			}
+			dev_frame_metrics.graph_open = !dev_frame_metrics.graph_open
+			ui.needs_redraw = true
+			return true
+		} else {
+			return false
+		}
 	case .Start:
 		on_set_start(nil, nil, nil)
 	case .End:
@@ -14263,17 +14574,28 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	if ui.scale <= 0 {ui.scale = 1}
 	sync_transcript_playback()
 	normalize_scroll_offsets()
-	if metal_frame_should_render(
+	app_should_render := metal_frame_should_render(
 		ui.needs_redraw,
 		playback_active,
 		ui.video_frame_pending,
-	) {
+	)
+	diagnostic_redraw := false
+	when ODIN_DEBUG {
+		if !app_should_render && dev_frame_metrics_mark_idle_at(
+			&dev_frame_metrics,
+			time.tick_now(),
+		) {
+			diagnostic_redraw = true
+			ui.needs_redraw = true
+		}
+	}
+	if app_should_render || diagnostic_redraw {
 		msg_void_size(
 			ui.layer,
 			sel_registerName("setDrawableSize:"),
 			Size{ui.width * ui.scale, ui.height * ui.scale},
 		)
-		render_frame()
+		render_frame(app_should_render)
 	}
 	bpm_analysis_maybe_schedule_active()
 	ui_automation_advance()
