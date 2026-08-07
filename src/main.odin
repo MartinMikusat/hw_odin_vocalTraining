@@ -1162,6 +1162,7 @@ seek_seconds :: proc(
 	exact := false,
 ) {
 	if state.player == nil { return }
+	when ODIN_DEBUG {seek_started := perf_now()}
 	cancel_dance_count_in()
 	ui.playback_completion_pending = false
 	request_transcript_follow_to(seconds)
@@ -1170,6 +1171,10 @@ seek_seconds :: proc(
 	seek_video_seconds(seconds, warm_paused_frame, exact)
 	metal_audio_seek(seconds, resume)
 	if resume {dance_schedule_continuous_metronome(active_dance_clip(), seconds)}
+	when ODIN_DEBUG {
+		perf_pending_seek_count += 1
+		perf_pending_seek_ns += perf_now()-seek_started
+	}
 }
 
 scrub_player_by :: proc(delta: f64) {
@@ -4769,6 +4774,13 @@ jobs_shutdown :: proc() {
 video_clips_process_main :: proc(args := os.args) {
 	if !memory_init() { fmt.eprintln("Unable to initialize memory arenas"); return }
 	defer memory_destroy()
+	when ODIN_DEBUG {
+		if !perf_initialize() {
+			fmt.eprintln("Unable to initialize performance diagnostics")
+			return
+		}
+		defer perf_shutdown()
+	}
 	defer helper_statuses_destroy()
 	defer cli_library_release()
 	if error := match_sorter.search_context_init(

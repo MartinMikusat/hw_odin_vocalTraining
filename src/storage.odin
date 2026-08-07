@@ -925,7 +925,13 @@ database_load_legacy_state :: proc(
 	}
 	if !copied ||
 	   !database_prepare_legacy_schema_for_v6(migrated) ||
-	   !database_migrate_v5_to_v6(migrated) {
+	   !database_migrate_v5_to_v6(migrated) ||
+	   !database_migrate_v6_to_v7(migrated) ||
+	   !database_migrate_v7_to_v8(migrated) ||
+	   !database_migrate_v8_to_v9(migrated) ||
+	   !database_migrate_v9_to_v10(migrated) ||
+	   !database_migrate_v10_to_v11(migrated) ||
+	   !database_create_schema_v8(migrated) {
 		return false
 	}
 	return database_load_state(migrated, destination)
@@ -1120,7 +1126,6 @@ database_repair_legacy_vocal_clips :: proc(
 }
 
 database_migrate_v6_to_v7 :: proc(database: ^SQLite_DB) -> bool {
-	if !database_repair_legacy_vocal_clips(database) {return false}
 	return sqlite_execute(database, "PRAGMA user_version = 7")
 }
 
@@ -1220,7 +1225,8 @@ database_create_schema :: proc(database: ^SQLite_DB) -> bool {
 		version = 11
 	}
 	if version != 0 && version != LIBRARY_SCHEMA_VERSION {return false}
-	return database_create_schema_v8(database)
+	return database_create_schema_v8(database) &&
+	       database_repair_legacy_vocal_clips(database)
 }
 
 database_source_auth_browser_load :: proc(

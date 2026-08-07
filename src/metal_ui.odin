@@ -654,6 +654,8 @@ UI_Action_Kind :: enum {
 	Discard_Changes,
 	Waveform_Navigator,
 	Dev_Frame_Stats,
+	Dev_Performance_Select,
+	Dev_Performance_Save,
 }
 
 Modal_Discard_Target :: enum {
@@ -3388,7 +3390,17 @@ when ODIN_DEBUG {
 	}
 
 	dev_frame_graph_rect :: proc(width: f64) -> UI_Rect {
-		return {max(18, width-18-420), 36, min(420, width-36), 180}
+		return {max(18, width-18-520), 36, min(520, width-36), 238}
+	}
+
+	dev_frame_graph_plot_rect :: proc(width: f64) -> UI_Rect {
+		panel := dev_frame_graph_rect(width)
+		return {panel.x+12, panel.y+54, panel.w-24, panel.h-88}
+	}
+
+	dev_frame_save_rect :: proc(width: f64) -> UI_Rect {
+		panel := dev_frame_graph_rect(width)
+		return {panel.x+panel.w-112, panel.y+5, 100, 20}
 	}
 }
 
@@ -3748,23 +3760,18 @@ when ODIN_DEBUG {
 		panel := dev_frame_graph_rect(ui.width)
 		fill_overlay_rect(ctx, panel, theme.modal)
 		fill_overlay_border(ctx, panel, accent)
-		plot := UI_Rect{panel.x+12, panel.y+24, panel.w-24, panel.h-52}
+		plot := dev_frame_graph_plot_rect(ui.width)
 		fill_overlay_rect(ctx, plot, theme.field)
-		column_count := clamp(int(plot.w), 1, 396)
-		columns: [396]f64
-		now := time.tick_now()
-		history_worst := dev_frame_graph_columns_at(
-			&dev_frame_metrics,
-			now,
-			columns[:column_count],
-		)
+		column_count := clamp(int(plot.w), 1, 496)
+		samples: [496]Perf_Graph_Sample
+		history_worst := perf_graph_samples(samples[:column_count])
 		scale_ms := max(50.0, math.ceil(history_worst/10)*10)
 		column_width := plot.w/f64(column_count)
-		for interval_ms, column in columns[:column_count] {
-			if interval_ms <= 0 {continue}
-			height := min(interval_ms/scale_ms, 1)*plot.h
+		for sample, column in samples[:column_count] {
+			if sample.gap_ms <= 0 {continue}
+			height := min(sample.gap_ms/scale_ms, 1)*plot.h
 			color := accent
-			if interval_ms > 33.3 {color = warning}
+			if sample.gap_ms > 33.3 {color = warning}
 			fill_overlay_rect(
 				ctx,
 				{
@@ -3775,6 +3782,35 @@ when ODIN_DEBUG {
 				},
 				color,
 			)
+			cpu_height := min(sample.cpu_ms/scale_ms, 1)*plot.h
+			fill_overlay_rect(
+				ctx,
+				{
+					plot.x+f64(column)*column_width,
+					plot.y,
+					max(1/ui.scale, column_width/2),
+					cpu_height,
+				},
+				theme.ink,
+			)
+			gpu_height := min(sample.gpu_ms/scale_ms, 1)*plot.h
+			fill_overlay_rect(
+				ctx,
+				{
+					plot.x+f64(column)*column_width+column_width/2,
+					plot.y,
+					max(1/ui.scale, column_width/2),
+					gpu_height,
+				},
+				theme.muted,
+			)
+			if sample.sequence == perf_selected_sequence {
+				fill_overlay_border(
+					ctx,
+					{plot.x+f64(column)*column_width, plot.y, max(1, column_width), plot.h},
+					warning,
+				)
+			}
 		}
 		reference_intervals := [2]f64{16.7, 33.3}
 		for reference_ms in reference_intervals {
@@ -3801,13 +3837,27 @@ when ODIN_DEBUG {
 		draw_text_in_rect(
 			ctx,
 			font,
-			"16.7 MS / 60 FPS     33.3 MS / 30 FPS",
-			{panel.x+12, panel.y+4, panel.w-24, 18},
+			perf_selected_detail(),
+			{panel.x+12, panel.y+panel.h-48, panel.w-24, 18},
 			.Start,
 			.Center,
 			theme.muted,
 			8,
 		)
+		draw_text_in_rect(
+			ctx,
+			font,
+			"16.7 MS / 60 FPS     33.3 MS / 30 FPS",
+			{panel.x+12, panel.y+4, panel.w-132, 18},
+			.Start,
+			.Center,
+			theme.muted,
+			8,
+		)
+		button := dev_frame_save_rect(ui.width)
+		fill_overlay_rect(ctx, button, contains(button, ui.mouse) ? theme.row_hover : theme.field)
+		fill_overlay_border(ctx, button, accent)
+		draw_text_in_rect(ctx, font, "SAVE 10 S", button, .Center, .Center, accent, 8)
 	}
 }
 
@@ -7485,6 +7535,7 @@ build_player_waveform_band_geometry :: proc(
 	if !waveform_band_visible(waveform_runtime.band_view, band) {return}
 	pixel_scale := max(1, ui.scale)
 	columns := max(1, int(math.ceil(rect.w*pixel_scale)))
+	when ODIN_DEBUG {perf_waveform_columns += i64(columns)}
 	column_width := rect.w/f64(columns)
 	center_y := rect.y+rect.h/2
 	half_height := rect.h/2-3
@@ -7497,6 +7548,7 @@ build_player_waveform_band_geometry :: proc(
 		column_end := start+(end-start)*f64(column+1)/f64(columns)
 		peak_start := clamp(int(math.floor(column_start*entry.rate_hz)), first, last-1)
 		peak_end := clamp(int(math.ceil(column_end*entry.rate_hz)), peak_start+1, last)
+		when ODIN_DEBUG {perf_waveform_peaks += i64(peak_end-peak_start)}
 		minimum, maximum := f64(0), f64(0)
 		for band_peak in entry.peaks[peak_start:peak_end] {
 			peak := waveform_peak_for_band(band_peak, band)
@@ -7527,6 +7579,10 @@ build_player_waveform_geometry :: proc(
 	field, rule, beat: [4]f32,
 ) {
 	if rect.w <= 0 || rect.h <= 0 {return}
+	when ODIN_DEBUG {
+		waveform_started := perf_zone_started(.Waveform_Geometry)
+		defer perf_zone_record(.Waveform_Geometry, waveform_started)
+	}
 	push_rect(vertices, rect, field, "waveform")
 	center_y := rect.y+rect.h/2
 	push_rect(vertices, {rect.x, center_y, rect.w, 1}, rule, "waveform")
@@ -9171,6 +9227,7 @@ build_overlay_commands :: proc(modal_only := false) {
 			segment := state.transcripts.segments[transcript_index]
 			control := find_ui_control_by_action_and_index(.Transcript, transcript_index)
 			if control != nil {
+					when ODIN_DEBUG {perf_transcript_rows += 1}
 					row = control.rect
 					active := result_index == ui.transcript_active_match
 					draw_text_in_rect(
@@ -10024,6 +10081,10 @@ append_solid_vertices_to_ordered :: proc(vertices: []Solid_Vertex) {
 }
 
 append_video_to_ordered :: proc() {
+	when ODIN_DEBUG {
+		video_texture_started := perf_zone_started(.Video_Texture)
+		defer perf_zone_record(.Video_Texture, video_texture_started)
+	}
 	_, _, _, _, player, _, _, _, _, _, _ := layout_rects()
 	player_rect := player_content_rect(player)
 	if ui.playback_fullscreen_active {
@@ -10091,7 +10152,9 @@ build_ordered_frame :: proc(
 	build_overlay_commands(true)
 	ordered_overlay_active = false
 	append_solid_vertices_to_ordered(fullscreen_timeline)
+	when ODIN_DEBUG {text_flush_started := perf_zone_started(.Text_Flush)}
 	framework_coretext.flush(&ordered_text)
+	when ODIN_DEBUG {perf_zone_record(.Text_Flush, text_flush_started)}
 	ui.overlay_revision += 1
 	return true
 }
@@ -11168,6 +11231,28 @@ build_ui_controls_for_scope :: proc(
 				flash_label = "frame statistics",
 				functional_name = "development frame statistics",
 			)
+			if dev_frame_metrics.graph_open {
+				add_ax_element(
+					array,
+					element_class,
+					"Select performance frame",
+					"AXButton",
+					dev_frame_graph_plot_rect(ui.width),
+					.Dev_Performance_Select,
+					flash_label = "select performance frame",
+					functional_name = "development performance graph",
+				)
+				add_ax_element(
+					array,
+					element_class,
+					"Save last ten seconds of performance data",
+					"AXButton",
+					dev_frame_save_rect(ui.width),
+					.Dev_Performance_Save,
+					flash_label = "save performance capture",
+					functional_name = "save performance capture",
+				)
+			}
 		}
 	}
 	if scope == .Active && command_palette.is_open(&command_palette_state) {
@@ -12470,6 +12555,26 @@ activate_ui_action :: proc(action: UI_Action) -> bool {
 		} else {
 			return false
 		}
+	case .Dev_Performance_Select:
+		when ODIN_DEBUG {
+			plot := dev_frame_graph_plot_rect(ui.width)
+			if plot.w > 0 {
+				perf_select_graph_ratio((ui.mouse.x-plot.x)/plot.w)
+				ui.needs_redraw = true
+			}
+			return true
+		} else {return false}
+	case .Dev_Performance_Save:
+		when ODIN_DEBUG {
+			path, saved := perf_save_recent()
+			if saved {
+				ui_set_string(&ui.status, fmt.tprintf("Performance capture: %s", path))
+			} else {
+				ui_set_string(&ui.status, "Unable to save the performance capture")
+			}
+			ui.needs_redraw = true
+			return saved
+		} else {return false}
 	case .Start:
 		on_set_start(nil, nil, nil)
 	case .End:
@@ -12657,6 +12762,18 @@ build_command_palette_entries :: proc(allocator := context.temp_allocator) -> [d
 		palette_condition(none = PALETTE_CONTEXT_GLOBAL_MODAL),
 		"Unavailable while another modal owns application input",
 	)
+	when ODIN_DEBUG {
+		append_command_palette_entry(
+			&entries,
+			UI_Action{kind = .Dev_Performance_Save},
+			"Save recent performance capture",
+			"Write the preceding ten seconds of frame, CPU, and GPU diagnostics",
+			"Development",
+			[]string{"performance", "trace", "fps", "profiling", "diagnostics"},
+			palette_condition(none = PALETTE_CONTEXT_GLOBAL_MODAL),
+			"Unavailable while another modal owns application input",
+		)
+	}
 	for theme in UI_Theme {
 		name := ui_theme_name(theme)
 		current_theme_context := PALETTE_CONTEXT_LIGHT_THEME
@@ -13653,6 +13770,10 @@ on_metal_mouse_moved :: proc "c" (self: Id, command: Sel, event: Id) {
 on_metal_mouse_dragged :: proc "c" (self: Id, command: Sel, event: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	when ODIN_DEBUG {
+		drag_started := perf_now()
+		defer perf_drag_end(drag_started)
+	}
 	if ui.resize_edges != 0 {
 		resize_window_from_current_mouse()
 		return
@@ -14490,6 +14611,12 @@ metal_frame_should_render :: proc(
 on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	context = runtime.default_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	when ODIN_DEBUG {
+		perf_frame_begin(0)
+		defer perf_frame_end()
+		frame_update_started := perf_zone_started(.Frame_Update)
+		defer perf_zone_record(.Frame_Update, frame_update_started)
+	}
 	ui.frame_tick += 1
 	advance_paused_video_frame_warmup()
 	if ui.video_frame_pending &&
@@ -14525,6 +14652,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	} else {
 		ui.activity_tick = 0
 	}
+	when ODIN_DEBUG {playback_sync_started := perf_zone_started(.Playback_Sync)}
 	playback_active := state.player != nil &&
 	                   msg_f32(state.player, sel_registerName("rate")) > 0
 	completion_pending := ui.playback_completion_pending
@@ -14557,6 +14685,7 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 	playback_active = playback_active || ui.count_in_active
 	playback_fullscreen_tick(now_ms, playback_active)
 	playback_fullscreen_refresh_timestamp()
+	when ODIN_DEBUG {perf_zone_record(.Playback_Sync, playback_sync_started)}
 	frame := msg_rect(ui.view, sel_registerName("bounds"))
 	if ui.width != frame.size.width || ui.height != frame.size.height {
 		cancel_ui_flash()
@@ -14572,13 +14701,24 @@ on_metal_frame :: proc "c" (self: Id, command: Sel, timer: Id) {
 		}
 	}
 	if ui.scale <= 0 {ui.scale = 1}
+	when ODIN_DEBUG {transcript_sync_started := perf_zone_started(.Transcript_Sync)}
 	sync_transcript_playback()
+	when ODIN_DEBUG {perf_zone_record(.Transcript_Sync, transcript_sync_started)}
+	when ODIN_DEBUG {scroll_normalize_started := perf_zone_started(.Scroll_Normalize)}
 	normalize_scroll_offsets()
+	when ODIN_DEBUG {perf_zone_record(.Scroll_Normalize, scroll_normalize_started)}
 	app_should_render := metal_frame_should_render(
 		ui.needs_redraw,
 		playback_active,
 		ui.video_frame_pending,
 	)
+	when ODIN_DEBUG {
+		render_reasons := i64(0)
+		if ui.needs_redraw {render_reasons |= 1}
+		if playback_active {render_reasons |= 2}
+		if ui.video_frame_pending {render_reasons |= 4}
+		perf_counter(.Render_Reasons, render_reasons)
+	}
 	diagnostic_redraw := false
 	when ODIN_DEBUG {
 		if !app_should_render && dev_frame_metrics_mark_idle_at(

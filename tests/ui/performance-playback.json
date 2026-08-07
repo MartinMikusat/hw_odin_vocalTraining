@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "performance-playback-baseline",
+  "mutation": "persistent",
+  "setup": {
+    "workflow": "dancing",
+    "mode": "play",
+    "viewport": {"width": 1280, "height": 800}
+  },
+  "steps": [
+    {"op": "activate", "control": "select clip ui-test-clip"},
+    {"op": "wait", "condition": {"kind": "surface", "field": "media.loaded", "operator": "eq", "value": true}, "timeout_ms": 1000},
+    {"op": "activate", "control": "toggle loop"},
+    {"op": "activate", "control": "play pause clip"},
+    {"op": "hold", "timeout_ms": 10000},
+    {"op": "performance_capture"}
+  ]
+}

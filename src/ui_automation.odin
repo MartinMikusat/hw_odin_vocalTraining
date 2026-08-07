@@ -44,6 +44,7 @@ UI_Automation_Step :: struct {
 	condition: UI_Automation_Condition,
 	timeout_ms: int,
 	gpu_trace: bool,
+	seconds: f64,
 }
 
 UI_Automation_Scenario :: struct {
@@ -599,7 +600,15 @@ ui_automation_validate :: proc(
 					index+1,
 				)
 			}
-		case "capture":
+		case "hold":
+			if step.timeout_ms <= 0 {
+				return fmt.tprintf("Step %d requires a positive timeout_ms", index+1)
+			}
+		case "scrub":
+			if step.seconds < 0 {
+				return fmt.tprintf("Step %d requires non-negative seconds", index+1)
+			}
+		case "capture", "performance_capture":
 		case:
 			return fmt.tprintf(
 				"Step %d has an unknown operation: %s",
@@ -1187,6 +1196,28 @@ ui_automation_advance :: proc() {
 				)
 			}
 			return
+		case "hold":
+			if !runner.wait_started {
+				runner.wait_started = true
+				runner.wait_started_ms = numbered_action_time_ms()
+			}
+			if numbered_action_time_ms()-runner.wait_started_ms < i64(step.timeout_ms) {
+				return
+			}
+			runner.wait_ms += numbered_action_time_ms()-runner.wait_started_ms
+			runner.wait_started = false
+			runner.step_index += 1
+		case "scrub":
+			if state.player == nil || step.seconds > ui.player_duration {
+				ui_automation_finish_failure(
+					"scrub_unavailable",
+					fmt.tprintf("Step %d cannot seek to %.3f seconds", runner.step_index+1, step.seconds),
+				)
+				return
+			}
+			seek_seconds(step.seconds)
+			ui.needs_redraw = true
+			runner.step_index += 1
 		case "capture":
 			capture_started_ms := numbered_action_time_ms()
 			artifact, capture_error :=
@@ -1209,6 +1240,33 @@ ui_automation_advance :: proc() {
 			delete(artifact)
 			runner.capture_count += 1
 			runner.step_index += 1
+		case "performance_capture":
+			when ODIN_DEBUG {
+				capture_started_ms := numbered_action_time_ms()
+				artifact, captured := perf_save_recent()
+				runner.capture_ms += numbered_action_time_ms()-capture_started_ms
+				if !captured {
+					ui_automation_finish_failure(
+						"performance_capture_failed",
+						"The recent performance history could not be written",
+					)
+					return
+				}
+				delete(runner.last_artifact)
+				runner.last_artifact = strings.clone(
+					artifact,
+					mem_virtual.arena_allocator(runner.arena),
+				)
+				delete(artifact)
+				runner.capture_count += 1
+				runner.step_index += 1
+			} else {
+				ui_automation_finish_failure(
+					"performance_capture_unavailable",
+					"Performance capture requires a debug build",
+				)
+				return
+			}
 		}
 	}
 	if runner.scenario.mutation != "persistent" &&

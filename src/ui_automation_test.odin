@@ -62,6 +62,24 @@ ui_automation_schema_rejects_fixed_waits_and_invalid_mutation :: proc(
 }
 
 @(test)
+ui_automation_schema_accepts_performance_steps :: proc(t: ^testing.T) {
+	scenario := UI_Automation_Scenario{
+		schema_version = 1,
+		name = "performance",
+		mutation = "persistent",
+		setup = {viewport={width=1280, height=800}},
+		steps = []UI_Automation_Step{
+			{op="scrub", seconds=0.5},
+			{op="hold", timeout_ms=1000},
+			{op="performance_capture"},
+		},
+	}
+	testing.expect_value(t, ui_automation_validate(&scenario), "")
+	scenario.steps[0].seconds = -0.1
+	testing.expect(t, len(ui_automation_validate(&scenario)) > 0)
+}
+
+@(test)
 ui_automation_schema_rejects_unsafe_artifact_names :: proc(t: ^testing.T) {
 	scenario := UI_Automation_Scenario{
 		schema_version = 1,

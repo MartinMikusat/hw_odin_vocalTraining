@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "name": "performance-scrub-baseline",
+  "mutation": "persistent",
+  "setup": {
+    "workflow": "dancing",
+    "mode": "play",
+    "viewport": {"width": 1280, "height": 800}
+  },
+  "steps": [
+    {"op": "activate", "control": "select clip ui-test-clip"},
+    {"op": "wait", "condition": {"kind": "surface", "field": "media.loaded", "operator": "eq", "value": true}, "timeout_ms": 1000},
+    {"op": "scrub", "seconds": 0.10},
+    {"op": "scrub", "seconds": 0.80},
+    {"op": "scrub", "seconds": 0.20},
+    {"op": "scrub", "seconds": 0.70},
+    {"op": "scrub", "seconds": 0.30},
+    {"op": "scrub", "seconds": 0.60},
+    {"op": "scrub", "seconds": 0.40},
+    {"op": "scrub", "seconds": 0.50},
+    {"op": "hold", "timeout_ms": 1000},
+    {"op": "performance_capture"}
+  ]
+}

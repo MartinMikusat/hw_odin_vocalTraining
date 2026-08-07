@@ -8,6 +8,7 @@ Vocal and Dancing clips.
 Models used:
 
 - **gpt-5.6-sol**
+- **Cursor Grok 4.5**
 
 ## User guide
 
@@ -700,10 +701,16 @@ enabled. Press `Ctrl-C` to stop the watcher and app.
 
 The frame timer continues to poll jobs while the app is idle. It does not
 submit Metal work until playback or a UI change requires it.
-Development builds reserve the footer's lower-right corner for a frame-pacing
+Development builds reserve the footer's lower-right corner for a performance
 overlay. It reports the rendered FPS and the worst frame interval from the
-latest second. Select it to show or hide the preceding ten seconds of frame
-times. Release builds exclude the overlay and its measurement state.
+latest second. Select it to show or hide the preceding ten seconds of callback,
+CPU, and GPU timing. Select a graph column to inspect that frame's stage costs,
+draw counts, arena use, and seek or drag work. `Save 10 S` writes `summary.json`
+and a Chrome Trace Event `trace.json` under
+`~/Library/Application Support/hw_videoClips/performance-captures/`. The command
+palette exposes the same capture action. Instruments can record the matching
+`hw_videoClips.performance` signposts. Release builds exclude this measurement
+and export state.
 Pausing playback stops the audio node and engine. Resuming playback schedules
 audio from the position stored by `AVPlayer`.
 
@@ -788,6 +795,17 @@ The benchmark runs the ten-step warm scenario 20 times. It fails when the 95th
 percentile reaches 100 milliseconds. Its steps open and close Settings twice,
 so the gate measures typed action dispatch and control reconstruction. The
 visual check applies and verifies a fixed 1280 by 800 point viewport.
+
+Run the repeatable playback and seek baselines with:
+
+```sh
+./scripts/ui-performance.sh
+```
+
+The script drives the one-second fixture through the production playback and
+seek paths, prints CPU callback, callback-gap, and GPU percentiles, and prints
+each capture directory. The baseline records measurements; it does not impose a
+machine-specific performance threshold.
 
 Normal successful scenarios return compact JSON only. A failure writes the
 scenario, result, UI snapshot, Metal frame PNG, overlay PNG, ordered render

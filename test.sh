@@ -12,6 +12,7 @@ sqlite3 "$ROOT/testdata/library.sqlite3" ".backup '$TEST_SUPPORT/library.sqlite3
 PITCH_CAPTURE_OBJECT="$TEST_SUPPORT/pitch_capture.o"
 BPM_ANALYSIS_OBJECT="$TEST_SUPPORT/bpm_analysis.o"
 METRONOME_OBJECT="$TEST_SUPPORT/metronome.o"
+PERFORMANCE_OBJECT="$TEST_SUPPORT/performance.o"
 xcrun clang \
   -fobjc-arc \
   -fblocks \
@@ -39,6 +40,13 @@ xcrun clang \
   -Wall -Wextra -Werror -Wpedantic \
   -c "$ROOT/src/metronome.m" \
   -o "$METRONOME_OBJECT"
+xcrun clang \
+  -fobjc-arc \
+  -fblocks \
+  -mmacosx-version-min=13.0 \
+  -Wall -Wextra -Werror -Wpedantic \
+  -c "$ROOT/src/performance.m" \
+  -o "$PERFORMANCE_OBJECT"
 
 BPM_NO_AUDIO_FIXTURE="$TEST_SUPPORT/bpm-no-audio.mp4"
 ffmpeg \
@@ -64,7 +72,7 @@ odin test "$ROOT/src" \
   -collection:components="$ROOT/../hw_odin_ui_components" \
   -collection:task_queue="$ROOT/../hw_odin_concurrency_taskQueue" \
   -collection:ui_framework="$ROOT/../hw_odin_ui_framework" \
-  -extra-linker-flags:"$PITCH_CAPTURE_OBJECT $BPM_ANALYSIS_OBJECT $METRONOME_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics -framework ImageIO -framework Accelerate"
+  -extra-linker-flags:"$PITCH_CAPTURE_OBJECT $BPM_ANALYSIS_OBJECT $METRONOME_OBJECT $PERFORMANCE_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics -framework ImageIO -framework Accelerate"
 
 NORMALIZED_CLIP="$TEST_SUPPORT/normalized-clip.mp4"
 ffmpeg \

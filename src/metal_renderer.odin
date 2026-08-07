@@ -239,7 +239,12 @@ encode_frame_to_target :: proc(
 	)
 
 	redraw_requested := force_redraw || ui.needs_redraw || ui.overlay_revision == 0
+	when ODIN_DEBUG {controls_started := perf_zone_started(.Build_Controls)}
 	build_ui_controls(redraw_requested, frame_allocator)
+	when ODIN_DEBUG {
+		perf_zone_record(.Build_Controls, controls_started)
+		perf_counter(.Controls, i64(len(ui_build.controls)))
+	}
 	vertices, vertices_error := make([dynamic]Solid_Vertex, 0, 1024, frame_allocator)
 	if vertices_error != nil {arena_note_failure(&memory.frame_stats)}
 	fullscreen_timeline_vertices, timeline_vertices_error :=
@@ -249,14 +254,22 @@ encode_frame_to_target :: proc(
 	}
 	ordered_frame_ready := false
 	if vertices_error == nil && timeline_vertices_error == nil {
+		when ODIN_DEBUG {geometry_started := perf_zone_started(.Build_Geometry)}
 		build_geometry(&vertices)
 		build_playback_fullscreen_timeline_geometry(
 			&fullscreen_timeline_vertices,
 		)
+		when ODIN_DEBUG {perf_zone_record(.Build_Geometry, geometry_started)}
+		when ODIN_DEBUG {ordered_started := perf_zone_started(.Ordered_Frame)}
 		ordered_frame_ready = build_ordered_frame(
 			vertices[:],
 			fullscreen_timeline_vertices[:],
 		)
+		when ODIN_DEBUG {
+			perf_zone_record(.Ordered_Frame, ordered_started)
+			perf_counter(.Solid_Vertices, i64(len(vertices)+len(fullscreen_timeline_vertices)))
+			perf_counter(.Draw_Commands, i64(len(ordered_draw.trace)))
+		}
 	}
 
 	encoder := msg_id_id(
@@ -274,6 +287,7 @@ encode_frame_to_target :: proc(
 		pipeline = "ordered-ui",
 		vertex_count = len(ordered_draw.trace)*6,
 	)
+	when ODIN_DEBUG {metal_encode_started := perf_zone_started(.Metal_Encode)}
 	if ordered_frame_ready && !framework_metal.encode(
 		&ordered_renderer,
 		rawptr(encoder),
@@ -283,6 +297,7 @@ encode_frame_to_target :: proc(
 	) {
 		ordered_frame_ready = false
 	}
+	when ODIN_DEBUG {perf_zone_record(.Metal_Encode, metal_encode_started)}
 
 	msg_void(encoder, sel_registerName("endEncoding"))
 	return {
@@ -293,7 +308,9 @@ encode_frame_to_target :: proc(
 
 render_frame :: proc(record_dev_frame := true) {
 	if ui.layer == nil || ui.width <= 0 || ui.height <= 0 {return}
+	when ODIN_DEBUG {drawable_started := perf_zone_started(.Drawable_Wait)}
 	drawable := msg_id(ui.layer, sel_registerName("nextDrawable"))
+	when ODIN_DEBUG {perf_zone_record(.Drawable_Wait, drawable_started)}
 	if drawable == nil {return}
 	when ODIN_DEBUG {
 		if record_dev_frame {
@@ -314,8 +331,11 @@ render_frame :: proc(record_dev_frame := true) {
 		ui.needs_redraw = true
 		return
 	}
+	when ODIN_DEBUG {perf_track_command_buffer(command_buffer)}
+	when ODIN_DEBUG {commit_started := perf_zone_started(.Command_Commit)}
 	msg_void_id(command_buffer, sel_registerName("presentDrawable:"), drawable)
 	msg_void(command_buffer, sel_registerName("commit"))
+	when ODIN_DEBUG {perf_zone_record(.Command_Commit, commit_started)}
 	ui.render_count += 1
 	memory.frame_stats.high_water = max(memory.frame_stats.high_water, memory.frame.total_used)
 	ui.needs_redraw = !encoded.ordered_frame_ready

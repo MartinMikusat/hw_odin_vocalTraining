@@ -78,6 +78,7 @@ mkdir -p "$TEMP"
 PITCH_CAPTURE_OBJECT="$TEMP/pitch_capture.o"
 BPM_ANALYSIS_OBJECT="$TEMP/bpm_analysis.o"
 METRONOME_OBJECT="$TEMP/metronome.o"
+PERFORMANCE_LINK=""
 xcrun clang \
   -fobjc-arc \
   -fblocks \
@@ -105,6 +106,17 @@ xcrun clang \
   -Wall -Wextra -Werror -Wpedantic \
   -c "$ROOT/src/metronome.m" \
   -o "$METRONOME_OBJECT"
+if [ "$MODE" != "release" ]; then
+  PERFORMANCE_OBJECT="$TEMP/performance.o"
+  xcrun clang \
+    -fobjc-arc \
+    -fblocks \
+    -mmacosx-version-min=13.0 \
+    -Wall -Wextra -Werror -Wpedantic \
+    -c "$ROOT/src/performance.m" \
+    -o "$PERFORMANCE_OBJECT"
+  PERFORMANCE_LINK=" $PERFORMANCE_OBJECT"
+fi
 cd "$TEMP"
 odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
   -collection:match_sorter="$MATCH_SORTER_ROOT" \
@@ -113,7 +125,7 @@ odin build "$ROOT/src" -out:"$EXECUTABLE" "$@" \
   -collection:components="$COMPONENTS_ROOT" \
   -collection:task_queue="$TASK_QUEUE_ROOT" \
   -collection:ui_framework="$UI_FRAMEWORK_ROOT" \
-  -extra-linker-flags:"$PITCH_CAPTURE_OBJECT $BPM_ANALYSIS_OBJECT $METRONOME_OBJECT -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics -framework ImageIO -framework Accelerate"
+  -extra-linker-flags:"$PITCH_CAPTURE_OBJECT $BPM_ANALYSIS_OBJECT $METRONOME_OBJECT$PERFORMANCE_LINK -framework AppKit -framework Foundation -framework AVFoundation -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreMedia -framework Metal -framework QuartzCore -framework CoreVideo -framework CoreText -framework CoreGraphics -framework ImageIO -framework Accelerate"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/Icons/Iconoir"
 cp "$ICON_ROOT/xmark.svg" "$APP/Contents/Resources/Icons/Iconoir/xmark.svg"
